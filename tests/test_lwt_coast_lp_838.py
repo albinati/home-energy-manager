@@ -100,9 +100,9 @@ def test_lp_raw_mode_uses_lp_value_and_clamps(monkeypatch):
 
 
 @pytest.mark.parametrize("outdoor,indoor,expected", [
-    (10.0, 22.5, -3),     # 24.5 - 27 = -2.5 -> -3 (half away from zero)
+    (10.0, 22.5, -2),     # 24.5 - 27 = -2.5 -> floor(x + 0.5) = -2 (pipeline convention)
     (0.0, 21.0, -10),     # 23 - 35 = -12 -> clamped to the -10 floor
-    (14.0, 23.0, -1),     # 25 - 24 = +1 -> never positive on a coast slot
+    (14.0, 23.0, 0),      # 25 - 24 = +1 -> clamped to 0: a coast slot never boosts
 ])
 def test_lp_mode_physics_target(monkeypatch, outdoor, indoor, expected):
     monkeypatch.setitem(config._overrides, "DAIKIN_LWT_COAST_MODE", "lp")
@@ -112,10 +112,7 @@ def test_lp_mode_physics_target(monkeypatch, outdoor, indoor, expected):
     p = _plan(lwt=-9.0, indoor=[indoor] * 5)
     p.temp_outdoor_c = [outdoor] * 4
     got = set(_lp_offsets(p))
-    if expected == -1:
-        assert got <= {0, -1} and max(got) <= 0
-    else:
-        assert got == {expected}
+    assert got == {expected}
 
 
 def test_lp_mode_clamp_and_fallbacks(monkeypatch):
@@ -131,7 +128,7 @@ def test_lp_mode_clamp_and_fallbacks(monkeypatch):
     p2.indoor_temp_c = []
     assert lwt_coast.coast_target(p2, 0)["offset"] is None
     # live indoor fallback
-    assert lwt_coast.coast_target(p2, 0, 22.5)["offset"] == -3
+    assert lwt_coast.coast_target(p2, 0, 22.5)["offset"] == -2
 
 
 def test_heating_slots_unchanged_in_lp_mode(monkeypatch):
@@ -159,7 +156,7 @@ def test_physics_inverse_honours_range(monkeypatch):
     assert lwt_offset_from_space_kw(0.0, 5.0, lo=-8) == -8
 
 
-@pytest.mark.parametrize("mode,expected", [("setback", -2), ("lp_raw", -8), ("lp", -3)])
+@pytest.mark.parametrize("mode,expected", [("setback", -2), ("lp_raw", -8), ("lp", -2)])
 def test_wire_coast_slot_reaches_set_lwt_offset(monkeypatch, tmpdb, mode, expected):
     import src.state_machine as sm
     from src.daikin.models import DaikinDevice
@@ -395,12 +392,27 @@ def test_pump_off_delta():
     assert d["pump_off_n"] == 3 and d["pump_on_n"] == 2
 
 
-def test_k_estimate_from_heating_slots():
+def _bucket(kwh, lwt, n=8, dt=900.0, t0=1_000_000.0):
+    return {"kwh": kwh, "samples": [(t0 + k * dt, lwt) for k in range(n)]}
+
+
+def test_k_estimate_per_bucket_integrates_telemetry():
     from src.analytics.lwt_learning import estimate_k_kw_per_c
 
-    rows = [{"heating_kwh": 0.5, "lwt_actual_c": 33.0} for _ in range(6)]  # 1 kW / 15 K
-    k, n = estimate_k_kw_per_c(rows)
-    assert n == 6 and abs(k - 1.0 / 15.0) < 1e-3
+    # 8 samples x 15 min at LWT 33 (=15 K lift): 2 h x 15 K x k = kWh -> k = 1/15
+    # (the last sample reuses the previous gap, so the integral covers 8 x 0.25 h)
+    kwh = 15.0 * 2.0 * (1.0 / 15.0)
+    k, n = estimate_k_kw_per_c([_bucket(kwh, 33.0) for _ in range(3)])
+    assert n == 3 and abs(k - 1.0 / 15.0) < 1e-3
+
+
+def test_k_estimate_requires_samples_and_hot_water():
+    from src.analytics.lwt_learning import estimate_k_kw_per_c
+
+    assert estimate_k_kw_per_c([_bucket(1.0, 33.0, n=2)]) == (None, 0)        # < 3 samples
+    assert estimate_k_kw_per_c([_bucket(1.0, 19.5)]) == (None, 0)              # lwt <= 20
+    assert estimate_k_kw_per_c([_bucket(0.0, 33.0)]) == (None, 0)              # bucket did not heat
+    assert estimate_k_kw_per_c([{"kwh": None, "samples": []}]) == (None, 0)
 
 
 def test_prune_lwt_learning_log(monkeypatch, tmpdb):
@@ -432,3 +444,373 @@ def test_api_shape(monkeypatch, tmpdb):
     assert body["daily"][0]["ua_est_w_per_k"] == 190.0
     assert body["daily"][0]["ua_pinned_w_per_k"] == 200.0
     assert "slots" in body["yesterday"] and "coast_mode" in body
+
+
+# ── #839 review: H1 backstop <-> replan oscillation ─────────────────────────
+
+
+def _real_now():
+    return datetime.now(UTC).replace(second=0, microsecond=0)
+
+
+@pytest.fixture()
+def osc(monkeypatch, tmpdb):
+    """Real-clock backstop fixture (the hold is evaluated against wall time)."""
+    monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+    monkeypatch.setattr(config, "LWT_COMFORT_BACKSTOP_ENABLED", True)
+    monkeypatch.setattr(config, "LWT_COMFORT_BACKSTOP_TICKS", 2)
+    monkeypatch.setattr(config, "LWT_COMFORT_BACKSTOP_MARGIN_C", 0.5)
+    monkeypatch.setattr(config, "LWT_COMFORT_BACKSTOP_HOLD_MINUTES", 90, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", 4)   # the real default
+    lwt_coast.reset_backstop()
+    now = _real_now()
+    plan_date = now.date().isoformat()
+    rid = db.upsert_action(
+        plan_date=plan_date, start_time=(now - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        end_time=(now + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        device="daikin", action_type="lwt_preheat", params={"lwt_offset": -2, "lp_optimizer": True},
+        status="active",
+    )
+    calls = []
+    monkeypatch.setattr("src.daikin_bulletproof.apply_scheduled_daikin_params",
+                        lambda dev, client, params, trigger, **kw: calls.append(kw) or True)
+    monkeypatch.setattr("src.notifier.notify_risk", lambda msg, extra=None: None)
+    monkeypatch.setattr(db, "get_latest_indoor_reading", lambda max_age_minutes=30: {"temp_c": 10.0})
+    return now, plan_date, rid, calls
+
+
+def _fire(now, plan_date):
+    for _ in range(2):
+        out = lwt_coast.backstop_tick(now_utc=now, plan_date=plan_date, dev=MagicMock(),
+                                      client=MagicMock(), in_peak=False, replan_fn=None)
+    return out
+
+
+def _neg_rows(plan_date):
+    return [a for a in db.get_actions_for_plan_date(plan_date, device="daikin")
+            if a["action_type"] == "lwt_preheat" and (a.get("params") or {}).get("lwt_offset", 0) < 0
+            and a["status"] == "pending"]
+
+
+def test_backstop_then_replan_emits_no_negative_inside_hold(monkeypatch, osc):
+    now, plan_date, rid, calls = osc
+    out = _fire(now, plan_date)
+    assert out["fired"] and calls and calls[0].get("skip_if_matches") is False
+    hold = lwt_coast.get_hold_until()
+    assert hold is not None and abs((hold - now).total_seconds() - 90 * 60) < 5
+    assert space_heating_gate_state()["backstop_hold_until"] is not None
+    # replan: the LP still wants to coast across the whole horizon (live sensor now fresh/warm)
+    monkeypatch.setattr(db, "get_latest_indoor_reading", lambda max_age_minutes=30: None)
+    t0 = now.replace(minute=(now.minute // 30) * 30)
+    plan = _plan(n=12, start=t0, lwt=-8.0)
+    assert _write_lwt_preheat_actions(plan_date, plan, []) >= 1
+    rows = _neg_rows(plan_date)
+    assert rows, "negative coast must return after the hold"
+    for r in rows:
+        st = datetime.fromisoformat(r["start_time"].replace("Z", "+00:00"))
+        assert st >= hold - timedelta(minutes=30), (st, hold)
+        assert st + timedelta(minutes=30) > hold - timedelta(minutes=30)
+    first = min(datetime.fromisoformat(r["start_time"].replace("Z", "+00:00")) for r in rows)
+    assert first >= hold - timedelta(minutes=29)   # slot grid: first slot starting at/after the hold
+    # once the hold has expired the coast comes straight back at the first slot
+    db.set_kv("lwt_backstop_hold_until", (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    db.clear_actions_in_range("2000-01-01T00:00:00Z", "2100-01-01T00:00:00Z", device="daikin")
+    assert _write_lwt_preheat_actions(plan_date, plan, []) >= 1
+    first2 = min(datetime.fromisoformat(r["start_time"].replace("Z", "+00:00")) for r in _neg_rows(plan_date))
+    assert first2 == t0
+    assert space_heating_gate_state()["backstop_hold_until"] is None
+
+
+def test_hold_survives_restart_via_kv(osc):
+    now, plan_date, *_ = osc
+    _fire(now, plan_date)
+    lwt_coast.reset_backstop()          # simulated restart: process state gone, kv remains
+    assert lwt_coast.active_hold_until() is not None
+
+
+def test_hold_applies_to_tier_source_too(monkeypatch, osc):
+    from src.scheduler.lp_dispatch import _tier_offsets
+
+    now, plan_date, *_ = osc
+    _fire(now, plan_date)
+    t0 = now.replace(minute=(now.minute // 30) * 30)
+    plan = _plan(n=12, start=t0, bands=["peak"] * 12)
+    offs = _tier_offsets(plan, [], None)
+    hold = lwt_coast.get_hold_until()
+    for st, o in zip(plan.slot_starts_utc, offs):
+        if st < hold:
+            assert not o or o >= 0
+    assert any(o and o < 0 for st, o in zip(plan.slot_starts_utc, offs) if st >= hold)
+
+
+def test_dedupe_key_is_hold_start_not_row_start(monkeypatch, osc):
+    now, plan_date, rid, _ = osc
+    seen = []
+    monkeypatch.setattr("src.notifier.notify_risk", lambda msg, extra=None: seen.append(extra["warning_key"]))
+    _fire(now, plan_date)
+    assert seen == [f"lwt_backstop_{now.astimezone(ZoneInfo('Europe/London')):%Y-%m-%d_%H%M}"]
+
+
+def test_live_cold_guard_zeroes_negative_on_near_now_slot(monkeypatch, tmpdb):
+    now = _real_now()
+    plan = _plan(n=6, start=now.replace(minute=(now.minute // 30) * 30), lwt=-8.0)
+    guards = {}
+    cold = _lp_offsets(plan, 10.0, now_utc=now, guards=guards)     # far under any floor
+    assert cold[0] == 0 and guards.get("live_cold_guard", 0) >= 1
+    assert cold[-1] == -2                                           # far-future slot: untouched
+    warm = _lp_offsets(plan, 22.0, now_utc=now)
+    assert warm[0] == -2
+    assert _lp_offsets(plan, None, now_utc=now)[0] == -2            # no reading -> no guard
+
+
+def test_live_cold_guard_diff_telemetry(monkeypatch, tmpdb):
+    now = _real_now()
+    monkeypatch.setattr(db, "get_latest_indoor_reading", lambda max_age_minutes=30: {"temp_c": 10.0})
+    plan = _plan(n=6, start=now.replace(minute=(now.minute // 30) * 30), lwt=-8.0)
+    _write_lwt_preheat_actions(now.date().isoformat(), plan, [])
+    log = db.get_action_logs(device="daikin", action="lwt_source_diff")[0]
+    params = log["params"] if isinstance(log["params"], dict) else json.loads(log["params"])
+    assert params["guards"]["live_cold_guard"] >= 1
+
+
+# ── M1 / L6 backstop write semantics ─────────────────────────────────────────
+
+
+def test_backstop_apply_not_written_keeps_row_and_counter(monkeypatch, osc):
+    now, plan_date, rid, calls = osc
+    monkeypatch.setattr("src.daikin_bulletproof.apply_scheduled_daikin_params",
+                        lambda dev, client, params, trigger, **kw: False)
+    notified = []
+    monkeypatch.setattr("src.notifier.notify_risk", lambda msg, extra=None: notified.append(1))
+    out = _fire(now, plan_date)
+    assert not out["fired"] and lwt_coast._backstop_ticks >= 2          # still armed
+    assert db.get_action_by_id(rid)["status"] == "active"
+    assert notified == [] and lwt_coast.get_hold_until() is None
+    logs = db.get_action_logs(device="daikin", action="lwt_comfort_backstop")
+    assert logs and logs[0]["result"] == "skipped"
+
+
+def test_stale_reading_holds_the_counter(monkeypatch, osc):
+    now, plan_date, rid, calls = osc
+    lwt_coast.backstop_tick(now_utc=now, plan_date=plan_date, dev=MagicMock(), client=MagicMock(), in_peak=False)
+    assert lwt_coast._backstop_ticks == 1
+    monkeypatch.setattr(db, "get_latest_indoor_reading", lambda max_age_minutes=30: None)
+    lwt_coast.backstop_tick(now_utc=now, plan_date=plan_date, dev=MagicMock(), client=MagicMock(), in_peak=False)
+    assert lwt_coast._backstop_ticks == 1                               # held, not reset
+    monkeypatch.setattr(db, "get_latest_indoor_reading", lambda max_age_minutes=30: {"temp_c": 10.0})
+    assert lwt_coast.backstop_tick(now_utc=now, plan_date=plan_date, dev=MagicMock(),
+                                   client=MagicMock(), in_peak=False)["fired"]
+
+
+# ── H2 smoothing ─────────────────────────────────────────────────────────────
+
+
+def test_smoothing_bounds_spread_and_keeps_depth():
+    from src.scheduler.lp_dispatch import smooth_lp_offsets
+
+    out = smooth_lp_offsets([-3, -4, -5, -6, -7], 4)
+    assert len(set(out)) > 1 or out == [0] * 5    # never ONE mean block (-5 x5)
+    assert out != [-5] * 5
+    # heating -3 (cheap band) next to coast -7: never averaged, each keeps its value
+    seq = [-3] * 4 + [-7] * 4
+    heating = [True] * 4 + [False] * 4
+    assert smooth_lp_offsets(seq, 4, heating=heating, bands=["cheap"] * 4 + ["peak"] * 4) == seq
+    # same values, same flag, but a price-band change still ends the heating block
+    assert smooth_lp_offsets([2, 2, 2, 2, 3, 3, 3, 3], 4, heating=[True] * 8,
+                             bands=["cheap"] * 4 + ["standard"] * 4) == [2, 2, 2, 2, 3, 3, 3, 3]
+
+
+def test_coast_run_keeps_depth_with_real_min_block(monkeypatch):
+    """Forecast-driven coast depth (-3 early, -7 late) survives the real
+    MIN_BLOCK=4 filter instead of collapsing to a flat mean."""
+    from src.scheduler.lp_dispatch import _pairs_from_offsets, _smoothed_offsets
+
+    monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", 4)
+    plan = _plan(n=10, space=0.0)
+    seq = [-3] * 4 + [-5] * 1 + [-7] * 5
+    sm = _smoothed_offsets(seq, "lp", plan)
+    assert sm[:4] == [-3] * 4 and sm[5:] == [-7] * 5
+    assert sm[4] in (-3, -7)                      # the 1-slot -5 merged into a neighbour, not dropped
+    pairs = _pairs_from_offsets(plan, seq, source="lp")
+    assert sorted({a["params"]["lwt_offset"] for _r, a in pairs}) == [-7, -3]
+    # a coast run shorter than MIN_BLOCK is still dropped
+    assert _smoothed_offsets([-3, -3, -4], "lp", _plan(n=3)) == [0, 0, 0]
+
+
+# ── M5 absolute ceiling ──────────────────────────────────────────────────────
+
+
+def test_abs_max_ceiling_blocks_lift_on_heating_path(monkeypatch):
+    monkeypatch.setattr(config, "DAIKIN_LWT_ABS_MAX_C", 45.0, raising=False)
+    monkeypatch.setattr("src.physics.get_lwt_base_c", lambda t: 45.0 if t <= -5 else 36.0)
+    p = _plan(lwt=4.0, space=0.4)
+    p.temp_outdoor_c = [-5.0] * 4
+    assert set(_lp_offsets(p)) == {0}                 # curve already 45: no lift at all
+    p.temp_outdoor_c = [5.0] * 4
+    assert set(_lp_offsets(p)) == {4}                 # 36 + 4 = 40 < 45
+    p.lwt_offset_c = [5.0] * 4
+    monkeypatch.setattr("src.physics.get_lwt_base_c", lambda t: 42.0)
+    assert set(_lp_offsets(p)) == {3}                 # capped at 45 - 42
+
+
+def test_lp_optimizer_ceiling_mirrors_abs_max(monkeypatch):
+    from src.physics import get_daikin_heating_kw, get_lwt_base_c
+
+    monkeypatch.setattr(config, "DAIKIN_LWT_ABS_MAX_C", 30.0, raising=False)
+    t = 0.0
+    base = get_lwt_base_c(t)
+    lift = max(0, math.floor(30.0 - base + 0.5))
+    assert lift < 5   # the cap actually bites for the default curve at 0 C
+    # the dispatch rule and the plan's ceiling use the same arithmetic
+    assert get_daikin_heating_kw(t, lwt_offset_delta=lift) <= get_daikin_heating_kw(t, lwt_offset_delta=5)
+
+
+def test_heating_clamp_reaches_ten_when_configured(monkeypatch):
+    monkeypatch.setattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 10.0, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_LWT_ABS_MAX_C", 60.0, raising=False)
+    monkeypatch.setattr("src.physics.get_lwt_base_c", _curve)
+    p = _plan(lwt=14.0, space=0.4)
+    assert set(_lp_offsets(p)) == {10}
+    p.lwt_offset_c = [-14.0] * 4
+    monkeypatch.setattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -10.0, raising=False)
+    assert set(_lp_offsets(p)) == {-10}
+
+
+# ── L10 misc ─────────────────────────────────────────────────────────────────
+
+
+def test_coast_target_reads_the_configured_weather_curve(monkeypatch):
+    p = _plan(indoor=[21.0] * 5)
+    p.temp_outdoor_c = [5.0] * 4
+    monkeypatch.setattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -10.0, raising=False)
+    a = lwt_coast.coast_target(p, 0)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_HIGH_LWT_C", config.DAIKIN_WEATHER_CURVE_HIGH_LWT_C + 6)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_LOW_LWT_C", config.DAIKIN_WEATHER_CURVE_LOW_LWT_C + 6)
+    b = lwt_coast.coast_target(p, 0)
+    assert b["curve_lwt_c"] == a["curve_lwt_c"] + 6
+    assert b["offset"] < a["offset"] or a["offset"] == -10
+
+
+# ── M2 / L4 / L5 learning log ────────────────────────────────────────────────
+
+
+def test_run_id_is_stamped_with_the_producing_run(monkeypatch, tmpdb):
+    monkeypatch.setattr(db, "get_latest_indoor_reading", lambda max_age_minutes=30: None)
+    t0 = datetime(2026, 11, 4, 10, 0, tzinfo=UTC)
+    # a PREVIOUS run already in optimizer_log must not be what the rows point at
+    prev = db.log_optimizer_run({"run_at": "2026-11-04T09:00:00+00:00"})
+    plan = _plan(n=4, start=t0, lwt=-4.0)
+    _write_lwt_preheat_actions("2026-11-04", plan, [])
+    rows = db.get_lwt_learning_rows("2026-11-04T10:00:00Z", "2026-11-04T12:00:00Z")
+    assert all(r["run_id"] is None for r in rows)       # not the previous run's id
+    new = db.log_optimizer_run({"run_at": "2026-11-04T10:01:00+00:00"})
+    assert new != prev
+    assert lwt_coast.stamp_run_id(plan, new) == 4
+    rows = db.get_lwt_learning_rows("2026-11-04T10:00:00Z", "2026-11-04T12:00:00Z")
+    assert {r["run_id"] for r in rows} == {new}
+    # a later plan overwrites the rows and gets ITS run id
+    plan2 = _plan(n=4, start=t0, lwt=-6.0)
+    _write_lwt_preheat_actions("2026-11-04", plan2, [])
+    new2 = db.log_optimizer_run({"run_at": "2026-11-04T10:31:00+00:00"})
+    lwt_coast.stamp_run_id(plan2, new2)
+    assert {r["run_id"] for r in db.get_lwt_learning_rows("2026-11-04T10:00:00Z", "2026-11-04T12:00:00Z")} == {new2}
+
+
+def test_optimizer_stamps_run_id_after_logging():
+    import inspect
+
+    from src.scheduler import optimizer
+    src = inspect.getsource(optimizer)
+    assert src.index("run_id = db.log_optimizer_run(") < src.index("stamp_run_id(plan, run_id)")
+
+
+def test_plan_updated_at_moves_but_written_at_stays(monkeypatch, tmpdb):
+    monkeypatch.setattr(db, "get_latest_indoor_reading", lambda max_age_minutes=30: None)
+    t0 = datetime(2026, 11, 4, 10, 0, tzinfo=UTC)
+    _write_lwt_preheat_actions("2026-11-04", _plan(n=4, start=t0, lwt=-4.0), [])
+    r1 = db.get_lwt_learning_rows("2026-11-04T10:00:00Z", "2026-11-04T10:30:00Z")[0]
+    _write_lwt_preheat_actions("2026-11-04", _plan(n=4, start=t0, lwt=-6.0), [])
+    r2 = db.get_lwt_learning_rows("2026-11-04T10:00:00Z", "2026-11-04T10:30:00Z")[0]
+    assert r1["plan_updated_at_utc"] and r2["plan_updated_at_utc"] > r1["plan_updated_at_utc"]
+    assert r2["written_at_utc"] == r1["written_at_utc"]
+
+
+def test_offset_written_is_null_for_quota_dropped_slots(monkeypatch, tmpdb):
+    monkeypatch.setattr(db, "get_latest_indoor_reading", lambda max_age_minutes=30: None)
+    monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", 2)
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_COAST_MODE", "lp_raw")
+    monkeypatch.setattr("src.api_quota.quota_remaining", lambda vendor: 32)   # reserve 30 -> 1 pair
+    t0 = datetime(2026, 11, 4, 10, 0, tzinfo=UTC)
+    plan = _plan(n=8, start=t0, lwt=-4.0)
+    plan.lwt_offset_c = [-4.0, -4.0, 0.0, 0.0, -3.0, -3.0, -3.0, -3.0]
+    plan.space_electric_kwh = [0.0, 0.0, 0.4, 0.4, 0.0, 0.0, 0.0, 0.0]
+    _write_lwt_preheat_actions("2026-11-04", plan, [])
+    rows = db.get_lwt_learning_rows("2026-11-04T10:00:00Z", "2026-11-04T14:00:00Z")
+    got = [r["offset_written"] for r in rows]
+    assert got[:2] == [-4.0, -4.0]                       # kept pair
+    assert got[4:] == [None, None, None, None]           # second window dropped by the cap
+
+
+# ── M3 UA ────────────────────────────────────────────────────────────────────
+
+
+def _coast_rows(n, hk, off=-8, start=datetime(2026, 11, 3, 23, 0, tzinfo=UTC), t0=20.0, drop=0.1):
+    return [{"slot_time_utc": (start + timedelta(minutes=30 * i)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+             "indoor_real_c": t0 - drop * i, "outdoor_real_c": 5.0, "device_offset": off,
+             "heating_kwh": hk} for i in range(n)]
+
+
+def test_coast_requires_no_measured_heating():
+    from src.analytics.lwt_learning import estimate_ua_w_per_k
+
+    ua, n = estimate_ua_w_per_k(_coast_rows(8, 0.0), 16.5, tz=TZ)
+    assert n == 8 and ua and ua > 0
+    # negative offset but the pump drew heat -> NOT a coast slot
+    assert estimate_ua_w_per_k(_coast_rows(8, 0.3), 16.5, tz=TZ) == (None, 0)
+    # unmeasured heating (None) with a negative offset still counts
+    assert estimate_ua_w_per_k(_coast_rows(8, None), 16.5, tz=TZ)[1] == 8
+
+
+def test_night_ua_excludes_daytime_coasts():
+    from src.analytics.lwt_learning import estimate_ua_w_per_k
+
+    day = _coast_rows(8, 0.0, start=datetime(2026, 11, 3, 11, 0, tzinfo=UTC))
+    assert estimate_ua_w_per_k(day, 16.5, tz=TZ)[0] is not None
+    assert estimate_ua_w_per_k(day, 16.5, night_only=True, tz=TZ) == (None, 0)
+    night = _coast_rows(8, 0.0, start=datetime(2026, 11, 3, 23, 0, tzinfo=UTC))
+    assert estimate_ua_w_per_k(night, 16.5, night_only=True, tz=TZ)[1] == 8
+
+
+def test_daily_payload_carries_night_ua(monkeypatch, tmpdb):
+    from src.analytics import lwt_learning
+
+    day = date(2026, 11, 3)
+    _seed_synthetic_day(day, 200.0, 16.5)
+    monkeypatch.setattr("src.analytics.thermal_learning.get_building_thermal_mass_kwh_per_k", lambda: 16.5)
+    row = lwt_learning.run_for_day(day, TZ)
+    assert row["ua_est_night_w_per_k"] is not None and abs(row["ua_est_night_w_per_k"] - 200.0) < 25
+    assert db.get_lwt_learning_daily(2)[0]["payload"]["ua_est_night_w_per_k"] == row["ua_est_night_w_per_k"]
+
+
+def test_realised_fill_covers_the_last_local_slot_of_a_bst_day(monkeypatch, tmpdb):
+    from src.analytics import lwt_learning
+
+    day = date(2026, 7, 10)                               # BST: local 23:30 = 22:30Z
+    slot = datetime(2026, 7, 10, 22, 30, tzinfo=UTC)
+    with db._lock:
+        c = db.get_connection()
+        c.execute("INSERT INTO room_temperature_history (captured_at, room, temp_c) VALUES (?,?,?)",
+                  ("2026-07-10T22:40:00Z", "lounge", 21.3))
+        c.execute("INSERT INTO daikin_telemetry (fetched_at, source, outdoor_temp_c, lwt_actual_c) VALUES (?,?,?,?)",
+                  (slot.timestamp() + 600, "live", 12.0, 26.0))
+        c.execute("INSERT OR REPLACE INTO daikin_consumption_2hourly (date,bucket_idx,kwh_total,kwh_heating,kwh_dhw,source,fetched_at) "
+                  "VALUES (?,?,?,?,?,?,?)", (day.isoformat(), 11, 0.4, 0.4, 0.0, "t", "x"))
+        c.commit()
+        c.close()
+    lwt_learning.fill_realised(day, TZ)
+    r = db.get_lwt_learning_rows("2026-07-10T22:30:00Z", "2026-07-10T23:00:00Z")[0]
+    assert r["indoor_real_c"] == 21.3 and r["outdoor_real_c"] == 12.0 and r["lwt_actual_c"] == 26.0
+    assert abs(r["heating_kwh"] - 0.1) < 1e-6              # 0.4 kWh over the bucket's 4 slots
+    # and the slot after local midnight belongs to the NEXT day, untouched
+    assert db.get_lwt_learning_rows("2026-07-10T23:00:00Z", "2026-07-10T23:30:00Z") == []

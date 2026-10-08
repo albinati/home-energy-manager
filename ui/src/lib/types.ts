@@ -1545,6 +1545,7 @@ export interface LwtLearningDaily {
   n_coast_slots: number | null;
   n_heat_slots: number | null;
   ua_est_w_per_k: number | null;
+  ua_est_night_w_per_k?: number | null;
   k_est_kw_per_c: number | null;
   pred_err_mean_c: number | null;
   pred_err_p90_c: number | null;

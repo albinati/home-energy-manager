@@ -46,7 +46,9 @@ export function LwtLearningCard() {
         <h2>LWT learning</h2>
         <span class="muted">coast mode {d?.coast_mode ?? "—"} · pinned UA {d ? n1(d.ua_pinned_w_per_k, 0) : "—"} W/K</span>
       </header>
-      {rows.length === 0 ? (
+      {res.error && !d ? (
+        <p class="muted insights-empty lwtl-error">Could not load LWT learning: {res.error.message}</p>
+      ) : rows.length === 0 ? (
         <p class="muted insights-empty">No learning days yet (first summary after 04:40 UTC).</p>
       ) : (
         <div class="lwtl-scroll">
@@ -55,7 +57,8 @@ export function LwtLearningCard() {
               <tr>
                 <th>Day</th>
                 <th class="num">Coast slots</th>
-                <th class="num">UA est W/K</th>
+                <th class="num">UA night W/K</th>
+                <th class="num">UA all-coast W/K</th>
                 <th class="num">UA pinned</th>
                 <th class="num">k est kW/°C</th>
                 <th class="num">k pinned</th>
@@ -68,6 +71,7 @@ export function LwtLearningCard() {
                 <tr key={r.date}>
                   <td>{r.date.slice(5)}</td>
                   <td class="num">{r.n_coast_slots ?? "—"}</td>
+                  <td class="num">{n1(r.ua_est_night_w_per_k, 0)}</td>
                   <td class="num">{n1(r.ua_est_w_per_k, 0)}</td>
                   <td class="num">{n1(r.ua_pinned_w_per_k, 0)}</td>
                   <td class="num">{n1(r.k_est_kw_per_c, 3)}</td>

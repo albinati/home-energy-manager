@@ -76,7 +76,7 @@ def coast_target(
 
     Water just above the predicted room temperature cannot add heat, so the
     compressor stays off: ``coast_lwt = indoor_pred + DAIKIN_LWT_COAST_DELTA_C``;
-    ``offset = round(coast_lwt - curve_lwt)`` (half away from zero) clamped to
+    ``offset = floor(coast_lwt - curve_lwt + 0.5)`` clamped to
     ``[DAIKIN_LWT_LP_OFFSET_MIN, 0]`` (a coast slot never boosts). Indoor falls
     back to the live reading; with neither, ``offset`` is ``None`` (caller uses
     the setback value). ``curve_lwt`` = the weather-curve LWT at the forecast
@@ -100,7 +100,7 @@ def coast_target(
     res["coast_target_lwt_c"] = round(target, 2)
     lo = int(max(-10.0, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
     x = target - curve
-    off = -int(math.floor(-x + 0.5))
+    off = int(math.floor(x + 0.5))  # pipeline convention (floor(x + 0.5)), as _lp_offsets
     res["offset"] = max(lo, min(0, off))
     return res
 
@@ -125,11 +125,14 @@ def record_planned(
         n = len(plan.slot_starts_utc)
         if n == 0:
             return 0
-        run_id = None
+        # The optimizer_log row for THIS plan does not exist yet (dispatch runs
+        # before ``log_optimizer_run``): rows carry a plan token and the optimizer
+        # stamps ``run_id`` afterwards (``stamp_run_id``).
+        token = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         try:
-            run_id = db.find_latest_optimizer_run_id()
+            plan.lwt_learning_token = token
         except Exception:
-            run_id = None
+            pass
         traj = list(plan.indoor_temp_c or [])
         bands = list(plan.price_band or [])
         curve = config.DAIKIN_COP_CURVE
@@ -164,7 +167,8 @@ def record_planned(
                 wo = written_offsets[i]
             rows.append({
                 "slot_time_utc": st.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "run_id": run_id,
+                "run_id": None,
+                "plan_updated_at_utc": token,
                 "source": source_used,
                 "coast_mode": coast_mode,
                 "offset_lp_raw": float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else None,
@@ -186,7 +190,54 @@ def record_planned(
         return 0
 
 
+def stamp_run_id(plan: Any, run_id: int | None) -> int:
+    """Point the learning-log rows written for ``plan`` at the optimizer run that
+    produced them. Never raises."""
+    try:
+        token = getattr(plan, "lwt_learning_token", None)
+        if token and run_id is not None:
+            return db.stamp_lwt_learning_run_id(str(token), int(run_id))
+    except Exception:
+        logger.debug("lwt_learning run_id stamp failed", exc_info=True)
+    return 0
+
+
 # ------------------------------------------------------------------ backstop
+_HOLD_KEY = "lwt_backstop_hold_until"
+
+
+def get_hold_until() -> datetime | None:
+    """End of the post-backstop negative-offset hold (UTC), persisted in
+    ``kv_state`` so it survives a restart. ``None`` when unset/unreadable."""
+    try:
+        raw = db.get_kv(_HOLD_KEY)
+        if not raw:
+            return None
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except Exception:
+        return None
+
+
+def active_hold_until(now_utc: datetime | None = None) -> datetime | None:
+    """The hold end if it is still in the future, else ``None``."""
+    h = get_hold_until()
+    if h is None:
+        return None
+    return h if h > (now_utc or datetime.now(UTC)) else None
+
+
+def _set_hold(until: datetime) -> None:
+    try:
+        db.set_kv(_HOLD_KEY, until.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        logger.warning("lwt backstop: could not persist hold", exc_info=True)
+
+
+def slot_in_hold(slot_start_utc: datetime, hold_until: datetime | None) -> bool:
+    return hold_until is not None and slot_start_utc < hold_until
+
+
 def _active_negative_row(plan_date: str, now_utc: datetime) -> dict[str, Any] | None:
     try:
         d0 = datetime.fromisoformat(plan_date).date()
@@ -248,8 +299,7 @@ def backstop_tick(
             max_age_minutes=int(getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30))
         )
         if reading is None or reading.get("temp_c") is None:
-            _backstop_ticks = 0
-            return out
+            return out  # stale/absent sensor: HOLD the counter (neither advance nor reset)
         indoor = float(reading["temp_c"])
         floor = comfort_floor_c(now_utc, in_peak)
         margin = float(getattr(config, "LWT_COMFORT_BACKSTOP_MARGIN_C", 0.5))
@@ -267,8 +317,14 @@ def backstop_tick(
         from ..daikin_bulletproof import apply_scheduled_daikin_params
 
         offset_was = float((row.get("params") or {}).get("lwt_offset"))
+        log_params = {"indoor": indoor, "floor": floor, "margin": margin,
+                      "offset_was": offset_was, "row_id": int(row["id"])}
         try:
-            apply_scheduled_daikin_params(dev, client, {"lwt_offset": 0}, trigger="lwt_backstop")
+            # skip_if_matches=False: the device may already read offset 0 (cached
+            # state) while the active row is still negative — we must still act.
+            wrote = apply_scheduled_daikin_params(
+                dev, client, {"lwt_offset": 0}, trigger="lwt_backstop", skip_if_matches=False,
+            )
         except (DaikinError, ValueError) as e:
             logger.warning("lwt comfort backstop write failed: %s", e)
             db.log_action(
@@ -278,19 +334,30 @@ def backstop_tick(
                 result="failure", trigger="heartbeat", error_msg=str(e),
             )
             return out  # ticks stay armed → retried next tick
+        if not wrote:
+            # passive / read-only / nothing sent: do NOT claim the offset was
+            # cancelled — keep the counter armed and retry next tick.
+            db.log_action(
+                device="daikin", action="lwt_comfort_backstop", params=log_params,
+                result="skipped", trigger="heartbeat",
+                error_msg="apply_scheduled_daikin_params did not write (passive/read_only/unchanged)",
+            )
+            return out
         db.mark_action(int(row["id"]), "completed", error_msg="comfort_backstop")
         _backstop_ticks = 0
         out["fired"] = True
+        hold_minutes = max(0, int(getattr(config, "LWT_COMFORT_BACKSTOP_HOLD_MINUTES", 90)))
+        hold_until = now_utc + timedelta(minutes=hold_minutes)
+        _set_hold(hold_until)
+        out["hold_until"] = hold_until.isoformat().replace("+00:00", "Z")
 
         db.log_action(
             device="daikin", action="lwt_comfort_backstop",
-            params={"indoor": indoor, "floor": floor, "margin": margin,
-                    "offset_was": offset_was, "row_id": int(row["id"])},
+            params={**log_params, "hold_until": out["hold_until"]},
             result="ok", trigger="heartbeat",
         )
         try:
-            st = datetime.fromisoformat(str(row["start_time"]).replace("Z", "+00:00")).astimezone(_tz())
-            key = f"lwt_backstop_{st:%Y-%m-%d_%H%M}"
+            key = f"lwt_backstop_{now_utc.astimezone(_tz()):%Y-%m-%d_%H%M}"  # hold start
             if not db.is_warning_acknowledged(key):
                 from ..notifier import notify_risk
 

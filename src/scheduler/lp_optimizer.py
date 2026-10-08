@@ -439,8 +439,18 @@ def solve_lp(
     lwt_offset_max = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0))
     # #808: when the LP's own offsets drive the device, the plan must not
     # assume more lift than the hardware clamp lets it apply.
-    if str(getattr(config, "DAIKIN_LWT_SOURCE", "tier") or "tier").lower() == "lp":
+    _lp_src = str(getattr(config, "DAIKIN_LWT_SOURCE", "tier") or "tier").lower() == "lp"
+    if _lp_src:
         lwt_offset_max = min(lwt_offset_max, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5.0)))
+    _abs_max = float(getattr(config, "DAIKIN_LWT_ABS_MAX_C", 45.0))
+
+    def _slot_lift(t: float) -> float:
+        """Max lift the device will grant at outdoor ``t``: the LP offset clamp,
+        further capped so curve_lwt + lift <= DAIKIN_LWT_ABS_MAX_C (mirrors
+        ``lp_dispatch._lp_offsets`` — the plan must not assume lift it won't get)."""
+        if not _lp_src:
+            return lwt_offset_max
+        return min(lwt_offset_max, float(max(0, math.floor(_abs_max - get_lwt_base_c(t) + 0.5))))
 
     # Per-slot physics-consistent bounds for e_space from the climate curve.
     # floor: compressor draw at zero offset (natural curve point).
@@ -451,7 +461,7 @@ def solve_lp(
         for t in t_out
     ]
     space_ceil_kwh = [
-        min(get_daikin_heating_kw(t, lwt_offset_delta=lwt_offset_max) * slot_h, max_hp_kwh_per_slot)
+        min(get_daikin_heating_kw(t, lwt_offset_delta=_slot_lift(t)) * slot_h, max_hp_kwh_per_slot)
         for t in t_out
     ]
 

@@ -1467,6 +1467,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             slot_time_utc   TEXT PRIMARY KEY,
             run_id          INTEGER,
             written_at_utc  TEXT,
+            plan_updated_at_utc TEXT,
             source          TEXT,
             coast_mode      TEXT,
             offset_lp_raw   REAL,
@@ -1491,6 +1492,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             filled_at_utc   TEXT
         )"""
     )
+    lwt_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(lwt_learning_log)")}
+    if lwt_cols and "plan_updated_at_utc" not in lwt_cols:
+        conn.execute("ALTER TABLE lwt_learning_log ADD COLUMN plan_updated_at_utc TEXT")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS lwt_learning_daily (
             date            TEXT PRIMARY KEY,
@@ -5174,7 +5178,7 @@ def get_latest_lp_inputs_for_plan_date(plan_date: str) -> dict[str, Any] | None:
 # ── #838: LWT learning log ────────────────────────────────────────────────
 
 _LWT_PLANNED_COLS = (
-    "run_id", "source", "coast_mode", "offset_lp_raw", "offset_written",
+    "run_id", "plan_updated_at_utc", "source", "coast_mode", "offset_lp_raw", "offset_written",
     "indoor_pred_c", "floor_c", "margin_c", "outdoor_fc_c", "e_space_kwh",
     "cop_space", "price_band", "curve_lwt_c", "coast_target_lwt_c", "coast_delta_c",
 )
@@ -5202,6 +5206,7 @@ def upsert_lwt_learning_planned(rows: list[dict[str, Any]]) -> int:
                 d = {c: r.get(c) for c in _LWT_PLANNED_COLS}
                 d["slot_time_utc"] = r["slot_time_utc"]
                 d["written_at_utc"] = now_iso
+                d["plan_updated_at_utc"] = r.get("plan_updated_at_utc") or now_iso
                 conn.execute(
                     f"""INSERT INTO lwt_learning_log (slot_time_utc, written_at_utc, {cols})
                         VALUES (:slot_time_utc, :written_at_utc, {ph})
@@ -5214,6 +5219,22 @@ def upsert_lwt_learning_planned(rows: list[dict[str, Any]]) -> int:
         finally:
             conn.close()
     return n
+
+
+def stamp_lwt_learning_run_id(plan_token: str, run_id: int) -> int:
+    """Set ``run_id`` on the planned rows written by the plan carrying ``plan_token``
+    (``plan_updated_at_utc``) — the optimizer log row only exists AFTER dispatch."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "UPDATE lwt_learning_log SET run_id=? WHERE plan_updated_at_utc=? AND filled_at_utc IS NULL",
+                (int(run_id), str(plan_token)),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+        finally:
+            conn.close()
 
 
 def update_lwt_learning_realised(slot_time_utc: str, fields: dict[str, Any]) -> bool:

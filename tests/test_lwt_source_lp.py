@@ -172,12 +172,17 @@ def test_smooth_lp_offsets_blockifies_by_sign():
     fragments and restore writes. Sign blocks keep the boost whole, at the
     block's mean."""
     seq = [3, 5, 5, 4, 5, 0, -2, -3, -2, -2, None, None]
-    assert smooth_lp_offsets(seq, 4) == [4, 4, 4, 4, 4, 0, -2, -2, -2, -2, None, None]
+    # (#838 H2) a block's spread is bounded at < 2 degC from its FIRST slot, so the
+    # leading +3 is split off from the +5 plateau (1 slot < min_block -> dropped)
+    assert smooth_lp_offsets(seq, 4) == [0, 5, 5, 5, 5, 0, -2, -2, -2, -2, None, None]
+    assert smooth_lp_offsets([3, 3, 4, 4, 3, 0, -2, -3, -2, -2], 4) == [3, 3, 3, 3, 3, 0, -2, -2, -2, -2]
     assert smooth_lp_offsets([3, 4, 0, 0, 5, 5, 5, 5], 4) == [0, 0, 0, 0, 5, 5, 5, 5]
     # a +5 pre-heat followed by a +1 top-up stays two blocks (split at |Δ| ≥ 2)
     assert smooth_lp_offsets([5] * 6 + [1] * 8, 4) == [5] * 6 + [1] * 8
-    # a monotone ramp keeps its energy (mean 3), not its smallest value
-    assert smooth_lp_offsets([1, 2, 3, 4, 5], 4) == [3] * 5
+    # a monotone ramp is no longer flattened to one mean block (#838 H2): each
+    # <2 degC-spread piece is too short for min_block, so it is dropped
+    assert smooth_lp_offsets([1, 2, 3, 4, 5], 4) == [0] * 5
+    assert smooth_lp_offsets([1, 1, 2, 2, 2, 3, 3], 4) == [2, 2, 2, 2, 2, 0, 0]
     assert smooth_lp_offsets([1, 2, 3], 1) == [1, 2, 3]  # min_block 1: as-is
 
 

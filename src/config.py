@@ -982,6 +982,12 @@ class Config:
     LWT_COMFORT_BACKSTOP_ENABLED: bool = os.getenv("LWT_COMFORT_BACKSTOP_ENABLED", "true").lower() in ("true", "1", "yes")
     LWT_COMFORT_BACKSTOP_MARGIN_C: float = float(os.getenv("LWT_COMFORT_BACKSTOP_MARGIN_C", "0.5"))
     LWT_COMFORT_BACKSTOP_TICKS: int = int(os.getenv("LWT_COMFORT_BACKSTOP_TICKS", "2"))
+    # After the backstop fires, negative offsets are suppressed on slots starting
+    # before now + this many minutes (anti backstop<->replan oscillation).
+    LWT_COMFORT_BACKSTOP_HOLD_MINUTES: int = int(os.getenv("LWT_COMFORT_BACKSTOP_HOLD_MINUTES", "90"))
+    # Absolute LWT ceiling on the LP heating path (backup-heater exposure): a
+    # positive offset never lifts the water above this (curve_lwt + offset <= max).
+    DAIKIN_LWT_ABS_MAX_C: float = float(os.getenv("DAIKIN_LWT_ABS_MAX_C", "45"))
     LWT_LEARNING_ENABLED: bool = os.getenv("LWT_LEARNING_ENABLED", "true").lower() in ("true", "1", "yes")
     LWT_LEARNING_RETENTION_DAYS: int = int(os.getenv("LWT_LEARNING_RETENTION_DAYS", "120"))
     # LP_W3_PEAK_COAST_DELTA_C is a RUNTIME setting since #820 (property below):

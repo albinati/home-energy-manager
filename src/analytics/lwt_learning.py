@@ -5,8 +5,9 @@ for yesterday's local day and estimate the building UA and the pump's k.
   consecutive coast slots the indoor temperature follows
   ``T(t) - To = (T0 - To) * exp(-UA/C * t)``  =>  ``UA = C * ln((T0-To)/(T1-To)) / dt``
   (C = learned thermal mass kWh/K, UA reported in W/K).
-* k from heating slots: the LP pump model is ``kW = k * (LWT - 18)``, so
-  ``k = heating_kw / (lwt_actual - 18)`` (median over heating slots).
+* k per 2 h bucket: the LP pump model is ``kW = k * (LWT - 18)``, so
+  ``k = sum(kWh) / sum((lwt - 18) * dt)`` over the bucket's telemetry (median over
+  buckets). UA is reported for all coasts AND for local-night coasts only.
 * Prediction error: planned indoor trajectory minus realised indoor.
 """
 from __future__ import annotations
@@ -129,15 +130,36 @@ def fill_realised(day: date, tz: ZoneInfo | None = None) -> int:
 
 
 def _is_coast(r: dict[str, Any]) -> bool:
+    """A coast slot = the pump really stayed (nearly) off: measured heating
+    ``None`` or <= COAST_HEATING_KWH_EPS, AND (negative device offset OR measured
+    ~0 heating). A negative offset alone is not enough — a slot that drew heat
+    while the offset was negative says nothing about passive cooling (M3)."""
     off = r.get("device_offset")
     hk = r.get("heating_kwh")
+    if hk is not None and float(hk) > COAST_HEATING_KWH_EPS:
+        return False
     if off is not None and float(off) < 0:
         return True
     return hk is not None and float(hk) <= COAST_HEATING_KWH_EPS
 
 
-def estimate_ua_w_per_k(rows: list[dict[str, Any]], c_kwh_per_k: float) -> tuple[float | None, int]:
-    """UA (W/K) from runs of consecutive coast slots. Returns (ua, n_coast_slots)."""
+def _is_night_slot(r: dict[str, Any], tz: ZoneInfo) -> bool:
+    ts = datetime.fromisoformat(r["slot_time_utc"].replace("Z", "+00:00"))
+    h = ts.astimezone(tz).hour
+    ns = int(getattr(config, "LP_W3_NIGHT_START_HOUR_LOCAL", 22))
+    ne = int(getattr(config, "LP_W3_NIGHT_END_HOUR_LOCAL", 7))
+    return (h >= ns or h < ne) if ns > ne else (ns <= h < ne)
+
+
+def estimate_ua_w_per_k(
+    rows: list[dict[str, Any]], c_kwh_per_k: float, *, night_only: bool = False,
+    tz: ZoneInfo | None = None,
+) -> tuple[float | None, int]:
+    """UA (W/K) from runs of consecutive coast slots. Returns (ua, n_coast_slots).
+
+    ``night_only``: only slots inside the local night window (22-07, PV ~ 0) —
+    daytime solar gain biases the passive-cooling fit low."""
+    tz = tz or _tz()
     sum_log = 0.0
     sum_dt = 0.0
     n_coast = 0
@@ -159,6 +181,8 @@ def estimate_ua_w_per_k(rows: list[dict[str, Any]], c_kwh_per_k: float) -> tuple
     for r in rows:
         ts = datetime.fromisoformat(r["slot_time_utc"].replace("Z", "+00:00"))
         ok = _is_coast(r) and r.get("indoor_real_c") is not None
+        if ok and night_only and not _is_night_slot(r, tz):
+            ok = False
         contiguous = prev is not None and (ts - prev) == timedelta(minutes=SLOT_MIN)
         if ok:
             n_coast += 1
@@ -174,14 +198,59 @@ def estimate_ua_w_per_k(rows: list[dict[str, Any]], c_kwh_per_k: float) -> tuple
     return round(c_kwh_per_k * (sum_log / sum_dt) * 1000.0, 1), n_coast
 
 
-def estimate_k_kw_per_c(rows: list[dict[str, Any]]) -> tuple[float | None, int]:
-    ks = []
-    for r in rows:
-        hk, lw = r.get("heating_kwh"), r.get("lwt_actual_c")
-        if hk is None or lw is None or float(hk) <= COAST_HEATING_KWH_EPS or float(lw) - 18.0 < 2.0:
+K_MIN_SAMPLES = 3        # telemetry samples needed in a 2 h bucket
+K_MIN_LWT_C = 20.0       # ignore samples with the water barely above idle
+K_MIN_BUCKET_KWH = 0.05  # bucket must really have heated
+K_MAX_DT_H = 0.5         # a telemetry gap longer than this is not integrated over
+
+
+def estimate_k_kw_per_c(buckets: list[dict[str, Any]]) -> tuple[float | None, int]:
+    """Pump ``k`` (kW per degC of ``LWT - 18``) at 2-HOUR BUCKET granularity.
+
+    The heating kWh counter is quantised and only resolved per 2 h bucket, so a
+    per-slot ratio is noise (M4). Per bucket: ``k = sum(kWh) / sum_i((lwt_i - 18) * dt_i)``
+    over the bucket's own telemetry samples (``lwt_actual > K_MIN_LWT_C``, >= K_MIN_SAMPLES
+    samples, dt = time to the next sample capped at K_MAX_DT_H). Returns
+    (median k, n buckets used). ``buckets`` = ``[{"kwh": float, "samples": [(epoch_s, lwt_c), ...]}]``."""
+    ks: list[float] = []
+    for b in buckets:
+        kwh = b.get("kwh")
+        if kwh is None or float(kwh) < K_MIN_BUCKET_KWH:
             continue
-        ks.append((float(hk) / (SLOT_MIN / 60.0)) / (float(lw) - 18.0))
+        samples = sorted((float(t), float(l)) for t, l in b.get("samples", []) if l is not None)
+        if len(samples) < K_MIN_SAMPLES:
+            continue
+        gaps = [(samples[i + 1][0] - samples[i][0]) / 3600.0 for i in range(len(samples) - 1)]
+        last_dt = gaps[-1] if gaps else K_MAX_DT_H
+        denom = 0.0
+        n_ok = 0
+        for i, (_t, lwt) in enumerate(samples):
+            dt = min(K_MAX_DT_H, gaps[i] if i < len(gaps) else last_dt)
+            if lwt > K_MIN_LWT_C and dt > 0:
+                denom += (lwt - 18.0) * dt
+                n_ok += 1
+        if n_ok < K_MIN_SAMPLES or denom <= 0:
+            continue
+        ks.append(float(kwh) / denom)
     return (round(float(median(ks)), 4) if ks else None), len(ks)
+
+
+def k_buckets_for_day(day: date, tz: ZoneInfo) -> list[dict[str, Any]]:
+    """Per local 2 h bucket: measured heating kWh + the raw telemetry samples."""
+    slots = day_slots_utc(day, tz)
+    if not slots:
+        return []
+    start, end = slots[0], slots[-1] + timedelta(minutes=SLOT_MIN)
+    cons = {int(r["bucket_idx"]): r.get("kwh_heating")
+            for r in db.get_daikin_consumption_2hourly_range(day.isoformat(), day.isoformat())}
+    samples: dict[int, list[tuple[float, float]]] = {}
+    for r in db.get_daikin_telemetry_range(start.timestamp(), end.timestamp()):
+        if r.get("lwt_actual_c") is None:
+            continue
+        ts = float(r["fetched_at"])
+        b = datetime.fromtimestamp(ts, tz=UTC).astimezone(tz).hour // 2
+        samples.setdefault(b, []).append((ts, float(r["lwt_actual_c"])))
+    return [{"bucket": b, "kwh": cons.get(b), "samples": samples.get(b, [])} for b in sorted(cons)]
 
 
 def pump_off_delta(rows: list[dict[str, Any]]) -> dict[str, float | None]:
@@ -224,8 +293,11 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
         c = float(get_building_thermal_mass_kwh_per_k())
     except Exception:
         c = 16.5
-    ua, n_coast = estimate_ua_w_per_k(rows, c)
-    k, n_heat = estimate_k_kw_per_c(rows)
+    ua, n_coast = estimate_ua_w_per_k(rows, c, tz=tz)
+    ua_night, n_coast_night = estimate_ua_w_per_k(rows, c, night_only=True, tz=tz)
+    n_heat = sum(1 for r in rows if r.get("heating_kwh") is not None
+                 and float(r["heating_kwh"]) > COAST_HEATING_KWH_EPS)
+    k, n_k_buckets = estimate_k_kw_per_c(k_buckets_for_day(day, tz))
     pm, p90 = prediction_error(rows)
     try:
         from .thermal_learning import get_building_ua_w_per_k
@@ -241,7 +313,9 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
         "date": day.isoformat(), "n_coast_slots": n_coast, "n_heat_slots": n_heat,
         "ua_est_w_per_k": ua, "k_est_kw_per_c": k,
         "pred_err_mean_c": pm, "pred_err_p90_c": p90,
-        "payload": {"c_kwh_per_k": c, "ua_pinned_w_per_k": ua_pin, "k_pinned_kw_per_c": k_pin,
+        "ua_est_night_w_per_k": ua_night,
+        "payload": {"c_kwh_per_k": c, "ua_est_night_w_per_k": ua_night,
+                    "n_coast_night_slots": n_coast_night, "n_k_buckets": n_k_buckets, "ua_pinned_w_per_k": ua_pin, "k_pinned_kw_per_c": k_pin,
                     "n_rows": len(rows),
                     "coast_delta_configured_c": float(getattr(config, "DAIKIN_LWT_COAST_DELTA_C", 2.0)),
                     **pump_off_delta(rows)},

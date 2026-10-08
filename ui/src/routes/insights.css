@@ -310,6 +310,10 @@
 .cosyscore-bar-label { margin-left: var(--space-2); color: var(--text-dim); }
 
 /* LWT learning card (#838) */
+.lwtl { margin-top: var(--space-5); }
+.lwtl-head { display: flex; align-items: baseline; gap: var(--space-2); }
+.lwtl-head h2 { font-size: var(--font-lg); margin: 0; }
+.lwtl-error { color: var(--warn); }
 .lwtl-scroll { overflow-x: auto; }
 .lwtl-table { width: 100%; border-collapse: collapse; font-size: var(--font-sm); font-variant-numeric: tabular-nums; }
 .lwtl-table th { text-align: left; font-weight: 500; color: var(--text-mute); padding: var(--space-2); white-space: nowrap; }
@@ -317,15 +321,15 @@
 .lwtl-table tbody tr:nth-child(odd) td { background: color-mix(in srgb, var(--text) 3%, transparent); }
 .lwtl-table .num { text-align: right; }
 .lwtl-sub { font-size: var(--font-sm); font-weight: 500; color: var(--text-dim); margin: var(--space-4) 0 var(--space-2); }
-.lwtl-strip { display: flex; gap: 1px; height: 96px; }
-.lwtl-col { position: relative; flex: 1 1 0; min-width: 2px; background: transparent; }
+.lwtl-strip { display: flex; gap: var(--space-0); height: calc(var(--space-6) * 3); }
+.lwtl-col { position: relative; flex: 1 1 0; min-width: var(--space-0); background: transparent; }
 .lwtl-col--coast { background: color-mix(in srgb, var(--cool) 12%, transparent); }
-.lwtl-pred, .lwtl-real, .lwtl-floor { position: absolute; left: 0; right: 0; height: 2px; }
-.lwtl-pred { background: var(--accent); }
+.lwtl-pred, .lwtl-real, .lwtl-floor { position: absolute; left: 0; right: 0; height: var(--space-0); }
+.lwtl-pred { background: var(--house); }
 .lwtl-real { background: var(--thermal); }
-.lwtl-floor { background: color-mix(in srgb, var(--text) 25%, transparent); height: 1px; }
+.lwtl-floor { background: color-mix(in srgb, var(--text) 25%, transparent); height: var(--space-0); }
 .lwtl-legend { font-size: var(--font-xs); margin-top: var(--space-2); }
-.lwtl-key { display: inline-block; width: 10px; height: 2px; vertical-align: middle; margin: 0 var(--space-1) 0 var(--space-3); }
-.lwtl-key--pred { background: var(--accent); }
+.lwtl-key { display: inline-block; width: var(--space-3); height: var(--space-0); vertical-align: middle; margin: 0 var(--space-1) 0 var(--space-3); }
+.lwtl-key--pred { background: var(--house); }
 .lwtl-key--real { background: var(--thermal); }
 .lwtl-key--floor { background: color-mix(in srgb, var(--text) 25%, transparent); }
