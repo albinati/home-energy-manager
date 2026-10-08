@@ -866,18 +866,38 @@ def smooth_lp_offsets(
                 _merge_short_value_runs(out, i, j, min_block)
             i = j + 1
             continue
-        j = i
-        while (
-            j + 1 < n and out[j + 1] and (out[j + 1] > 0) == (sign > 0) and is_heat(j + 1)
-            and band_of(j + 1) == band_of(i)
-            and abs(int(out[j + 1]) - int(out[i])) < LP_SMOOTH_MAX_SPREAD
-        ):
-            j += 1
-        block = [int(out[k]) for k in range(i, j + 1)]
-        mean_v = int(math.floor(sum(block) / len(block) + 0.5))
-        for k in range(i, j + 1):
-            out[k] = mean_v
-        i = j + 1
+        # heating run: contiguous same-sign non-zero heating slots (any band/spread)
+        r_end = i
+        while r_end + 1 < n and out[r_end + 1] and (out[r_end + 1] > 0) == (sign > 0) and is_heat(r_end + 1):
+            r_end += 1
+        orig = [int(out[k]) for k in range(i, r_end + 1)]
+        # 1) split by spread (>= LP_SMOOTH_MAX_SPREAD from the block's first slot) and band
+        blocks: list[list[int]] = []  # [start, end] relative to i
+        bs = 0
+        for k in range(1, len(orig)):
+            if abs(orig[k] - orig[bs]) >= LP_SMOOTH_MAX_SPREAD or band_of(i + k) != band_of(i + bs):
+                blocks.append([bs, k - 1])
+                bs = k
+        blocks.append([bs, len(orig) - 1])
+        # 2) planned heating is NEVER dropped by a split: sub-blocks shorter than
+        #    min_block merge into the longer adjacent block (ties: the earlier)
+        while len(blocks) > 1:
+            short = [b for b in blocks if (b[1] - b[0] + 1) < min_block]
+            if not short:
+                break
+            b0 = min(short, key=lambda x: x[1] - x[0])
+            idx = blocks.index(b0)
+            nb = [x for x in (idx - 1, idx + 1) if 0 <= x < len(blocks)]
+            t = max(nb, key=lambda x: ((blocks[x][1] - blocks[x][0]), -x))
+            lo_, hi_ = min(blocks[t][0], b0[0]), max(blocks[t][1], b0[1])
+            blocks[t] = [lo_, hi_]
+            del blocks[idx]
+        for st_, en_ in blocks:
+            seg = orig[st_:en_ + 1]
+            m = int(math.floor(sum(seg) / len(seg) + 0.5))
+            for k in range(st_, en_ + 1):
+                out[i + k] = m
+        i = r_end + 1
     return smooth_lwt_offsets(out, min_block)
 
 

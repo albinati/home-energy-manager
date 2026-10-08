@@ -646,7 +646,9 @@ the Settings simulate->confirm->apply flow). Story-3 plug point:
   and the plan-fronts `heating.coast_mode`. **Smoothing (`smooth_lp_offsets`,
   #839 review):** HEATING blocks are split when a value is ≥ 2 °C from the
   block's first slot, at every `price_band` change and at every heating↔coast
-  flip, then take the block mean. COAST runs keep their own per-slot values (the
+  flip, then take the block mean; sub-blocks shorter than the minimum are merged
+  back into the longer neighbour (planned heating is never dropped by a split —
+  only a whole same-sign run shorter than the minimum is). COAST runs keep their own per-slot values (the
   forecast-driven depth); only value-runs shorter than
   `DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS` are merged into the longer neighbour (ties:
   the shallower), and a whole coast run shorter than the minimum is dropped.

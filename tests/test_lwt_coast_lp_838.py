@@ -609,9 +609,11 @@ def test_stale_reading_holds_the_counter(monkeypatch, osc):
 def test_smoothing_bounds_spread_and_keeps_depth():
     from src.scheduler.lp_dispatch import smooth_lp_offsets
 
-    out = smooth_lp_offsets([-3, -4, -5, -6, -7], 4)
-    assert len(set(out)) > 1 or out == [0] * 5    # never ONE mean block (-5 x5)
-    assert out != [-5] * 5
+    # a long ramp keeps its depth: pieces >= MIN_BLOCK stay separate blocks
+    out = smooth_lp_offsets([-3] * 4 + [-5] * 4 + [-7] * 2, 4)
+    assert out[:4] == [-3] * 4 and out[4:] == [-6] * 6      # short tail merged, never dropped
+    # a short ramp (all pieces < MIN_BLOCK) merges into ONE block, not zeros
+    assert smooth_lp_offsets([-3, -4, -5, -6, -7], 4) == [-5] * 5
     # heating -3 (cheap band) next to coast -7: never averaged, each keeps its value
     seq = [-3] * 4 + [-7] * 4
     heating = [True] * 4 + [False] * 4

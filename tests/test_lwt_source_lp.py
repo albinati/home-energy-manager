@@ -172,17 +172,17 @@ def test_smooth_lp_offsets_blockifies_by_sign():
     fragments and restore writes. Sign blocks keep the boost whole, at the
     block's mean."""
     seq = [3, 5, 5, 4, 5, 0, -2, -3, -2, -2, None, None]
-    # (#838 H2) a block's spread is bounded at < 2 degC from its FIRST slot, so the
-    # leading +3 is split off from the +5 plateau (1 slot < min_block -> dropped)
-    assert smooth_lp_offsets(seq, 4) == [0, 5, 5, 5, 5, 0, -2, -2, -2, -2, None, None]
+    # (#838 H2) spread is bounded at < 2 degC from a block's FIRST slot, but a
+    # sub-block shorter than min_block is merged back (never dropped): 3|5,5,4,5 -> mean 4
+    assert smooth_lp_offsets(seq, 4) == [4, 4, 4, 4, 4, 0, -2, -2, -2, -2, None, None]
     assert smooth_lp_offsets([3, 3, 4, 4, 3, 0, -2, -3, -2, -2], 4) == [3, 3, 3, 3, 3, 0, -2, -2, -2, -2]
     assert smooth_lp_offsets([3, 4, 0, 0, 5, 5, 5, 5], 4) == [0, 0, 0, 0, 5, 5, 5, 5]
     # a +5 pre-heat followed by a +1 top-up stays two blocks (split at |Δ| ≥ 2)
     assert smooth_lp_offsets([5] * 6 + [1] * 8, 4) == [5] * 6 + [1] * 8
-    # a monotone ramp is no longer flattened to one mean block (#838 H2): each
-    # <2 degC-spread piece is too short for min_block, so it is dropped
-    assert smooth_lp_offsets([1, 2, 3, 4, 5], 4) == [0] * 5
-    assert smooth_lp_offsets([1, 1, 2, 2, 2, 3, 3], 4) == [2, 2, 2, 2, 2, 0, 0]
+    # a heating ramp whose pieces are all shorter than min_block merges back into one
+    # mean block — planned heating is never dropped by the spread split
+    assert smooth_lp_offsets([1, 2, 3, 4, 5], 4) == [3] * 5
+    assert smooth_lp_offsets([1, 1, 2, 2, 2, 3, 3], 4) == [2, 2, 2, 2, 2, 2, 2]
     assert smooth_lp_offsets([1, 2, 3], 1) == [1, 2, 3]  # min_block 1: as-is
 
 
@@ -384,3 +384,17 @@ def test_cosy_plan_heats_in_cheap_bands_and_coasts_in_peak(monkeypatch):
 def test_space_ceiling_respects_lp_offset_clamp(monkeypatch):
     plan, _ = _solve_w3(monkeypatch, source="lp")
     assert max(plan.lwt_offset_c) <= 5.0 + 1e-6
+
+
+def test_heating_ramp_is_never_dropped():
+    from src.scheduler.lp_dispatch import smooth_lp_offsets
+
+    for ramp in ([1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6, 7, 8], [5, 4, 3, 2, 1], [2, 4, 6, 8]):
+        out = smooth_lp_offsets(ramp, 4)
+        assert all(v and v > 0 for v in out), (ramp, out)
+        assert abs(sum(out) - sum(ramp)) <= len(ramp)        # energy ~ preserved
+    # with masks/bands too (band change inside a heating run)
+    out = smooth_lp_offsets([2, 2, 3, 3, 5, 5], 4, heating=[True] * 6, bands=["cheap"] * 3 + ["standard"] * 3)
+    assert all(v > 0 for v in out)
+    # only a WHOLE short run is dropped (legacy rule)
+    assert smooth_lp_offsets([3, 4, 0, 0, 5, 5, 5, 5], 4) == [0, 0, 0, 0, 5, 5, 5, 5]
