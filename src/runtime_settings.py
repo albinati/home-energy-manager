@@ -507,6 +507,22 @@ SCHEMA: dict[str, SettingSpec] = {
             "action_log `lwt_source_diff`; switching is instant (no restart)."
         ),
     ),
+    "DAIKIN_LWT_COAST_MODE": SettingSpec(
+        key="DAIKIN_LWT_COAST_MODE",
+        type_name="str",
+        env_default=_str_env("DAIKIN_LWT_COAST_MODE", "setback"),
+        enum=("setback", "lp", "lp_raw"),
+        description=(
+            "setback = fixed setback; lp = physics target (indoor_pred + "
+            "DAIKIN_LWT_COAST_DELTA_C - curve LWT, clamped to [LP_OFFSET_MIN, 0]); "
+            "lp_raw = the LP's raw inverse-physics offset (the range minimum for "
+            "zero draw; experiments). What a coast slot (LP plans no space heat while the weather curve "
+            "would run) writes when DAIKIN_LWT_SOURCE=lp (#838). setback = the "
+            "fixed DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C; lp = the LP's own "
+            "forecast-driven offset, clamped only by DAIKIN_LWT_LP_OFFSET_MIN/MAX. "
+            "The comfort backstop restores offset 0 if the house gets too cold."
+        ),
+    ),
     "LP_LOAD_EXPENSIVE_BAND_QUANTILE": SettingSpec(
         key="LP_LOAD_EXPENSIVE_BAND_QUANTILE",
         type_name="str",

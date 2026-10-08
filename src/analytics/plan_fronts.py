@@ -552,6 +552,7 @@ def heating_section(day: date, windows: list[Any], tz: ZoneInfo, lp_slots: list[
         "night_floor_c": _r(getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5), 1),
         "peak_coast_delta_c": _r(getattr(config, "LP_W3_PEAK_COAST_DELTA_C", 1.0), 1),
         "lwt_source": str(getattr(config, "DAIKIN_LWT_SOURCE", "tier") or "tier"),
+        "coast_mode": str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback"),
         "gate": None, "windows": [], "predicted_indoor": _indoor_stats(lp_slots, tz), "by_band": [],
     }
     try:
@@ -574,6 +575,7 @@ def heating_section(day: date, windows: list[Any], tz: ZoneInfo, lp_slots: list[
         diff = g.get("lwt_source_last_diff")
         lp_av = diff.get("lp_available") if isinstance(diff, dict) else None
         out["lwt_source"] = g.get("lwt_source") or out["lwt_source"]
+        out["coast_mode"] = g.get("coast_mode") or out["coast_mode"]
         out["gate"] = {
             "preheat_enabled": g.get("preheat_enabled"), "demand_present": g.get("demand_present"),
             "measured_window_kwh": g.get("measured_window_kwh"), "threshold_kwh": g.get("threshold_kwh"),

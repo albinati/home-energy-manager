@@ -1,6 +1,7 @@
 import { postJson, getJson, hemFetch } from "./api";
 import type {
   CosyScorecardResponse,
+  LwtLearningResponse,
   PlanFrontsResponse,
   CockpitNow,
   SchedulerTimeline,
@@ -383,6 +384,9 @@ export const getLoadErrorLog = (
 
 export const getCosyScorecard = (days = 14) =>
   getJson<CosyScorecardResponse>(`/scorecard/cosy?days=${days}`);
+
+export const getLwtLearning = (days = 14) =>
+  getJson<LwtLearningResponse>(`/thermal/lwt-learning?days=${days}`);
 
 /* ----- Weekly tuning review (#832) — suggestions only ----- */
 

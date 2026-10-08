@@ -972,6 +972,24 @@ class Config:
     # thermal model has never driven hardware and UA is unfitted.
     DAIKIN_LWT_LP_OFFSET_MIN: float = float(os.getenv("DAIKIN_LWT_LP_OFFSET_MIN", "-5"))
     DAIKIN_LWT_LP_OFFSET_MAX: float = float(os.getenv("DAIKIN_LWT_LP_OFFSET_MAX", "5"))
+    # --- LWT coast mode + comfort backstop + learning log (#838) -------------
+    # DAIKIN_LWT_COAST_MODE is RUNTIME-tunable (runtime_settings): "setback" =
+    # coast slots get DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C (pre-#838); "lp" = the
+    # LP's own plan.lwt_offset_c, clamped only by DAIKIN_LWT_LP_OFFSET_MIN/MAX.
+    # lp coast mode target: LWT = predicted indoor + this (water this close to room
+    # temperature cannot add heat, so the compressor stays off).
+    DAIKIN_LWT_COAST_DELTA_C: float = float(os.getenv("DAIKIN_LWT_COAST_DELTA_C", "2.0"))
+    LWT_COMFORT_BACKSTOP_ENABLED: bool = os.getenv("LWT_COMFORT_BACKSTOP_ENABLED", "true").lower() in ("true", "1", "yes")
+    LWT_COMFORT_BACKSTOP_MARGIN_C: float = float(os.getenv("LWT_COMFORT_BACKSTOP_MARGIN_C", "0.5"))
+    LWT_COMFORT_BACKSTOP_TICKS: int = int(os.getenv("LWT_COMFORT_BACKSTOP_TICKS", "2"))
+    # After the backstop fires, negative offsets are suppressed on slots starting
+    # before now + this many minutes (anti backstop<->replan oscillation).
+    LWT_COMFORT_BACKSTOP_HOLD_MINUTES: int = int(os.getenv("LWT_COMFORT_BACKSTOP_HOLD_MINUTES", "90"))
+    # Absolute LWT ceiling on the LP heating path (backup-heater exposure): a
+    # positive offset never lifts the water above this (curve_lwt + offset <= max).
+    DAIKIN_LWT_ABS_MAX_C: float = float(os.getenv("DAIKIN_LWT_ABS_MAX_C", "45"))
+    LWT_LEARNING_ENABLED: bool = os.getenv("LWT_LEARNING_ENABLED", "true").lower() in ("true", "1", "yes")
+    LWT_LEARNING_RETENTION_DAYS: int = int(os.getenv("LWT_LEARNING_RETENTION_DAYS", "120"))
     # LP_W3_PEAK_COAST_DELTA_C is a RUNTIME setting since #820 (property below):
     # the W3 comfort floor inside the PEAK band = INDOOR_SETPOINT_C − this.
     # Plausibility gate on the W3 trajectory before it may drive hardware: a
@@ -2563,6 +2581,15 @@ class Config:
     @DAIKIN_CONTROL_MODE.setter
     def DAIKIN_CONTROL_MODE(self, value: str) -> None:
         self._rt_set("DAIKIN_CONTROL_MODE", str(value).strip().lower())
+
+    @property
+    def DAIKIN_LWT_COAST_MODE(self) -> str:
+        """#838 — "setback" | "lp": what an LP coast slot writes when source=lp."""
+        return str(self._rt_get("DAIKIN_LWT_COAST_MODE"))
+
+    @DAIKIN_LWT_COAST_MODE.setter
+    def DAIKIN_LWT_COAST_MODE(self, value: str) -> None:
+        self._rt_set("DAIKIN_LWT_COAST_MODE", str(value).strip().lower())
 
     @property
     def DAIKIN_LWT_SOURCE(self) -> str:

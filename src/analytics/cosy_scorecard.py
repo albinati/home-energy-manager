@@ -286,7 +286,16 @@ def _lwt(day: date, tz: ZoneInfo, a: datetime, b: datetime) -> dict[str, Any]:
         p = r.get("params") or {}
         diff = {k: p.get(k) for k in ("source_used", "lp_available", "n_differ", "mean_abs_diff")}
         break  # newest first
-    return {"preheat_rows": n_pre, "restore_rows": n_restore, "write_verify": verify, "source_diff_last": diff}
+    n_backstops = 0
+    try:
+        for r in db.get_action_logs(device="daikin", action="lwt_comfort_backstop", since=a.isoformat(), limit=200):
+            t = _parse(r.get("timestamp"))
+            if t is not None and t < b and str(r.get("result") or "") == "ok":
+                n_backstops += 1
+    except Exception:  # noqa: BLE001
+        logger.debug("cosy_scorecard: backstop count failed", exc_info=True)
+    return {"preheat_rows": n_pre, "restore_rows": n_restore, "write_verify": verify,
+            "source_diff_last": diff, "lwt_backstops": n_backstops}
 
 
 def _ops(a: datetime, b: datetime) -> dict[str, Any]:

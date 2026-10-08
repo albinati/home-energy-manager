@@ -655,6 +655,8 @@ def _tier_offsets(
     bands = plan.price_band or []
     n = len(plan.slot_starts_utc)
     offsets: list[int | None] = []
+    from .lwt_coast import active_hold_until, slot_in_hold
+    hold = active_hold_until()
     for i in range(n):
         mid = plan.slot_starts_utc[i] + timedelta(minutes=15)
         fc = get_forecast_for_slot(mid, forecast)
@@ -668,11 +670,27 @@ def _tier_offsets(
             else (fc.temperature_c if fc else 0.0)
         )
         price = plan.price_pence[i] if i < len(plan.price_pence) else 0.0
-        offsets.append(_preheat_lwt_offset(
+        t_off = _preheat_lwt_offset(
             price, outdoor, cheap_thr=cheap_thr, peak_thr=peak_thr,
             indoor_c=indoor_c, price_band=(bands[i] if i < len(bands) else None),
-        ))
+        )
+        # #838: the comfort backstop just cancelled a setback — no negative offset
+        # may start inside its hold (stops backstop <-> replan oscillation).
+        if t_off is not None and t_off < 0 and slot_in_hold(plan.slot_starts_utc[i], hold):
+            t_off = 0
+        offsets.append(t_off)
     return offsets
+
+
+def _hold_iso() -> str | None:
+    from .lwt_coast import active_hold_until
+    h = active_hold_until()
+    return h.astimezone(UTC).isoformat().replace("+00:00", "Z") if h else None
+
+
+def _coast_mode() -> str:
+    m = str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback").strip().lower()
+    return m if m in ("setback", "lp", "lp_raw") else "setback"
 
 
 def _lp_offsets(
@@ -680,6 +698,8 @@ def _lp_offsets(
     live_indoor_c: float | None = None,
     *,
     now_utc: datetime | None = None,
+    coast_mode: str | None = None,
+    guards: dict[str, int] | None = None,
 ) -> list[int | None] | None:
     """Per-slot offsets from the LP's own W3 thermal plan (#808).
 
@@ -691,23 +711,50 @@ def _lp_offsets(
       write; same exogenous anti-phantom guard as the tier rule);
     * a slot the LP left with NO space heat is a deliberate coast →
       ``DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C`` — NOT whatever the inverse physics
-      returns for zero draw (``OPTIMIZATION_LWT_OFFSET_MIN``);
-    * otherwise ``round(plan.lwt_offset_c[i])``;
+      returns for zero draw (``OPTIMIZATION_LWT_OFFSET_MIN``) — unless
+      ``DAIKIN_LWT_COAST_MODE=lp`` (#838): the physics target
+      ``floor(indoor_pred + DAIKIN_LWT_COAST_DELTA_C - curve_lwt + 0.5)`` clamped to
+      ``[DAIKIN_LWT_LP_OFFSET_MIN, 0]`` (``lwt_coast.coast_target``);
+      ``lp_raw``: the LP's own ``plan.lwt_offset_c[i]`` clamped ONLY by
+      ``DAIKIN_LWT_LP_OFFSET_MIN/MAX`` (device range ±10 is the hard bound);
+    * otherwise ``round(plan.lwt_offset_c[i])``, capped so the water never goes
+      above ``DAIKIN_LWT_ABS_MAX_C`` (``off <= round(ABS_MAX - curve_lwt)``;
+      backup-heater exposure) — the ceiling never turns a heating slot into a
+      setback, it only blocks lift;
     * clamp to the TIGHTER of ``OPTIMIZATION_LWT_OFFSET_MIN/MAX`` and
       ``DAIKIN_LWT_LP_OFFSET_MIN/MAX`` (prod pins the former at −2);
     * comfort guard with the LIVE reading only, on slots near now, boost side
       only — the plan's own predicted trajectory is NEVER used to veto the plan
-      (it was computed assuming those offsets; vetoing them would invalidate it).
+      (it was computed assuming those offsets; vetoing them would invalidate it);
+    * symmetric LIVE cold guard (#838): a NEGATIVE offset on a near-now slot is
+      zeroed when the fresh live reading is at/under that slot's comfort floor
+      minus ``LWT_COMFORT_BACKSTOP_MARGIN_C`` (else a replan right after the
+      backstop re-issues the very setback it cancelled);
+    * post-backstop hold: negative offsets on slots starting before
+      ``lwt_coast.active_hold_until()`` are zeroed.
+
+    ``guards`` (optional out-dict) counts the slots each guard zeroed
+    (``live_cold_guard`` / ``backstop_hold``) for the diff telemetry.
     """
     ok, _reason = w3_trajectory_plausible(plan)
     if not ok:
         return None
+    from ..physics import get_lwt_base_c
+    from .lwt_coast import active_hold_until, comfort_floor_c, slot_in_hold
+
     lo = int(max(float(config.OPTIMIZATION_LWT_OFFSET_MIN), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
     hi = int(min(float(config.OPTIMIZATION_LWT_OFFSET_MAX), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5))))
     setback = int(config.DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C)
+    cmode = (coast_mode or _coast_mode())
+    coast_lo = int(max(-10.0, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
+    coast_hi = int(min(10.0, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5))))
     band = float(config.DAIKIN_LWT_PREHEAT_COMFORT_BAND_C)
     setpoint = float(config.INDOOR_SETPOINT_C)
     cutoff = float(getattr(config, "DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C", 15.0))
+    abs_max = float(getattr(config, "DAIKIN_LWT_ABS_MAX_C", 45.0))
+    cold_margin = float(getattr(config, "LWT_COMFORT_BACKSTOP_MARGIN_C", 0.5))
+    hold = active_hold_until(now_utc)
+    bands = plan.price_band or []
     n = len(plan.slot_starts_utc)
     out: list[int | None] = []
     for i in range(n):
@@ -716,34 +763,93 @@ def _lp_offsets(
             out.append(None)
             continue
         es = float(plan.space_electric_kwh[i]) if i < len(plan.space_electric_kwh) else 0.0
-        if es <= 1e-6:
-            off = setback
+        near = _slot_is_near_now(plan, i, now_utc)
+        heating = es > 1e-6
+        if not heating and cmode == "lp":
+            from .lwt_coast import coast_target
+            ct_off = coast_target(plan, i, live_indoor_c if near else None)["offset"]
+            off = int(ct_off) if ct_off is not None else setback
+        elif not heating and cmode == "lp_raw":
+            raw = float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else float(coast_lo)
+            off = max(coast_lo, min(coast_hi, int(math.floor(raw + 0.5))))
         else:
-            raw = float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else 0.0
-            off = int(math.floor(raw + 0.5))
-        off = max(lo, min(hi, off))
-        if (
-            off > 0 and live_indoor_c is not None
-            and live_indoor_c >= setpoint + band and _slot_is_near_now(plan, i, now_utc)
-        ):
-            off = 0
+            if not heating:
+                off = setback
+            else:
+                raw = float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else 0.0
+                off = int(math.floor(raw + 0.5))
+                # absolute ceiling (M5): never lift the water above DAIKIN_LWT_ABS_MAX_C
+                ceil_off = int(math.floor(abs_max - get_lwt_base_c(outdoor) + 0.5))
+                off = min(off, max(0, ceil_off))
+            off = max(lo, min(hi, off))
+            if (
+                off > 0 and live_indoor_c is not None
+                and live_indoor_c >= setpoint + band and near
+            ):
+                off = 0
+        if off < 0:
+            st = plan.slot_starts_utc[i]
+            if slot_in_hold(st, hold):
+                off = 0
+                if guards is not None:
+                    guards["backstop_hold"] = guards.get("backstop_hold", 0) + 1
+            elif live_indoor_c is not None and near:
+                band_i = bands[i] if i < len(bands) else None
+                floor_i = comfort_floor_c(
+                    st + timedelta(minutes=15), band_i == "peak",
+                    night_floor_c=plan.w3_night_floor_c, setpoint_c=plan.w3_setpoint_c,
+                    peak_delta_c=plan.w3_peak_coast_delta_c,
+                )
+                if live_indoor_c <= floor_i - cold_margin:
+                    off = 0
+                    if guards is not None:
+                        guards["live_cold_guard"] = guards.get("live_cold_guard", 0) + 1
         out.append(off)
     return out
 
 
-def smooth_lp_offsets(offsets: list[int | None], min_block: int) -> list[int | None]:
-    """Block-ify the LP's per-slot offsets by SIGN before the length filter
-    (#808 review): the LP signal is the rounded inverse of a continuous ramp
-    (``3,5,5,4,5``), so the value-run smoother shredded every boost into
-    fragments and inserted restore-to-0 writes. A run of same-sign non-zero
-    slots is split where neighbours differ by ≥ 3 (a +5 pre-heat followed by
-    a +1 top-up stays two blocks) and each block takes its energy-preserving
-    MEAN (rounded half-up toward +∞); then ``smooth_lwt_offsets`` drops blocks
-    shorter than ``min_block``. ``min_block <= 1`` returns the input as-is."""
+LP_SMOOTH_MAX_SPREAD = 2  # a heating block never spans >= this many degC from its first slot
+
+
+def smooth_lp_offsets(
+    offsets: list[int | None],
+    min_block: int,
+    *,
+    heating: list[bool] | None = None,
+    bands: list[str | None] | None = None,
+) -> list[int | None]:
+    """Block-ify the LP's per-slot offsets before the length filter.
+
+    The LP signal is the rounded inverse of a continuous ramp (``3,5,5,4,5``), so
+    the value-run smoother shredded every boost into fragments (#808 review).
+    Blocking rules (#838 review H2 — the forecast-driven DEPTH must survive):
+
+    * HEATING slots (``heating[i]``; ``None`` mask = all heating): a run of
+      same-sign non-zero slots is split when a value is ``>= LP_SMOOTH_MAX_SPREAD``
+      (2) away from the block's FIRST value (bounded within-block spread — a
+      ``-3..-7`` ramp is never flattened to one mean) and at every ``price_band``
+      change; each block takes its energy-preserving MEAN (rounded half-up);
+    * COAST slots (``heating[i]`` False, e_space ~ 0) keep their own values — the
+      coast depth tracks the forecast outdoor temperature. A heating<->coast flip
+      always ends a block, so a cheap-band heating -3 is never averaged with a
+      coast -7. Short coast value-runs inside one coast run are merged into their
+      longer neighbour (ties: the shallower value) instead of being dropped, so a
+      ramp survives the minimum-block filter; a whole coast run shorter than
+      ``min_block`` is dropped like any other short block.
+
+    Then ``smooth_lwt_offsets`` bridges blips and drops short blocks.
+    ``min_block <= 1`` returns the input as-is."""
     if min_block <= 1:
         return list(offsets)
     n = len(offsets)
     out: list[int | None] = list(offsets)
+
+    def is_heat(k: int) -> bool:
+        return True if heating is None else bool(heating[k])
+
+    def band_of(k: int) -> str | None:
+        return bands[k] if (bands is not None and k < len(bands)) else None
+
     i = 0
     while i < n:
         v = out[i]
@@ -751,18 +857,93 @@ def smooth_lp_offsets(offsets: list[int | None], min_block: int) -> list[int | N
             i += 1
             continue
         sign = 1 if v > 0 else -1
-        j = i
-        while (
-            j + 1 < n and out[j + 1] and (out[j + 1] > 0) == (sign > 0)
-            and abs(int(out[j + 1]) - int(out[j])) < 3
-        ):
-            j += 1
-        block = [int(out[k]) for k in range(i, j + 1)]
-        mean_v = int(math.floor(sum(block) / len(block) + 0.5))
-        for k in range(i, j + 1):
-            out[k] = mean_v
-        i = j + 1
+        if not is_heat(i):
+            # coast run: contiguous non-zero same-sign coast slots (any band)
+            j = i
+            while j + 1 < n and out[j + 1] and (out[j + 1] > 0) == (sign > 0) and not is_heat(j + 1):
+                j += 1
+            if (j - i + 1) >= min_block:
+                _merge_short_value_runs(out, i, j, min_block)
+            i = j + 1
+            continue
+        # heating run: contiguous same-sign non-zero heating slots (any band/spread)
+        r_end = i
+        while r_end + 1 < n and out[r_end + 1] and (out[r_end + 1] > 0) == (sign > 0) and is_heat(r_end + 1):
+            r_end += 1
+        orig = [int(out[k]) for k in range(i, r_end + 1)]
+        # 1) split by spread (>= LP_SMOOTH_MAX_SPREAD from the block's first slot) and band
+        blocks: list[list[int]] = []  # [start, end] relative to i
+        bs = 0
+        for k in range(1, len(orig)):
+            if abs(orig[k] - orig[bs]) >= LP_SMOOTH_MAX_SPREAD or band_of(i + k) != band_of(i + bs):
+                blocks.append([bs, k - 1])
+                bs = k
+        blocks.append([bs, len(orig) - 1])
+        # 2) planned heating is NEVER dropped by a split: sub-blocks shorter than
+        #    min_block merge into the longer adjacent block (ties: the earlier)
+        while len(blocks) > 1:
+            short = [b for b in blocks if (b[1] - b[0] + 1) < min_block]
+            if not short:
+                break
+            b0 = min(short, key=lambda x: x[1] - x[0])
+            idx = blocks.index(b0)
+            nb = [x for x in (idx - 1, idx + 1) if 0 <= x < len(blocks)]
+            t = max(nb, key=lambda x: ((blocks[x][1] - blocks[x][0]), -x))
+            lo_, hi_ = min(blocks[t][0], b0[0]), max(blocks[t][1], b0[1])
+            blocks[t] = [lo_, hi_]
+            del blocks[idx]
+        for st_, en_ in blocks:
+            seg = orig[st_:en_ + 1]
+            m = int(math.floor(sum(seg) / len(seg) + 0.5))
+            for k in range(st_, en_ + 1):
+                out[i + k] = m
+        i = r_end + 1
     return smooth_lwt_offsets(out, min_block)
+
+
+def _merge_short_value_runs(out: list[int | None], lo: int, hi: int, min_block: int) -> None:
+    """In-place: within ``out[lo..hi]`` merge value-runs shorter than ``min_block``
+    into the longer adjacent run (tie → the value closer to zero)."""
+    while True:
+        runs: list[list[int]] = []  # [start, end, value]
+        k = lo
+        while k <= hi:
+            e = k
+            while e + 1 <= hi and out[e + 1] == out[k]:
+                e += 1
+            runs.append([k, e, int(out[k])])  # type: ignore[arg-type]
+            k = e + 1
+        short = [r for r in runs if (r[1] - r[0] + 1) < min_block]
+        if not short or len(runs) == 1:
+            return
+        r = min(short, key=lambda x: x[1] - x[0])
+        idx = runs.index(r)
+        nbrs = [runs[x] for x in (idx - 1, idx + 1) if 0 <= x < len(runs)]
+        tgt = max(nbrs, key=lambda x: ((x[1] - x[0]), -abs(x[2])))
+        for k in range(r[0], r[1] + 1):
+            out[k] = tgt[2]
+
+
+def _plan_masks(plan: LpPlan | None) -> tuple[list[bool] | None, list[str | None] | None]:
+    if plan is None:
+        return None, None
+    n = len(plan.slot_starts_utc)
+    es = plan.space_electric_kwh or []
+    heating = [(float(es[i]) > 1e-6) if i < len(es) else False for i in range(n)]
+    bands = list(plan.price_band or []) or None
+    return heating, bands
+
+
+def _smoothed_offsets(
+    offsets: list[int | None], source: str, plan: LpPlan | None = None,
+) -> list[int | None]:
+    """The per-slot offsets as they will actually be written (block / run
+    smoothing + minimum-block filter)."""
+    min_block = int(config.DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS)
+    if source == "lp":
+        heating, bands = _plan_masks(plan)
+        return smooth_lp_offsets(list(offsets), min_block, heating=heating, bands=bands)
+    return smooth_lwt_offsets(list(offsets), min_block)
 
 
 def _pairs_from_offsets(
@@ -777,11 +958,7 @@ def _pairs_from_offsets(
     # Thermal coherence: collapse per-slot price chatter into sustained blocks
     # so we don't toggle the heat pump for wiggles the thermal mass can't follow
     # (and don't burn Daikin writes doing it). See ``smooth_lwt_offsets``.
-    min_block = int(config.DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS)
-    offsets = (
-        smooth_lp_offsets(list(offsets), min_block) if source == "lp"
-        else smooth_lwt_offsets(list(offsets), min_block)
-    )
+    offsets = _smoothed_offsets(offsets, source, plan)
 
     restore_window = max(2, int(getattr(config, "LP_RESTORE_WINDOW_MINUTES", 5)))
     out: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
@@ -880,6 +1057,7 @@ def _log_lwt_source_diff(
     source_used: str,
     *,
     lp_reason: str = "ok",
+    guards: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Continuous tier-vs-LP telemetry (#808): one ``action_log`` row per
     dispatch with the per-slot disagreement, so the LP source can be judged
@@ -887,6 +1065,7 @@ def _log_lwt_source_diff(
     n = len(plan.slot_starts_utc)
     summary: dict[str, Any] = {
         "source_used": source_used,
+        "coast_mode": _coast_mode(),
         "lp_available": lp_offsets is not None,
         "lp_reason": lp_reason,
         "n_slots": n,
@@ -894,6 +1073,9 @@ def _log_lwt_source_diff(
         "mean_abs_diff": 0.0,
         "windows": [],
     }
+    if guards:
+        # slots the LP source zeroed: live_cold_guard / backstop_hold (#838)
+        summary["guards"] = dict(guards)
     if lp_offsets is not None:
         diffs = []
         windows: list[dict[str, Any]] = []
@@ -1451,6 +1633,8 @@ def space_heating_gate_state() -> dict[str, Any]:
     return {
         "preheat_enabled": preheat_enabled,
         "lwt_source": lwt_source,
+        "coast_mode": _coast_mode(),
+        "backstop_hold_until": _hold_iso(),
         "lwt_source_last_diff": lwt_source_last_diff,
         "gate_enabled": floor > 0,
         "demand_present": demand_present,
@@ -1508,6 +1692,8 @@ def _write_lwt_preheat_actions(
             int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48)),
             float(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5)),
         )
+        from .lwt_coast import record_planned
+        record_planned(plan, source_used=_lwt_source(), coast_mode=_coast_mode(), written_offsets=None)
         return 0
 
     # Indoor temperature for the comfort guard: the house room sensors are the
@@ -1530,16 +1716,36 @@ def _write_lwt_preheat_actions(
     # to tier when the LP produced no W3 trajectory).
     tier_offsets = _tier_offsets(plan, forecast, indoor_c)
     _plausible, lp_reason = w3_trajectory_plausible(plan)
-    lp_offsets = _lp_offsets(plan, indoor_c)
+    guards: dict[str, int] = {}
+    lp_offsets = _lp_offsets(plan, indoor_c, guards=guards)
     source_used = _lwt_source()
     if source_used == "lp" and lp_offsets is None:
         logger.info("LWT source=lp requested but the LP trajectory is unavailable (%s) — using the tier rule", lp_reason)
         source_used = "tier"
-    _log_lwt_source_diff(plan, tier_offsets, lp_offsets, source_used, lp_reason=lp_reason)
-    pairs = _pairs_from_offsets(
-        plan, lp_offsets if source_used == "lp" else tier_offsets, source=source_used,
-    )
+    _log_lwt_source_diff(plan, tier_offsets, lp_offsets, source_used, lp_reason=lp_reason, guards=guards)
+    chosen = lp_offsets if source_used == "lp" else tier_offsets
+    smoothed = _smoothed_offsets(list(chosen), source_used, plan)
+    pairs = _pairs_from_offsets(plan, chosen, source=source_used)
+
+    def _record(dropped_pairs: list[tuple[dict[str, Any] | None, dict[str, Any]]]) -> None:
+        """#838 learning log: PLANNED fields, recorded AFTER the quota-cap trim —
+        ``offset_written`` is the smoothed offset the device will really get,
+        NULL for slots whose window was dropped."""
+        from .lwt_coast import record_planned
+        written: list[int | None] = list(smoothed)
+        for _rest, act in dropped_pairs:
+            try:
+                ds = datetime.fromisoformat(act["start_time"].replace("Z", "+00:00"))
+                de = datetime.fromisoformat(act["end_time"].replace("Z", "+00:00"))
+            except (KeyError, ValueError):
+                continue
+            for k, st in enumerate(plan.slot_starts_utc):
+                if ds <= st < de:
+                    written[k] = None
+        record_planned(plan, source_used=source_used, coast_mode=_coast_mode(), written_offsets=written)
+
     if not pairs:
+        _record([])
         return 0
 
     # Deterministic quota cap: 2 writes per pair (action + restore). Keep only
@@ -1556,13 +1762,17 @@ def _write_lwt_preheat_actions(
             "LWT pre-heat: skipped all %d offset row(s) — Daikin quota headroom %d too low",
             len(pairs), headroom,
         )
+        _record(list(pairs))
         return 0
     if len(pairs) > max_pairs:
         logger.info(
             "LWT pre-heat: capped offset windows %d→%d for quota headroom %d",
             len(pairs), max_pairs, headroom,
         )
+        _record(pairs[max_pairs:])
         pairs = pairs[:max_pairs]
+    else:
+        _record([])
 
     count = 0
     for restore_row, action_row in pairs:

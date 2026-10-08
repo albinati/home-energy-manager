@@ -1538,3 +1538,39 @@ export interface CosyScorecardResponse {
   days: number;
   rows: CosyScoreRow[];
 }
+
+/* ----- LWT coast learning (#838) ----- */
+export interface LwtLearningDaily {
+  date: string;
+  n_coast_slots: number | null;
+  n_heat_slots: number | null;
+  ua_est_w_per_k: number | null;
+  ua_est_night_w_per_k?: number | null;
+  k_est_kw_per_c: number | null;
+  pred_err_mean_c: number | null;
+  pred_err_p90_c: number | null;
+  ua_pinned_w_per_k?: number | null;
+  k_pinned_kw_per_c?: number | null;
+}
+
+export interface LwtLearningSlot {
+  slot_time_utc: string;
+  coast_mode: string | null;
+  offset_lp_raw: number | null;
+  offset_written: number | null;
+  indoor_pred_c: number | null;
+  floor_c: number | null;
+  indoor_real_c: number | null;
+  indoor_min_c: number | null;
+  device_offset: number | null;
+  heating_kwh: number | null;
+  price_band: string | null;
+}
+
+export interface LwtLearningResponse {
+  days: number;
+  coast_mode: string;
+  ua_pinned_w_per_k: number;
+  daily: LwtLearningDaily[];
+  yesterday: { date: string; slots: LwtLearningSlot[] };
+}

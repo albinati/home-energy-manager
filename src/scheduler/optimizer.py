@@ -2687,6 +2687,15 @@ def _run_optimizer_lp(
         }
     )
 
+    # #838: the LWT learning rows were written during dispatch, before this
+    # optimizer_log row existed — point them at the run that produced them.
+    try:
+        from .lwt_coast import stamp_run_id
+
+        stamp_run_id(plan, run_id)
+    except Exception as e:
+        logger.debug("lwt learning run_id stamp failed (non-fatal): %s", e)
+
     # V11: durable per-slot snapshot so the History view can replay "what the
     # LP decided at this moment". Failures here must not bring down the solve
     # — wrap defensively.
