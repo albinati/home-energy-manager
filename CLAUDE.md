@@ -702,20 +702,43 @@ the Settings simulate->confirm->apply flow). Story-3 plug point:
   `plan_updated_at_utc` as the plan token, `written_at_utc` stays the first write);
   `offset_written` is recorded after the quota-cap trim (NULL for dropped windows).
   Pruned after `LWT_LEARNING_RETENTION_DAYS` (120).
-- **Reading the estimates**: `ua_est_w_per_k` fits `T−To ∝ exp(−UA/C·t)` over
-  runs of ≥3 consecutive coast slots (measured heating ≤ 0.02 kWh/slot or unmeasured,
-  AND device offset < 0 or ~0 heating) with the learned C, reported for all coasts
-  and as `ua_est_night_w_per_k` (local 22–07, PV ≈ 0 — prefer this one);
-  `k_est_kw_per_c` = median over 2-hour buckets of kWh ÷ Σ((`lwt_actual` − 18)·Δt)
-  over the bucket's telemetry (≥ 3 samples, `lwt_actual` > 20). Compare with the pins (`BUILDING_UA_W_PER_K=200`, learned k
-  0.063): estimates well above/below for several days with a small
-  `pred_err_p90_c` say the pin is wrong; a large `pred_err` with a consistent UA
-  says the trajectory model (gains, C) is. Nothing is auto-applied; read via
+- **Reading the estimates (#843)**: coast-only data identifies **τ = C/UA only**.
+  `ua_est_w_per_k` / `ua_est_night_w_per_k` (API + payload: `ua_from_tau_scaled_*`,
+  `ua_est_circular: true`) is `C × decay rate` with C = τ × UA_pin (#841), so it returns ≈ the
+  pin whenever nights cool at the calibration's τ — it CANNOT confirm or refute the 200
+  pin; kept for audit (details block of the card), never a headline. UA and C come from
+  the **episode estimator** `fit_ua_c_joint` (payload `joint_fit`, rolling `joint_window_days`=14).
+  Heat input is ONLY Onecta-METERED buckets (`lwt_learning_log.heating_kwh_source` starts with
+  `onecta`; `telemetry_integral` buckets are the weather-curve model `get_daikin_heating_kw ×
+  dt`, not a measurement, and are excluded; 1.0-kWh phantom Onecta buckets are zeroed in
+  `fill_realised` by `thermal_learning.sanitize_phantom_heating`). Samples: one per contiguous
+  Onecta-heating EPISODE (+ a 4-slot coast tail for emitter lag; dropped when an adjacent
+  bucket is unusable, e.g. metered 0 but `lwt_actual − indoor > 6 °C` = hidden heat the
+  whole-kWh counter rounded away) and one per 2 h Onecta-zero coast block lying wholly in the
+  local night (22–07: no solar). Model `ΔT = a·ΣQ_th − b·Σ(T−To)Δt + g·Σdt` (Q_th = COP(To) ×
+  metered kWh, COP = the LP curve with its lift derate; a=1/C, b=1/τ, g=gain/C); 3-param OLS by
+  hand, SEs σ²(XᵀX)⁻¹ + delta method (`ua_se`, `c_se`), with a method-of-moments correction for
+  the counter's known quantisation noise (1/12 kWh² per bucket). Reported: `ua_w_per_k`,
+  `c_kwh_per_k`, `tau_h`, `gain_kw`, `resid_rms_c`, `n_heat_episodes`, `n_coast_blocks` (no R²
+  headline). Gate: ≥ 5 episodes AND ≥ 8 coast blocks AND a,b > 0, else `identifiable: false`
+  with `reason` ∈ `too_few_heat_episodes | too_few_coast_blocks | nonphysical_fit | singular |
+  no_measured_input`. Diagnostics: `tau_fixed` (b HARD-fixed to the learner's τ — a
+  constraint, not a prior), `slot_fit` (old per-slot regression, biased by quantised/lagged
+  heat), `coast_tau_h`, `consistency_flag: lag_or_gain_contamination_suspected` when the free τ
+  and the coast-only τ differ by > 25 %, and `cop_sensitivity` (refit at COP ×0.8 / ×1.2 — COP
+  is the weakest link; SEs are optimistic since COP, lag and quantisation are model error).
+  Honest model checks: `pred_err_*` and `night_rise_per_band` (each cheap band with a
+  positive written offset: measured vs predicted indoor rise from slots carrying BOTH readings;
+  predicted only from slots sharing the first slot's `plan_updated_at_utc` token — `mixed_plans`
+  rows are not comparable; `model_error_c` > 0 = the model is pessimistic). `k_est_kw_per_c` =
+  median over 2-hour buckets of kWh ÷
+  Σ((`lwt_actual` − 18)·Δt) (≥ 3 samples, `lwt_actual` > 20); learned k pin 0.063.
+  Nothing is auto-applied (`thermal_calibration` is untouched); read via
   `GET /api/v1/thermal/lwt-learning?days=14` or the Insights "LWT learning" card.
   The scorecard `lwt` section carries `lwt_backstops` (count of fired backstops).
-  **Discontinuity:** `ua_est_*` scales with the C it is fitted with, and C went
-  from 49.6 to 16.5 kWh/K at the #841 C fix (~3x): the series before/after is NOT
-  comparable. The payload carries `c_kwh_per_k` per day; compare like with like.
+  **Discontinuity:** the circular `ua_est_*` scales with the C it is fitted with, and C
+  went from 49.6 to 16.5 kWh/K at the #841 C fix (~3x): that series before/after is NOT
+  comparable. The payload carries `c_kwh_per_k` per day.
 
 ### Banking heat in cheap bands — consistent C, comfort ceiling, ceiling-based boost guard (#841)
 

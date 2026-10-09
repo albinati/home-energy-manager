@@ -1543,8 +1543,62 @@ export interface CosyScorecardResponse {
 }
 
 /* ----- LWT coast learning (#838) ----- */
+export interface LwtJointFitSolve {
+  ua_w_per_k: number | null;
+  c_kwh_per_k: number | null;
+  tau_h: number | null;
+  c_se?: number | null;
+  gain_kw?: number | null;
+  resid_rms_c?: number | null;
+  r2?: number | null;
+  n_heat?: number;
+  n_coast?: number;
+}
+
+export type LwtJointFitReason =
+  | "too_few_heat_episodes"
+  | "too_few_coast_blocks"
+  | "nonphysical_fit"
+  | "singular"
+  | "no_measured_input";
+
+/** Episode estimator (#843): one sample per Onecta-metered heating episode / night coast block. */
+export interface LwtJointFit extends LwtJointFitSolve {
+  identifiable: boolean;
+  reason: LwtJointFitReason | null;
+  ua_se: number | null;
+  n_heat_episodes: number;
+  n_coast_blocks: number;
+  tau_prior_h: number | null;
+  coast_tau_h: number | null;
+  tau_fixed: LwtJointFitSolve | null;
+  consistency_flag: "lag_or_gain_contamination_suspected" | null;
+  slot_fit: LwtJointFitSolve | null;
+  cop_sensitivity: Record<string, Pick<LwtJointFitSolve, "ua_w_per_k" | "c_kwh_per_k" | "tau_h"> | null> | null;
+}
+
+export interface LwtBandRise {
+  start_utc: string;
+  end_utc: string;
+  n_slots: number;
+  mean_offset_c: number;
+  measured_rise_c: number;
+  predicted_rise_c: number | null;
+  model_error_c: number | null;
+  plan_token: string | null;
+  n_plans: number;
+  mixed_plans: boolean;
+}
+
 export interface LwtLearningDaily {
   date: string;
+  /** #843: true — the coast-only UA estimate is C(=tau x UA_pin) x decay rate. */
+  ua_est_circular?: boolean;
+  ua_from_tau_scaled_w_per_k?: number | null;
+  ua_from_tau_scaled_night_w_per_k?: number | null;
+  joint_fit?: LwtJointFit | null;
+  joint_window_days?: number;
+  night_rise_per_band?: LwtBandRise[];
   n_coast_slots: number | null;
   n_heat_slots: number | null;
   ua_est_w_per_k: number | null;
@@ -1573,6 +1627,7 @@ export interface LwtLearningSlot {
 export interface LwtLearningResponse {
   days: number;
   coast_mode: string;
+  timezone?: string;
   ua_pinned_w_per_k: number;
   daily: LwtLearningDaily[];
   yesterday: { date: string; slots: LwtLearningSlot[] };

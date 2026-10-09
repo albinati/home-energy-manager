@@ -20,13 +20,19 @@ def _build(days: int) -> dict[str, Any]:
     daily = []
     for r in db.get_lwt_learning_daily(days):
         payload = r.pop("payload", {}) or {}
-        daily.append({**r, **payload})
+        merged = {**r, **payload}
+        # #843: the coast-only UA is C x decay-rate with C = tau x UA_pin -> circular.
+        merged.setdefault("ua_from_tau_scaled_w_per_k", r.get("ua_est_w_per_k"))
+        merged.setdefault("ua_from_tau_scaled_night_w_per_k", payload.get("ua_est_night_w_per_k"))
+        merged["ua_est_circular"] = True
+        daily.append(merged)
     yday = datetime.now(tz).date() - timedelta(days=1)
     slots = day_slots_utc(yday, tz)
     z = lambda d: d.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
     rows = db.get_lwt_learning_rows(z(slots[0]), z(slots[-1] + timedelta(minutes=30))) if slots else []
     return {
         "days": days,
+        "timezone": str(config.BULLETPROOF_TIMEZONE),
         "coast_mode": str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback"),
         "ua_pinned_w_per_k": float(getattr(config, "BUILDING_UA_W_PER_K", 200)),
         "daily": daily,

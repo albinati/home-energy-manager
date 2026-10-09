@@ -1495,6 +1495,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             lwt_actual_c    REAL,
             device_offset   REAL,
             heating_kwh     REAL,
+            heating_kwh_source TEXT,
             filled_at_utc   TEXT
         )"""
     )
@@ -1503,6 +1504,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE lwt_learning_log ADD COLUMN plan_updated_at_utc TEXT")
     if lwt_cols and "ceiling_c" not in lwt_cols:
         conn.execute("ALTER TABLE lwt_learning_log ADD COLUMN ceiling_c REAL")
+    if lwt_cols and "heating_kwh_source" not in lwt_cols:
+        conn.execute("ALTER TABLE lwt_learning_log ADD COLUMN heating_kwh_source TEXT")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS lwt_learning_daily (
             date            TEXT PRIMARY KEY,
@@ -5192,7 +5195,7 @@ _LWT_PLANNED_COLS = (
 )
 _LWT_REALISED_COLS = (
     "indoor_real_c", "indoor_rooms_json", "indoor_min_c", "outdoor_real_c",
-    "lwt_actual_c", "device_offset", "heating_kwh",
+    "lwt_actual_c", "device_offset", "heating_kwh", "heating_kwh_source",
 )
 
 
