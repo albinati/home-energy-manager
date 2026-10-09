@@ -166,6 +166,15 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
     }
     const lwtReal = slots.map((s) => lwtRealByBucket.get(bucket(s.slot_utc)) ?? null);
 
+    // WRITTEN radiator setpoint (#845) — curve base + the offset actually
+    // scheduled/applied (main plan line) vs the tier rule's setpoint (ghost).
+    const clampLwt = (v: number) => Math.max(18, Math.min(50, v));
+    const lwtWritten = slots.map((s) => (s.lwt_setpoint_c == null ? null : s.lwt_setpoint_c));
+    const lwtRule = slots.map((s) =>
+      s.lwt_base_c == null || s.lwt_offset_tier == null ? null : Math.round(clampLwt(s.lwt_base_c + s.lwt_offset_tier) * 10) / 10);
+    const hasLwtRule = lwtRule.some((v, i) => v != null && v !== lwtWritten[i]);
+    const hasLwtWritten = lwtWritten.some((v) => v != null);
+
     // REALISED indoor temp — mean of the room-sensor readings in each 30-min
     // slot (#540 W1). Only slots the sensors covered have a value, so the solid
     // line appears from when the first sensor came online.
@@ -259,6 +268,13 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           const rows: string[] = [`<strong>${labels[i]}</strong>${heatFlag}`];
           if (indoorReal[i] != null) rows.push(`Indoor <strong>${(indoorReal[i] as number).toFixed(1)}°C</strong> · realised`);
           if (indoorPlanned[i] != null) rows.push(`Indoor <strong>${(indoorPlanned[i] as number).toFixed(1)}°C</strong> · planned`);
+          if (s.lwt_setpoint_c != null) {
+            const o = s.lwt_offset ?? 0;
+            rows.push(`LWT plan <strong>${s.lwt_setpoint_c.toFixed(0)}°C</strong> (${o > 0 ? "+" : ""}${o}) · ${s.offset_source ?? "none"}`);
+          }
+          if (s.lwt_offset_tier != null && s.lwt_offset_tier !== (s.lwt_offset ?? 0)) {
+            rows.push(`<span style="color:${t.textMute}">rule would: ${s.lwt_offset_tier > 0 ? "+" : ""}${s.lwt_offset_tier}</span>`);
+          }
           if (lwtReal[i] != null) rows.push(`LWT real <strong>${(lwtReal[i] as number).toFixed(0)}°C</strong>`);
           if (s.tank_temp_c != null) rows.push(`Tank plan <strong>${s.tank_temp_c}°C</strong>${s.tank_kind ? ` · ${s.tank_kind}` : ""}`);
           if (tankReal[i] != null) rows.push(`Tank real <strong>${(tankReal[i] as number).toFixed(0)}°C</strong>`);
@@ -297,8 +313,20 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           data: pair(tank), lineStyle: { color: t.thermal, width: 1.5, type: "dashed", cap: "round" }, z: 3 },
         { name: "Tank realised", type: "line", step: "middle", showSymbol: false, connectNulls: false,
           data: pair(tankReal), lineStyle: { color: t.thermal, width: 2.5, cap: "round" }, z: 4 },
-        // ── HEATING / radiator LWT (purple) — REALISED only (the Daikin's logged
-        //    leaving-water temp across the day). Plan line dropped per request.
+        // ── HEATING / radiator LWT (purple) — realised (the Daikin's logged
+        //    leaving-water temp) plus the WRITTEN plan below: dashed purple, the
+        //    offset the device is/was given (#845), thinner than realised.
+        ...(hasLwtWritten ? [{
+          name: "LWT plan", type: "line" as const, step: "middle" as const, showSymbol: false,
+          connectNulls: false, data: pair(lwtWritten),
+          lineStyle: { color: t.house, width: 2, type: "dashed" as const, cap: "round" as const }, z: 4,
+        }] : []),
+        // Tier rule ghost — what the price-band rule would have written.
+        ...(hasLwtRule ? [{
+          name: "LWT rule (ghost)", type: "line" as const, step: "middle" as const, showSymbol: false,
+          connectNulls: false, data: pair(lwtRule),
+          lineStyle: { color: t.house, width: 1, type: "dotted" as const, opacity: 0.4 }, z: 2,
+        }] : []),
         { name: "LWT realised", type: "line", smooth: true, showSymbol: false, connectNulls: false,
           data: pair(lwtReal), lineStyle: { color: t.house, width: 3, cap: "round" },
           areaStyle: { color: areaGradient(t.house, 0.12, 0.0) }, z: 5 },
@@ -332,6 +360,8 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           <span class="hpl-tok"><span class="hpl-line hpl-line--tank" /> tank plan</span>
           <span class="hpl-legend-grp">heating</span>
           <span class="hpl-tok"><span class="hpl-line hpl-line--realised" /> LWT real</span>
+          <span class="hpl-tok"><span class="hpl-line hpl-line--plan" /> LWT plan (written)</span>
+          <span class="hpl-tok"><span class="hpl-line hpl-line--ghost" /> rule (ghost)</span>
           <span class="hpl-legend-grp">tariff</span>
           <span class="hpl-tok"><span class="hpl-sw hpl-sw--cheap" /> cheap</span>
           <span class="hpl-tok"><span class="hpl-sw hpl-sw--peak" /> peak</span>

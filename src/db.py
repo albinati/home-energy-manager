@@ -2054,6 +2054,25 @@ def get_actions_for_plan_date(plan_date: str, device: str | None = None) -> list
             conn.close()
 
 
+def get_actions_for_plan_dates(plan_dates: list[str], device: str | None = None) -> list[dict[str, Any]]:
+    """One query for several plan dates (heating-plan endpoint, #845)."""
+    if not plan_dates:
+        return []
+    marks = ",".join("?" for _ in plan_dates)
+    q = f"SELECT * FROM action_schedule WHERE date IN ({marks})"
+    args: list[Any] = list(plan_dates)
+    if device:
+        q += " AND device = ?"
+        args.append(device)
+    q += " ORDER BY start_time, id"
+    with _lock:
+        conn = get_connection()
+        try:
+            return [_row_action(r) for r in conn.execute(q, args).fetchall()]
+        finally:
+            conn.close()
+
+
 def mean_consumption_kwh_from_execution_logs(limit: int = 2000) -> float:
     """Rolling mean half-hourly kWh from execution_log (fallback 0.4)."""
     rows = get_execution_logs(limit=limit)

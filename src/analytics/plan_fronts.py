@@ -474,13 +474,43 @@ def tank_section(day: date, now_utc: datetime, tz: ZoneInfo, lp_slots: list[dict
 
 
 # -------------------------------------------------------------------- heating
-def heating_windows(rows: list[dict[str, Any]], tz: ZoneInfo) -> list[dict[str, Any]]:
-    out = []
-    for r in rows:
+_STATUS_RANK = {"active": 2, "pending": 1, "completed": 0}
+
+
+def heating_windows(
+    rows: list[dict[str, Any]], tz: ZoneInfo, *,
+    source_by_slot: dict[str, str] | None = None, fallback_source: str | None = None,
+) -> list[dict[str, Any]]:
+    """Window list for the Home heating card.
+
+    ``source`` comes from the PLAN record (``lwt_learning_log.source`` of the
+    window's first slot, else ``fallback_source`` = the last ``lwt_source_diff``
+    ``source_used``) — NOT the legacy ``params.lp_optimizer`` flag, which only
+    means "written by the LP dispatch pipeline" (#829/#845). Rows of the same
+    kind+offset whose [start, end) overlap are collapsed, preferring an
+    ``active`` row, then the newest one. ``source`` is the source of the LATEST
+    plan covering the window (the learning log is latest-plan-wins), so a
+    re-solve can relabel an older window. Tank-only ``restore`` rows (no
+    ``lwt_offset``) are not heating windows. When a later-starting row with a
+    different offset overlaps an earlier one, the earlier window is trimmed to
+    the newer start (the device switches there).
+    """
+    # Prefer active, then newest, so the overlap collapse keeps the best row.
+    ordered = sorted(
+        rows,
+        key=lambda r: (_STATUS_RANK.get(str(r.get("status") or ""), 0),
+                       str(r.get("created_at") or ""), int(r.get("id") or 0)),
+        reverse=True,
+    )
+    out: list[dict[str, Any]] = []
+    kept: list[tuple[str, float, Any, Any]] = []
+    for r in ordered:
         at = r.get("action_type")
         if at not in ("lwt_preheat", "restore"):
             continue
         params = r.get("params") if isinstance(r.get("params"), dict) else {}
+        if at == "restore" and "lwt_offset" not in params:
+            continue  # DHW restore carries tank params only
         st, en = _parse(r.get("start_time")), _parse(r.get("end_time"))
         if st is None:
             continue
@@ -492,14 +522,37 @@ def heating_windows(rows: list[dict[str, Any]], tz: ZoneInfo) -> list[dict[str, 
             if off is None or float(off) == 0:
                 continue
             kind = "boost" if float(off) > 0 else "setback"
-            source = "lp" if params.get("lp_optimizer") else "tier"
+            source = None
+            if source_by_slot:
+                f = st.astimezone(UTC)
+                f = f.replace(minute=0 if f.minute < 30 else 30, second=0, microsecond=0)
+                source = source_by_slot.get(_z(f))
+            source = source or fallback_source
+        offv = float(off) if off is not None else 0.0
+        if any(k == kind and o == offv and st < ke and en > ks for k, o, ks, ke in kept):
+            continue
+        kept.append((kind, offv, st, en))
         out.append({
             "kind": kind, "offset_c": _r(off, 1) if off is not None else 0.0,
-            "start_utc": _z(st), "end_utc": _z(en),
-            "start_local": _hhmm(st, tz), "end_local": _hhmm(en, tz), "source": source,
+            "_st": st, "_en": en, "_off": offv, "source": source,
         })
-    out.sort(key=lambda w: w["start_utc"])
-    return out
+    # Device fires in start order: trim an earlier window to a later, differing one.
+    out.sort(key=lambda w: w["_st"])
+    for i, w in enumerate(out):
+        for n in out[i + 1:]:
+            if n["_st"] > w["_st"] and n["_st"] < w["_en"] and n["_off"] != w["_off"]:
+                w["_en"] = n["_st"]
+                break
+    res = []
+    for w in out:
+        st, en = w["_st"], w["_en"]
+        res.append({
+            "kind": w["kind"], "offset_c": w["offset_c"],
+            "start_utc": _z(st), "end_utc": _z(en),
+            "start_local": _hhmm(st, tz), "end_local": _hhmm(en, tz), "source": w["source"],
+        })
+    res.sort(key=lambda w: w["start_utc"])
+    return res
 
 
 def _indoor_stats(lp_slots: list[dict[str, Any]], tz: ZoneInfo) -> dict[str, Any]:
@@ -586,6 +639,7 @@ def heating_section(day: date, windows: list[Any], tz: ZoneInfo, lp_slots: list[
             out["outdoor_now_c"] = _r(tel.get("outdoor_temp_c"), 1)
     except Exception:  # noqa: BLE001
         pass
+    g: dict[str, Any] | None = None
     try:
         g = space_heating_gate_state()
         diff = g.get("lwt_source_last_diff")
@@ -609,7 +663,20 @@ def heating_section(day: date, windows: list[Any], tz: ZoneInfo, lp_slots: list[
             st, en = _parse(r.get("start_time")), _parse(r.get("end_time"))
             if st is not None and st < b and (en or st) >= a:
                 rows[r.get("id") or (pd, r.get("start_time"), r.get("action_type"))] = r
-    hw = heating_windows(list(rows.values()), tz)
+    src_by_slot: dict[str, str] = {}
+    try:
+        for lr in db.get_lwt_learning_rows(_z(a), _z(b)):
+            if lr.get("source"):
+                src_by_slot[str(lr["slot_time_utc"])] = str(lr["source"])
+    except Exception:  # noqa: BLE001
+        logger.debug("plan_fronts: lwt_learning_log source read failed", exc_info=True)
+    fb = None
+    try:
+        _d = g.get("lwt_source_last_diff") if isinstance(g, dict) else None
+        fb = (_d.get("source_used") if isinstance(_d, dict) else None) or None
+    except Exception:  # noqa: BLE001
+        fb = None
+    hw = heating_windows(list(rows.values()), tz, source_by_slot=src_by_slot, fallback_source=fb)
     out["windows"] = hw
     out["by_band"] = heating_by_band(windows, lp_slots, hw, tz)
     return out

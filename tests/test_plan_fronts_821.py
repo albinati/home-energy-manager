@@ -171,13 +171,18 @@ def test_heating_windows_and_by_band():
         {"action_type": "lwt_preheat", "start_time": "2026-10-07T15:00:00Z", "end_time": "2026-10-07T18:00:00Z",
          "params": {"lwt_offset": -2}},
         {"action_type": "restore", "start_time": "2026-10-07T06:00:00Z", "end_time": "2026-10-07T06:30:00Z",
-         "params": {}},
+         "params": {"lwt_offset": 0}},
+        {"action_type": "restore", "start_time": "2026-10-07T12:00:00Z", "end_time": "2026-10-07T12:05:00Z",
+         "params": {"tank_power": True, "tank_temp": 45.0}},
         {"action_type": "tank_warmup", "start_time": "2026-10-07T12:00:00Z", "end_time": "2026-10-07T13:00:00Z",
          "params": {}},
     ]
-    w = pf.heating_windows(rows, LON)
+    # #845: source comes from the plan record (learning-log slot source, else
+    # the last lwt_source_diff), NOT params.lp_optimizer.
+    w = pf.heating_windows(rows, LON, source_by_slot={"2026-10-07T03:00:00Z": "tier"}, fallback_source="lp")
     assert [(x["kind"], x["source"], x["offset_c"]) for x in w] == [
-        ("boost", "lp", 3.0), ("restore", None, 0.0), ("setback", "tier", -2.0)]
+        ("boost", "tier", 3.0), ("restore", None, 0.0), ("setback", "lp", -2.0)]
+    assert pf.heating_windows(rows, LON)[0]["source"] is None
     assert w[0]["start_local"] == "04:00"
     cheap = _win("band_cheap", "cheap", 4, 7, 12.49)
     peak = _win("band_peak", "peak", 16, 19, 38.17)
@@ -189,6 +194,38 @@ def test_heating_windows_and_by_band():
     assert pf.heating_by_band([cheap], lp, [], LON)[0]["offset_mode"] is None
     st = pf._indoor_stats(lp, LON)
     assert st["min_c"] == 20.0 and st["at_16_c"] == 22.0 and st["at_07_c"] is None
+
+
+def test_heating_windows_collapse_overlapping_same_offset():
+    rows = [
+        {"id": 1, "status": "completed", "created_at": "2026-10-07T10:00:00",
+         "action_type": "lwt_preheat", "start_time": "2026-10-07T15:00:00Z",
+         "end_time": "2026-10-07T18:00:00Z", "params": {"lwt_offset": -2}},
+        {"id": 2, "status": "active", "created_at": "2026-10-07T15:20:00",
+         "action_type": "lwt_preheat", "start_time": "2026-10-07T15:30:00Z",
+         "end_time": "2026-10-07T18:00:00Z", "params": {"lwt_offset": -2}},
+        {"id": 3, "status": "pending", "created_at": "2026-10-07T15:25:00",
+         "action_type": "lwt_preheat", "start_time": "2026-10-07T15:30:00Z",
+         "end_time": "2026-10-07T18:00:00Z", "params": {"lwt_offset": 3}},
+    ]
+    w = pf.heating_windows(rows, LON, fallback_source="lp")
+    # one -2 window (the active row, 15:30) + the different-offset +3 row stays
+    assert sorted((x["kind"], x["start_utc"]) for x in w) == [
+        ("boost", "2026-10-07T15:30:00Z"), ("setback", "2026-10-07T15:30:00Z")]
+    assert sum(1 for x in w if x["kind"] == "setback") == 1
+
+
+def test_heating_windows_trim_older_to_newer_start():
+    rows = [
+        {"id": 1, "status": "active", "created_at": "a", "action_type": "lwt_preheat",
+         "start_time": "2026-10-07T16:00:00Z", "end_time": "2026-10-07T19:00:00Z", "params": {"lwt_offset": -3}},
+        {"id": 2, "status": "pending", "created_at": "b", "action_type": "lwt_preheat",
+         "start_time": "2026-10-07T16:30:00Z", "end_time": "2026-10-07T19:00:00Z", "params": {"lwt_offset": -1}},
+    ]
+    w = pf.heating_windows(rows, LON)
+    assert [(x["start_utc"], x["end_utc"], x["offset_c"]) for x in w] == [
+        ("2026-10-07T16:00:00Z", "2026-10-07T16:30:00Z", -3.0),
+        ("2026-10-07T16:30:00Z", "2026-10-07T19:00:00Z", -1.0)]
 
 
 # ---------------------------------------------------------------------- tank
@@ -326,8 +363,17 @@ def test_heating_rows_keyed_by_plan_date_of_previous_day():
                      device="daikin", action_type="lwt_preheat", params={"lwt_offset": 3})
     _seed_cosy_rates(DAY)
     windows = __import__("src.analytics.load_expected", fromlist=["x"]).band_windows_for_day(DAY, LON)[0]
+    # The legacy params.lp_optimizer flag must NOT decide the source (#845):
+    # the plan record (lwt_learning_log) says this slot was written by the tier rule.
+    conn = db.get_connection()
+    try:
+        conn.execute("INSERT INTO lwt_learning_log (slot_time_utc, source) VALUES (?, ?)",
+                     ("2026-10-07T03:00:00Z", "tier"))
+        conn.commit()
+    finally:
+        conn.close()
     h = pf.heating_section(DAY, windows, LON, [])
-    assert [(w["kind"], w["source"]) for w in h["windows"]] == [("boost", "lp")]
+    assert [(w["kind"], w["source"]) for w in h["windows"]] == [("boost", "tier")]
 
 
 def test_battery_section_with_real_fox_groups(monkeypatch):
