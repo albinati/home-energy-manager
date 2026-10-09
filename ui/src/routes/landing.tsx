@@ -1,4 +1,4 @@
-import { useEffect } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { lazy, Suspense } from "preact/compat";
 import { usePoll, useFetch, useAfterPaint } from "../lib/poll";
 import {
@@ -125,7 +125,21 @@ export default function Landing() {
   // that day (the API only plans ≤ today); a future/other period falls back to
   // today. `?mock=1` serves a fixture so the UI can be developed without the API.
   const todayIso = todayISO();
-  const frontsDate = period.gran === "day" && period.anchor <= todayIso ? period.anchor : todayIso;
+  // #845: Today / Tomorrow toggle. Default = Tomorrow once it's >= 16:00 local
+  // AND the heating-plan API already carries tomorrow's scheduled LP rows (the
+  // evening replan makes tomorrow's plan the one that matters); else Today.
+  const tomorrowIso = (() => {
+    const d = new Date(); d.setDate(d.getDate() + 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
+  const [frontsPick, setFrontsPick] = useState<"today" | "tomorrow" | null>(null);
+  const tomorrowPlanned = (heatingPlan.data?.slots ?? []).some(
+    (sl) => sl.offset_source === "schedule" && new Date(sl.slot_utc).toLocaleDateString("sv") === tomorrowIso,
+  );
+  const frontsDefault: "today" | "tomorrow" = new Date().getHours() >= 16 && tomorrowPlanned ? "tomorrow" : "today";
+  const frontsChoice = frontsPick ?? frontsDefault;
+  const pastNav = period.gran === "day" && period.anchor < todayIso;
+  const frontsDate = pastNav ? period.anchor : frontsChoice === "tomorrow" ? tomorrowIso : todayIso;
   const fronts = useFetch(async () => {
     if (import.meta.env.DEV && MOCK) return (await import("../lib/mock/planFronts")).MOCK_PLAN_FRONTS;
     return getPlanFronts(frontsDate === todayIso ? undefined : frontsDate);
@@ -213,8 +227,17 @@ export default function Landing() {
       {!frontsMissing && <>
       <h2 class="scope scope--period">
         <span class="scope-dot" aria-hidden="true" />
-        Plan {frontsDate === todayIso ? "today" : frontsDate}{MOCK && <> <Pill tone="warn">MOCK</Pill></>}
+        Plan {frontsDate === todayIso ? "today" : frontsDate === tomorrowIso ? "tomorrow" : frontsDate}{MOCK && <> <Pill tone="warn">MOCK</Pill></>}
         <span class="scope-when">battery · hot water · heating</span>
+        {!pastNav && (
+          <div class="pnav-grans" role="tablist" aria-label="Plan day" style={{ marginLeft: "auto" }}>
+            {(["today", "tomorrow"] as const).map((k) => (
+              <button key={k} class={`pnav-gran${frontsChoice === k ? " is-active" : ""}`}
+                      role="tab" aria-selected={frontsChoice === k}
+                      onClick={() => setFrontsPick(k)}>{k === "today" ? "Today" : "Tomorrow"}</button>
+            ))}
+          </div>
+        )}
       </h2>
       {frontsFailed && <p class="muted">Couldn't load plan for {frontsDate}.</p>}
       {!frontsFailed && <div class="widget-grid widget-band">

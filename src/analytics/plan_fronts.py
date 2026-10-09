@@ -474,9 +474,32 @@ def tank_section(day: date, now_utc: datetime, tz: ZoneInfo, lp_slots: list[dict
 
 
 # -------------------------------------------------------------------- heating
-def heating_windows(rows: list[dict[str, Any]], tz: ZoneInfo) -> list[dict[str, Any]]:
-    out = []
-    for r in rows:
+_STATUS_RANK = {"active": 2, "pending": 1, "completed": 0}
+
+
+def heating_windows(
+    rows: list[dict[str, Any]], tz: ZoneInfo, *,
+    source_by_slot: dict[str, str] | None = None, fallback_source: str | None = None,
+) -> list[dict[str, Any]]:
+    """Window list for the Home heating card.
+
+    ``source`` comes from the PLAN record (``lwt_learning_log.source`` of the
+    window's first slot, else ``fallback_source`` = the last ``lwt_source_diff``
+    ``source_used``) — NOT the legacy ``params.lp_optimizer`` flag, which only
+    means "written by the LP dispatch pipeline" (#829/#845). Rows of the same
+    kind+offset whose [start, end) overlap are collapsed, preferring an
+    ``active`` row, then the newest one.
+    """
+    # Prefer active, then newest, so the overlap collapse keeps the best row.
+    ordered = sorted(
+        rows,
+        key=lambda r: (_STATUS_RANK.get(str(r.get("status") or ""), 0),
+                       str(r.get("created_at") or ""), int(r.get("id") or 0)),
+        reverse=True,
+    )
+    out: list[dict[str, Any]] = []
+    kept: list[tuple[str, float, Any, Any]] = []
+    for r in ordered:
         at = r.get("action_type")
         if at not in ("lwt_preheat", "restore"):
             continue
@@ -492,7 +515,16 @@ def heating_windows(rows: list[dict[str, Any]], tz: ZoneInfo) -> list[dict[str, 
             if off is None or float(off) == 0:
                 continue
             kind = "boost" if float(off) > 0 else "setback"
-            source = "lp" if params.get("lp_optimizer") else "tier"
+            source = None
+            if source_by_slot:
+                f = st.astimezone(UTC)
+                f = f.replace(minute=0 if f.minute < 30 else 30, second=0, microsecond=0)
+                source = source_by_slot.get(_z(f))
+            source = source or fallback_source
+        offv = float(off) if off is not None else 0.0
+        if any(k == kind and o == offv and st < ke and en > ks for k, o, ks, ke in kept):
+            continue
+        kept.append((kind, offv, st, en))
         out.append({
             "kind": kind, "offset_c": _r(off, 1) if off is not None else 0.0,
             "start_utc": _z(st), "end_utc": _z(en),
@@ -586,6 +618,7 @@ def heating_section(day: date, windows: list[Any], tz: ZoneInfo, lp_slots: list[
             out["outdoor_now_c"] = _r(tel.get("outdoor_temp_c"), 1)
     except Exception:  # noqa: BLE001
         pass
+    g: dict[str, Any] | None = None
     try:
         g = space_heating_gate_state()
         diff = g.get("lwt_source_last_diff")
@@ -609,7 +642,20 @@ def heating_section(day: date, windows: list[Any], tz: ZoneInfo, lp_slots: list[
             st, en = _parse(r.get("start_time")), _parse(r.get("end_time"))
             if st is not None and st < b and (en or st) >= a:
                 rows[r.get("id") or (pd, r.get("start_time"), r.get("action_type"))] = r
-    hw = heating_windows(list(rows.values()), tz)
+    src_by_slot: dict[str, str] = {}
+    try:
+        for lr in db.get_lwt_learning_rows(_z(a), _z(b)):
+            if lr.get("source"):
+                src_by_slot[str(lr["slot_time_utc"])] = str(lr["source"])
+    except Exception:  # noqa: BLE001
+        logger.debug("plan_fronts: lwt_learning_log source read failed", exc_info=True)
+    fb = None
+    try:
+        _d = g.get("lwt_source_last_diff") if isinstance(g, dict) else None
+        fb = (_d.get("source_used") if isinstance(_d, dict) else None) or None
+    except Exception:  # noqa: BLE001
+        fb = None
+    hw = heating_windows(list(rows.values()), tz, source_by_slot=src_by_slot, fallback_source=fb)
     out["windows"] = hw
     out["by_band"] = heating_by_band(windows, lp_slots, hw, tz)
     return out

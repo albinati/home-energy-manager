@@ -628,6 +628,23 @@ the Settings simulate->confirm->apply flow). Story-3 plug point:
 `payload.external_comfort`, ranking untouched). Skips when < `TUNING_REVIEW_MIN_DAYS`
 (3) replayable days, or when `DAIKIN_CONTROL_MODE=passive` / `LP_W3_TIN_ENABLED=false` (W3 knobs would be inert; forward mode uses the LIVE process config, recorded as `payload.context`). `DHW_DYNAMIC_BOOST_HOLD_HOURS` is NOT swept (its only reader is the persisted nightly window decision, never re-resolved by a replay). Replays seed W3 from `lp_inputs_snapshot.indoor_initial_c` and chain `plan.indoor_temp_c`. Single-flight has no TTL (variants share `config._overrides`); the per-day budget (~9 min) stops the run (status `partial`, persisted in the payload).
 
+### `/daikin/heating-plan` = written offsets (#845, supersedes #829)
+
+`GET /api/v1/daikin/heating-plan` (Home chart, D-1/D/D+1) reports what the device
+is/was actually given, not the tier rule: per slot `lwt_offset` = covering
+`action_schedule` row (`lwt_preheat`/`restore`, device daikin; active > pending >
+completed, then newest `created_at`/id among overlaps) with `offset_source`
+`schedule`; past slots with an `execution_log.daikin_lwt_offset` sample report it
+(`device`); no row -> 0/`none`. `lwt_setpoint_c` = curve base + written offset.
+The old recompute survives only as `lwt_offset_tier` (the chart's "rule (ghost)"
+line). Top level carries `lwt_source` / `coast_mode`. One `action_schedule` read
+(`db.get_actions_for_plan_dates`) + one `execution_log` read per request. In
+`/plan/fronts` `heating.windows[].source` comes from `lwt_learning_log.source` of
+the window's first slot (fallback: last `lwt_source_diff.source_used`), never from
+`params.lp_optimizer`; overlapping rows of the same kind+offset collapse (active,
+then newest, kept). The Home plan cards have a Today/Tomorrow toggle (default
+Tomorrow when local time >= 16:00 and tomorrow has scheduled rows).
+
 ### LWT coast mode, comfort backstop and learning log (#838)
 
 - **`DAIKIN_LWT_COAST_MODE`** (runtime setting, `PUT /api/v1/settings`; code

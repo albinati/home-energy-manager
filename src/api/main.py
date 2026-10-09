@@ -1828,18 +1828,107 @@ async def daikin_dhw_schedule():
     return {"mode": mode, "rows": rows_out}
 
 
+def _apply_written_lwt_offsets(slots_out, today_local, win_start_utc, win_end_utc) -> None:
+    """Fill ``lwt_offset`` / ``offset_source`` on heating-plan slots (#845).
+
+    ``schedule``: covering ``lwt_preheat``/``restore`` row of ``action_schedule``
+    (active > pending > completed, then newest ``created_at``/id among overlaps).
+    ``device``: past slot with a realised ``execution_log.daikin_lwt_offset``
+    (wins over a schedule row). ``none``: nothing covers the slot -> 0.
+    """
+    from datetime import timedelta as _td
+
+    from .. import db as _db
+
+    now_utc = datetime.now(UTC)
+
+    def _p(v):
+        try:
+            d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+        return d if d.tzinfo else d.replace(tzinfo=UTC)
+
+    try:
+        dates = [(today_local + _td(days=d)).isoformat() for d in (-2, -1, 0, 1)]
+        rows = _db.get_actions_for_plan_dates(dates, device="daikin")
+    except Exception as e:
+        logger.debug("heating-plan: schedule read failed: %s", e)
+        rows = []
+    rank = {"active": 2, "pending": 1, "completed": 0}
+    cand = []
+    for r in rows:
+        if r.get("action_type") not in ("lwt_preheat", "restore"):
+            continue
+        st = rank.get(str(r.get("status") or ""))
+        if st is None:
+            continue
+        s0, e0 = _p(r.get("start_time")), _p(r.get("end_time"))
+        if s0 is None or e0 is None or e0 <= win_start_utc or s0 >= win_end_utc:
+            continue
+        params = r.get("params") if isinstance(r.get("params"), dict) else {}
+        try:
+            off = float(params.get("lwt_offset", 0) or 0)
+        except (TypeError, ValueError):
+            off = 0.0
+        cand.append(((st, str(r.get("created_at") or ""), int(r.get("id") or 0)), s0, e0, off))
+    cand.sort(key=lambda c: c[0])  # ascending: later (higher priority) overwrite
+    by_slot: dict[str, float] = {}
+    for _, s0, e0, off in cand:
+        cur = max(s0, win_start_utc)
+        cur = cur.replace(minute=0 if cur.minute < 30 else 30, second=0, microsecond=0)
+        while cur < e0 and cur < win_end_utc:
+            by_slot[cur.isoformat().replace("+00:00", "Z")] = off
+            cur += _td(minutes=30)
+
+    dev_by_slot: dict[str, float] = {}
+    try:
+        logs = _db.get_execution_logs(
+            from_ts=win_start_utc.isoformat().replace("+00:00", "Z"),
+            to_ts=min(now_utc, win_end_utc).isoformat().replace("+00:00", "Z"),
+            limit=20000,
+        )
+        for lg in reversed(logs):  # DESC -> chronological, latest sample wins
+            v = lg.get("daikin_lwt_offset")
+            ts = _p(lg.get("timestamp"))
+            if v is None or ts is None:
+                continue
+            ts = ts.replace(minute=0 if ts.minute < 30 else 30, second=0, microsecond=0)
+            dev_by_slot[ts.isoformat().replace("+00:00", "Z")] = float(v)
+    except Exception as e:
+        logger.debug("heating-plan: execution_log read failed: %s", e)
+
+    def _num(x: float):
+        return int(x) if float(x).is_integer() else round(x, 1)
+
+    for s in slots_out:
+        key = s["slot_utc"]
+        sdt = _p(key)
+        if sdt is not None and sdt + _td(minutes=30) <= now_utc and key in dev_by_slot:
+            s["lwt_offset"], s["offset_source"] = _num(dev_by_slot[key]), "device"
+        elif key in by_slot:
+            s["lwt_offset"], s["offset_source"] = _num(by_slot[key]), "schedule"
+        else:
+            s["lwt_offset"], s["offset_source"] = 0, "none"
+
+
 @app.get("/api/v1/daikin/heating-plan")
 async def daikin_heating_plan():
-    """Per-slot heating-plan timeline for **yesterday · today · tomorrow** — a
-    deterministic recompute (NOT the messy overlapping ``action_schedule``
-    rows), zero Daikin quota. Powers the Heating-plan widget (#481 follow-up):
+    """Per-slot heating-plan timeline for **yesterday · today · tomorrow**,
+    zero Daikin quota. Powers the Heating-plan widget (#481 follow-up).
+
+    #845: ``lwt_offset`` is what the device is/was actually given (covering
+    ``action_schedule`` row, or the realised ``execution_log`` offset for past
+    slots) with ``offset_source`` = ``schedule|device|none``; the deterministic
+    tier-rule recompute survives only as ``lwt_offset_tier`` (ghost line).
+    Top level carries ``lwt_source`` / ``coast_mode``.
 
     For each half-hour slot across the 3 local days:
       * ``outdoor_c``  — Open-Meteo forecast temp (``meteo_forecast.temp_c``)
       * ``price_p`` / ``tier`` — Agile import rate + cheap/standard/peak class
-      * ``lwt_offset`` — the heuristic pre-heat offset for that slot (the same
-        ``_preheat_lwt_offset`` the dispatch layer applies; ``null`` when the
-        feature is off or the firmware isn't heating)
+      * ``lwt_offset_tier`` — the heuristic tier-rule offset for that slot (the
+        same ``_preheat_lwt_offset`` the dispatch layer applies; ``null`` when
+        the feature is off or the firmware isn't heating)
       * ``heating_on`` — firmware plausibly heating (outdoor < curve high anchor)
       * ``tank_temp_c`` / ``tank_kind`` — the dhw_policy tank target/kind
 
@@ -2020,7 +2109,9 @@ async def daikin_heating_plan():
             "outdoor_c": round(outdoor, 1) if outdoor is not None else None,
             "price_p": round(price, 2) if price is not None else None,
             "tier": _tier(price),
-            "lwt_offset": off,
+            "lwt_offset": None,        # written offset, filled below (#845)
+            "lwt_offset_tier": off,    # tier rule recompute (ghost), smoothed below
+            "offset_source": "none",
             "lwt_base_c": lwt_base,
             "lwt_setpoint_c": None,   # filled after smoothing (depends on offset)
             "heating_on": heating_on,
@@ -2039,10 +2130,17 @@ async def daikin_heating_plan():
     # (smoothed) offset, clamped to the device LWT range.
     smoothed = smooth_lwt_offsets(raw_offsets, int(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", 4)))
     for s, off in zip(slots_out, smoothed):
-        s["lwt_offset"] = off
+        s["lwt_offset_tier"] = off
+
+    # #845: the MAIN line is what the device is/was actually given — the
+    # covering action_schedule row (one read for the whole window), or the
+    # realised device offset for past slots. The tier recompute above stays
+    # only as the "rule would do" ghost.
+    _apply_written_lwt_offsets(slots_out, today_local, win_start_utc, win_end_utc)
+    for s in slots_out:
         base = s.get("lwt_base_c")
         if base is not None:
-            s["lwt_setpoint_c"] = round(max(18.0, min(50.0, base + (off or 0))), 1)
+            s["lwt_setpoint_c"] = round(max(18.0, min(50.0, base + (s.get("lwt_offset") or 0))), 1)
 
     days_out = [
         {"date": d.isoformat(),
@@ -2054,6 +2152,8 @@ async def daikin_heating_plan():
         "enabled": enabled,
         "now_utc": _dt.now(UTC).isoformat().replace("+00:00", "Z"),
         "high_temp_c": high_c,
+        "lwt_source": str(getattr(config, "DAIKIN_LWT_SOURCE", "tier") or "tier"),
+        "coast_mode": str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback"),
         "days": days_out,
         "slots": slots_out,
     }

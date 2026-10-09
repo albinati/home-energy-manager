@@ -591,7 +591,9 @@ export interface HeatingPlanSlot {
   outdoor_c?: number | null;
   price_p?: number | null;
   tier?: "negative" | "cheap" | "standard" | "peak" | null;
-  lwt_offset?: number | null;     // integer °C, e.g. +3 / -2; null = no offset
+  lwt_offset?: number | null;     // WRITTEN offset (#845): schedule row or realised device value
+  offset_source?: "schedule" | "device" | "none";
+  lwt_offset_tier?: number | null; // tier-rule recompute (ghost line)
   lwt_base_c?: number | null;     // weather-curve LWT at this outdoor temp (offset 0)
   lwt_setpoint_c?: number | null; // actual radiator target = base + offset
   heating_on?: boolean;
@@ -608,6 +610,8 @@ export interface HeatingPlanResponse {
   enabled: boolean;
   now_utc: string;
   high_temp_c: number;            // heating cutoff (DAIKIN_WEATHER_CURVE_HIGH_C)
+  lwt_source?: "tier" | "lp";
+  coast_mode?: string;
   days: HeatingPlanDay[];
   slots: HeatingPlanSlot[];
 }
@@ -1393,6 +1397,7 @@ export interface PlanFrontsHeating {
   peak_coast_delta_c: number | null;
   ceiling_c?: number | null;
   lwt_source: "tier" | "lp" | null;
+  coast_mode?: string | null;
   gate: HeatingGate | null;
   windows: HeatingPlanWindow[];
   predicted_indoor: HeatingPredictedIndoor | null;

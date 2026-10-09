@@ -67,6 +67,8 @@
 .hpl-line--tank      { border-top-style: dashed; border-top-color: var(--thermal); }
 /* Heating / radiator LWT (purple): realised solid, planned dotted. */
 .hpl-line--realised  { border-top-width: 3px; border-top-color: var(--house); }
+.hpl-line--plan      { border-top-style: dashed; border-top-width: 2px; border-top-color: var(--house); }
+.hpl-line--ghost     { border-top-style: dotted; border-top-width: 1px; border-top-color: color-mix(in srgb, var(--house) 40%, transparent); }
 .hpl-line--planned   { border-top-style: dotted; border-top-width: 2px; border-top-color: var(--house); }
 /* Domain group labels in the legend. */
 .hpl-legend-grp {
