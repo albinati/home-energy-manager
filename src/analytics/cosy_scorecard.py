@@ -298,13 +298,24 @@ def _indoor_min_max(day: date, tz: ZoneInfo, a: datetime, b: datetime) -> tuple[
         if t is None or r.get("temp_c") is None:
             continue
         bt = t.replace(minute=(t.minute // 15) * 15, second=0, microsecond=0)
+        # later reading in the same bucket wins (the range is time-ordered)
         buckets.setdefault(bt, {})[str(r.get("room") or "home")] = float(r["temp_c"])
+    all_rooms: set[str] = set()
+    for rooms_b in buckets.values():
+        all_rooms.update(rooms_b)
+    # A room on a slower cadence is absent from some buckets; aggregating only
+    # the rooms that happened to report biases min/max. Carry each room's last
+    # reading forward, and aggregate only once EVERY room seen has reported.
+    last: dict[str, float] = {}
     vals: list[float] = []
     for bt in sorted(buckets):
+        last.update(buckets[bt])
         if bt.astimezone(tz).date() != day:
             continue
+        if len(last) < len(all_rooms):
+            continue
         try:
-            _m, house = db.aggregate_indoor_c(buckets[bt])
+            _m, house = db.aggregate_indoor_c(dict(last))
         except ValueError:
             continue
         vals.append(float(house))

@@ -108,7 +108,9 @@ class LpPlan:
     w3_ceiling_c: float | None = None
     """#841 — the W3 comfort ceiling this plan was SOLVED with (soft upper bound)."""
     comfort_slack_hi_c: list[float] = field(default_factory=list)
-    """#841 — the ceiling-overshoot part of ``comfort_slack_c`` (°C, len N)."""
+    """#841 — per-slot ceiling overshoot (°C, len N), reported SEPARATELY from
+    ``comfort_slack_c``: a house that starts above the ceiling produces
+    unavoidable overshoot that says nothing about the model."""
     comfort_slack_c: list[float] = field(default_factory=list)
     """W3 per-slot comfort-floor shortfall (°C, len N). Non-zero ONLY when the
     pump physically cannot hold the floor — the precise signature of an RC
@@ -586,9 +588,8 @@ def solve_lp(
         w3_pen = float(getattr(config, "LP_W3_COMFORT_PEN_PENCE_PER_DEGC_SLOT", 15.0))
         w3_peak_delta = float(getattr(config, "LP_W3_PEAK_COAST_DELTA_C", 1.0))
         # #841 — soft comfort ceiling so banking heat in cheap bands cannot overheat.
-        w3_ceiling = max(
-            float(getattr(config, "LP_W3_CEILING_C", 23.0)), w3_day_sp + 0.5
-        )
+        from .lwt_coast import effective_w3_ceiling_c
+        w3_ceiling = max(effective_w3_ceiling_c(), w3_day_sp + 0.5)
 
         def _w3_floor(i: int) -> float:
             """Three-level comfort floor (#808): night floor 22–07, setpoint
@@ -1868,9 +1869,9 @@ def solve_lp(
             plan.w3_ceiling_c = w3_ceiling
             plan.indoor_temp_c.append(_v(t_in[i]))
             if i < n:
-                # comfort_slack_c = floor shortfall + ceiling overshoot (#841);
-                # the hi part is also reported on its own.
-                plan.comfort_slack_c.append(_v(s_lo[i]) + _v(s_hi[i]))
+                # comfort_slack_c = FLOOR shortfall only (the unfitted-model
+                # signature, #808); the ceiling overshoot is reported apart.
+                plan.comfort_slack_c.append(_v(s_lo[i]))
                 plan.comfort_slack_hi_c.append(_v(s_hi[i]))
 
     plan.dhw_lp_owned = _lp_owned

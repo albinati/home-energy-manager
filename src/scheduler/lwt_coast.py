@@ -27,6 +27,16 @@ logger = logging.getLogger(__name__)
 _backstop_ticks: int = 0
 
 
+def effective_w3_ceiling_c() -> float:
+    """#841 — the W3 comfort ceiling actually used: ``LP_W3_CEILING_C``, never
+    below ``INDOOR_SETPOINT_C + 0.5`` (a setpoint raised past the ceiling must
+    not make the plan infeasible / the guards nonsensical). The ONE reader."""
+    return max(
+        float(getattr(config, "LP_W3_CEILING_C", 23.0)),
+        float(getattr(config, "INDOOR_SETPOINT_C", 21.0)) + 0.5,
+    )
+
+
 def _tz() -> ZoneInfo:
     return ZoneInfo(str(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London") or "Europe/London"))
 

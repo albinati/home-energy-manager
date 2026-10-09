@@ -193,6 +193,7 @@ async def get_thermal_calibration() -> dict[str, Any]:
             # #841 — the UA that C was derived from + whether it was recomputed
             "c_basis_ua_w_per_k": c_res.get("c_basis_ua_w_per_k"),
             "c_recomputed": bool(c_res.get("c_recomputed")),
+            "c_reason": c_res.get("c_reason"),
             "tau_hours": round(tl.get_building_tau_hours(), 2),
             "ua_w_per_k": round(tl.get_building_ua_w_per_k(), 1),
             "c_kwh_per_k": round(float(c_res["c_kwh_per_k"]), 2),

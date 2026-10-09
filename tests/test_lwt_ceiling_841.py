@@ -96,6 +96,38 @@ def test_c_unknown_basis_is_recomputed(monkeypatch):
     assert tl.thermal_mass_resolution()["c_recomputed"] is True
 
 
+def test_c_measured_source_is_kept(monkeypatch):
+    _cal(monkeypatch, c_kwh_per_k=14.0, c_source="heat_capacity_fit", c_ua_basis_w_per_k=None)
+    res = tl.thermal_mass_resolution()
+    assert res["c_kwh_per_k"] == 14.0 and res["c_recomputed"] is False
+    assert tl.get_building_thermal_mass_kwh_per_k() == 14.0
+
+
+def test_c_out_of_bounds_stored_is_recomputed_with_reason(monkeypatch):
+    _cal(monkeypatch, c_kwh_per_k=90.0, c_ua_basis_w_per_k=200.0)
+    res = tl.thermal_mass_resolution()
+    assert res["c_recomputed"] is True and res["c_reason"] == "stored_c_out_of_bounds"
+    assert res["c_kwh_per_k"] == pytest.approx(82.7 * 200 / 1000, abs=1e-6)
+
+
+def test_refresh_uses_bounded_ua_for_c(monkeypatch, tmpdb):
+    """An out-of-bounds learned UA (HDD fit 2000 W/K) must not stamp C = tau x 2000."""
+    monkeypatch.setattr(config, "BUILDING_UA_W_PER_K", 200.0, raising=False)
+    monkeypatch.setattr(db, "get_indoor_readings_range", lambda s, e: [
+        {"captured_at": "2026-11-04T03:00:00Z", "room": "a", "temp_c": 20.0}])
+    monkeypatch.setattr(tl, "_outdoor_series", lambda a, b: [])
+    monkeypatch.setattr(tl, "select_decay_episodes", lambda *a, **k: [])
+    monkeypatch.setattr(tl, "fit_tau", lambda *a, **k: {
+        "status": "ok", "tau_hours": 60.0, "r2_median": 0.9, "episodes": 5})
+    monkeypatch.setattr(tl, "_ua_fit_from_db", lambda *a, **k: {
+        "status": "ok", "ua_w_per_k": 2000.0, "r2": 0.9, "samples": 30, "assumed_cop": 3.0})
+    assert tl.refresh_building_thermal_calibration()["status"] == "ok"
+    row = db.get_building_thermal_calibration()
+    assert row["c_ua_basis_w_per_k"] == 200.0
+    assert row["c_kwh_per_k"] == pytest.approx(12.0)
+    assert row["c_source"] == "tau_x_env_ua"
+
+
 def test_c_matching_basis_returns_stored(monkeypatch):
     _cal(monkeypatch, c_kwh_per_k=16.54, c_ua_basis_w_per_k=200.0)
     assert tl.get_building_thermal_mass_kwh_per_k() == pytest.approx(16.54)
@@ -153,15 +185,24 @@ def _solve(monkeypatch, *, ceiling, indoor0=21.0):
     monkeypatch.setattr(config, "LP_W3_TIN_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "LP_W3_PEAK_COAST_DELTA_C", 0.0, raising=False)
     monkeypatch.setattr(config, "THERMAL_LEARNED_VALUES_ENABLED", False, raising=False)
-    monkeypatch.setattr(config, "BUILDING_UA_W_PER_K", 150.0, raising=False)
-    monkeypatch.setattr(config, "BUILDING_THERMAL_MASS_KWH_PER_K", 12.0, raising=False)
+    # Small thermal mass + leaky house + strong pump so banking in the cheap
+    # bands actually reaches the ceiling (prod constants never do: ~0.5 K/band).
+    # The per-slot recovery cap, radiator cap and lift cap are lifted so they
+    # do not bind before the ceiling does.
+    monkeypatch.setattr(config, "DAIKIN_LWT_ABS_MAX_C", 60.0, raising=False)
+    monkeypatch.setattr(config, "RADIATOR_MAX_KW", 20.0, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_MAX_HP_KW", 6.0, raising=False)
+    monkeypatch.setattr(config, "LP_W3_MAX_RECOVERY_C_PER_SLOT", 4.0, raising=False)
+    monkeypatch.setattr(config, "BUILDING_UA_W_PER_K", 300.0, raising=False)
+    monkeypatch.setattr(config, "BUILDING_THERMAL_MASS_KWH_PER_K", 4.0, raising=False)
+    monkeypatch.setattr("src.physics.get_kw_per_degc_lwt", lambda: 0.15)
     monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active")
     monkeypatch.setattr(config, "LP_W3_CEILING_C", ceiling)
     monkeypatch.setattr(config, "LP_W3_COMFORT_PEN_PENCE_PER_DEGC_SLOT", 300.0, raising=False)
     starts, prices = _day_inputs()
     n = len(starts)
     w = WeatherLpSeries(
-        slot_starts_utc=starts, temperature_outdoor_c=[3.0] * n, shortwave_radiation_wm2=[50.0] * n,
+        slot_starts_utc=starts, temperature_outdoor_c=[6.0] * n, shortwave_radiation_wm2=[50.0] * n,
         cloud_cover_pct=[80.0] * n, pv_kwh_per_slot=[0.05] * n, cop_space=[3.0] * n, cop_dhw=[2.6] * n,
     )
     plan = solve_lp(
@@ -172,35 +213,66 @@ def _solve(monkeypatch, *, ceiling, indoor0=21.0):
     return plan
 
 
-def test_plan_never_exceeds_ceiling_and_records_it(monkeypatch):
-    plan = _solve(monkeypatch, ceiling=22.3)
-    assert plan.w3_ceiling_c == pytest.approx(22.3)
-    # the bound is honoured as a SOFT constraint: any overshoot is reported as slack
-    for i, s in enumerate(plan.comfort_slack_hi_c):
-        assert plan.indoor_temp_c[i + 1] <= 22.3 + s + 1e-6
-    assert max(plan.indoor_temp_c) <= 22.35
+def test_ceiling_binds_and_stops_banking(monkeypatch):
+    free = _solve(monkeypatch, ceiling=28.0)
+    tight = _solve(monkeypatch, ceiling=22.0)
+    assert tight.w3_ceiling_c == pytest.approx(22.0)
+    assert free.w3_ceiling_c == pytest.approx(28.0)
+    # without the ceiling the cheap bands bank well above 22.5; with it, never above 22.05
+    assert max(free.indoor_temp_c) > 22.5   # ~24.8 at these constants
+    assert max(tight.indoor_temp_c) <= 22.05
+    assert sum(tight.comfort_slack_hi_c) == pytest.approx(0.0, abs=1e-6)
+    # heating stops once the house reaches the ceiling: no cheap-band heat while at/over 21.95
+    for i in range(len(tight.space_electric_kwh)):
+        if tight.indoor_temp_c[i + 1] >= 21.95 and tight.indoor_temp_c[i] >= 21.95:
+            # holding at the ceiling only needs the leak replaced, never a lift beyond it
+            assert tight.indoor_temp_c[i + 1] <= tight.indoor_temp_c[i] + 0.06
+    assert sum(tight.space_electric_kwh) < sum(free.space_electric_kwh)
 
 
-def test_ceiling_binds_and_reports_overshoot_as_slack(monkeypatch):
+def test_start_above_ceiling_reports_overshoot_and_buys_no_heat(monkeypatch):
     """House starts ABOVE the ceiling: the soft bound is violated only where it
-    physically must be (reported as ceiling slack), and the plan does not heat
-    while above it; with a high ceiling there is no slack at all."""
-    free = _solve(monkeypatch, ceiling=28.0, indoor0=22.8)
-    tight = _solve(monkeypatch, ceiling=22.0, indoor0=22.8)
-    assert sum(free.comfort_slack_hi_c) == pytest.approx(0.0, abs=1e-6)
-    assert tight.comfort_slack_hi_c[0] > 0.2           # 22.8 -> ~22.7 after slot 0: still over
-    assert all(s <= 1e-6 for s in tight.comfort_slack_hi_c[12:])  # settled under the ceiling
-    assert max(tight.indoor_temp_c[12:]) <= 22.05
-    # no space heat is bought while the house is over the ceiling
-    assert sum(tight.space_electric_kwh[:4]) <= sum(free.space_electric_kwh[:4]) + 1e-6
+    physically must be (reported as ceiling slack) and no heat is bought."""
+    tight = _solve(monkeypatch, ceiling=22.0, indoor0=23.5)
+    assert tight.comfort_slack_hi_c[0] > 0.2
+    assert all(s <= 1e-6 for s in tight.comfort_slack_hi_c[12:])  # settled under it
+    assert sum(tight.space_electric_kwh[:4]) <= 1e-6
+    # floor slack (model-health signal) is NOT polluted by the ceiling overshoot
+    assert sum(tight.comfort_slack_c) == pytest.approx(0.0, abs=1e-6)
 
 
-def test_ceiling_slack_is_counted_in_comfort_slack(monkeypatch):
+def test_start_above_ceiling_does_not_trip_plausibility_gate():
+    plan = _plan(n=48, lwt=[0.0] * 48, space=[0.0] * 48, indoor=[23.5] * 49)
+    plan.w3_ceiling_c = 23.0
+    plan.comfort_slack_c = [0.0] * 48
+    plan.comfort_slack_hi_c = [0.5] * 48
+    assert w3_trajectory_plausible(plan) == (True, "ok")
+
+
+def test_heating_above_ceiling_trips_plausibility_gate():
+    plan = _plan(n=48, lwt=[4.0] * 48, space=[0.3] * 48, indoor=[23.5] * 49)
+    plan.w3_ceiling_c = 23.0
+    plan.comfort_slack_c = [0.0] * 48
+    plan.comfort_slack_hi_c = [0.5] * 6 + [0.0] * 42
+    ok, reason = w3_trajectory_plausible(plan)
+    assert not ok and reason.startswith("comfort_slack:6_slots")
+
+
+def test_floor_slack_still_trips_plausibility_gate():
     plan = _plan(lwt=[0.0] * 8, indoor=[21.0] * 9)
     plan.w3_ceiling_c = 23.0
-    plan.comfort_slack_c = [0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.0]  # 5 slots > 0.1 (ceiling or floor)
+    plan.comfort_slack_c = [0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.0]
     ok, reason = w3_trajectory_plausible(plan)
     assert not ok and reason.startswith("comfort_slack:5_slots")
+
+
+def test_effective_ceiling_helper(monkeypatch):
+    from src.scheduler.lwt_coast import effective_w3_ceiling_c
+    monkeypatch.setattr(config, "LP_W3_CEILING_C", 23.0)
+    monkeypatch.setattr(config, "INDOOR_SETPOINT_C", 21.0)
+    assert effective_w3_ceiling_c() == 23.0
+    monkeypatch.setattr(config, "INDOOR_SETPOINT_C", 22.8)
+    assert effective_w3_ceiling_c() == pytest.approx(23.3)
 
 
 def test_plausibility_uses_ceiling_not_setpoint(monkeypatch):
@@ -286,6 +358,13 @@ def test_ceiling_setting_validator(tmpdb):
         set_setting("LP_W3_CEILING_C", 35.0, actor="test")   # > max
 
 
+def test_setpoint_setting_validator_symmetric(tmpdb):
+    assert set_setting("LP_W3_CEILING_C", 23.5, actor="test") == 23.5
+    with pytest.raises(SettingValidationError):
+        set_setting("INDOOR_SETPOINT_C", 23.2, actor="test")  # > ceiling 23.5 - 0.5
+    assert set_setting("INDOOR_SETPOINT_C", 22.5, actor="test") == 22.5
+
+
 # ── learning log + telemetry ─────────────────────────────────────────────────
 
 
@@ -340,5 +419,23 @@ def test_heating_by_band_and_indoor_minmax(monkeypatch, tmpdb):
         {"captured_at": "2026-11-04T03:00:00Z", "room": "b", "temp_c": 22.0},
         {"captured_at": "2026-11-04T14:00:00Z", "room": "a", "temp_c": 22.5},
         {"captured_at": "2026-11-04T14:00:00Z", "room": "b", "temp_c": 23.5},
+    ])
+    assert cs._indoor_min_max(day, TZ, a, b) == (21.0, 23.0)
+
+
+def test_indoor_minmax_carries_slow_room_forward(monkeypatch):
+    """Room b reports every 30 min, room a every 15: buckets without b must use
+    b's last reading, not aggregate a alone."""
+    from src.analytics import cosy_scorecard as cs
+
+    day = date(2026, 11, 4)
+    a = datetime(2026, 11, 4, 0, 0, tzinfo=UTC)
+    b = a + timedelta(days=1)
+    monkeypatch.setattr(db, "get_indoor_readings_range", lambda s, e: [
+        {"captured_at": "2026-11-04T10:00:00Z", "room": "a", "temp_c": 20.0},
+        {"captured_at": "2026-11-04T10:00:00Z", "room": "b", "temp_c": 22.0},   # mean 21
+        {"captured_at": "2026-11-04T10:15:00Z", "room": "a", "temp_c": 24.0},   # b carried: mean 23
+        {"captured_at": "2026-11-04T10:30:00Z", "room": "a", "temp_c": 20.0},
+        {"captured_at": "2026-11-04T10:30:00Z", "room": "b", "temp_c": 22.0},
     ])
     assert cs._indoor_min_max(day, TZ, a, b) == (21.0, 23.0)

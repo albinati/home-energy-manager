@@ -1111,6 +1111,15 @@ def set_setting(key: str, value: Any, *, actor: str = "api") -> Any:
             raise SettingValidationError(
                 f"LP_W3_CEILING_C ({canonical}) must be >= INDOOR_SETPOINT_C + 0.5 ({sp + 0.5})"
             )
+    if key == "INDOOR_SETPOINT_C":
+        try:
+            ce = float(get_setting("LP_W3_CEILING_C"))
+        except Exception:  # noqa: BLE001
+            ce = None
+        if ce is not None and float(canonical) > ce - 0.5 + 1e-9:
+            raise SettingValidationError(
+                f"INDOOR_SETPOINT_C ({canonical}) must be <= LP_W3_CEILING_C - 0.5 ({ce - 0.5})"
+            )
     serialized = _serialize(spec, canonical)
     db.set_runtime_setting(key, serialized)
     # V11: append-only audit trail so a past LP run can be explained even

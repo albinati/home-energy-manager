@@ -151,7 +151,8 @@ def test_clamped_to_device_range(enabled, monkeypatch):
     assert _off(30.0, COLD) == -10  # clamp to MIN
 
 
-def test_comfort_guard_suppresses_boost_when_room_warm(enabled):
+def test_comfort_guard_suppresses_boost_when_room_warm(enabled, monkeypatch):
+    monkeypatch.setitem(config._overrides, "LP_W3_CEILING_C", 23.0)  # pin (#790)
     # #841: the guard is ceiling (23) - band (0.5) = 22.5, not setpoint + band —
     # banking heat deliberately goes above the setpoint while cheap.
     assert _off(5.0, COLD, indoor_c=22.6) == 0

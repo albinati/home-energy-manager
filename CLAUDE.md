@@ -479,9 +479,10 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   → `+DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C`. On a banded tariff the band comes
   from `plan.price_band` (no threshold comparisons). This is the kill switch.
 - `lp` — the LP's own W3 thermal plan (`LP_W3_TIN_ENABLED=true`, RC model
-  with learned τ / UA / C, soft 3-level comfort floor: night 17.5 °C 22–07,
-  **peak band = `INDOOR_SETPOINT_C − LP_W3_PEAK_COAST_DELTA_C` (1.0)** to
-  coast on stored heat, setpoint otherwise). `plan.lwt_offset_c` is
+  with learned τ / UA / C, soft 3-level comfort floor: night `LP_W3_NIGHT_FLOOR_C` 22–07 (code default 17.5,
+  **prod 20** since 2026-10-09), **peak band = `INDOOR_SETPOINT_C −
+  LP_W3_PEAK_COAST_DELTA_C`** (code default 1.0, **prod 0**), setpoint otherwise,
+  plus the soft ceiling `LP_W3_CEILING_C`, #841). `plan.lwt_offset_c` is
   TRANSLATED, never written raw: a slot the LP left without space heat while
   the weather curve would run the compressor is a deliberate coast → the
   setback (the inverse physics returns `OPTIMIZATION_LWT_OFFSET_MIN` = −10
@@ -490,28 +491,32 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   / drift backstop as the tier rule. Falls back to `tier` when the LP had no
   indoor trajectory (stale sensor, passive mode, flag off) — the diff row
   says `lp_available=false`.
-- **Per-slot comfort guard** (`_indoor_for_slot_fn`): the live reading for
-  slots within `INDOOR_SENSOR_STALE_MINUTES` of now, the W3 predicted
-  trajectory for the rest (the old single-reading guard let a warm afternoon
-  suppress tomorrow's 04–07 boost). No trajectory → live reading everywhere.
+- **Comfort guard on LP offsets** (`_lp_offsets`): the LIVE reading guards only
+  the slots within `INDOOR_SENSOR_STALE_MINUTES` of now (boost side vs the
+  ceiling-based `_boost_guard_c`, cold side vs that slot's floor); far slots are
+  never vetoed by a reading or by the predicted trajectory. (The per-slot
+  `_indoor_for_slot_fn` trajectory guard of the first #808 cut no longer exists.)
 - When `DAIKIN_LWT_SOURCE=lp` the LP's `e_space` ceiling is capped at the ±5
   clamp so the plan never assumes more lift than the device will get.
 - **Plausibility gate** (`w3_trajectory_plausible`): the LP source is
   unavailable (diff row `lp_available=false`, `lp_reason`) when the plan
-  carries comfort SLACK (`plan.comfort_slack_c` > `LP_W3_SLACK_TOL_C` 0.1 °C)
-  in more than `LP_W3_MAX_SLACK_SLOTS` (4) slots — slack is only ever used
-  when the pump cannot hold the per-slot floor, i.e. the RC model cannot hold
-  the house (unfitted UA/k) — or when any predicted value is more than
-  `LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C` (2.0) under the night floor / 2× that
-  above the setpoint. The predicted trajectory is
+  carries comfort SLACK (`plan.comfort_slack_c` = FLOOR shortfall only, >
+  `LP_W3_SLACK_TOL_C` 0.1 °C) in more than `LP_W3_MAX_SLACK_SLOTS` (4) slots —
+  floor slack is only ever used when the pump cannot hold the per-slot floor,
+  i.e. the RC model cannot hold the house (unfitted UA/k) — or when ceiling
+  slack (`plan.comfort_slack_hi_c`) coincides with planned space heat in such a
+  slot (overheating on purpose; a house that merely STARTS above the ceiling has
+  unavoidable overshoot and is not a veto) — or when any predicted value is more
+  than `LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C` (2.0) under the night floor / 2× that
+  above the ceiling (#841; was the setpoint). The predicted trajectory is
   NEVER used to veto the plan's own offsets (that was circular); the only guard
   on LP offsets is the LIVE reading, on slots near now, boost side. The `tier`
   rule never reads the trajectory, so `DAIKIN_LWT_SOURCE=tier` is a true kill
   switch even with W3 on. LP offsets are block-ified by SIGN before the
   `DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS` filter (`smooth_lp_offsets`).
 - **Comfort policy knobs (#820, runtime-tunable, `PUT /api/v1/settings`):**
-  `LP_W3_NIGHT_FLOOR_C` (how cold the house may drift 22–07, default 17.5),
-  `LP_W3_PEAK_COAST_DELTA_C` (how far it may coast through the peak, 1.0) and
+  `LP_W3_NIGHT_FLOOR_C` (how cold the house may drift 22–07; code default 17.5, prod 20),
+  `LP_W3_PEAK_COAST_DELTA_C` (how far it may coast through the peak; code default 1.0, prod 0) and
   `INDOOR_SETPOINT_C` — plus **`INDOOR_COMFORT_AGGREGATE`** = `mean` (default)
   | `min` | `max` | `room:<name>`: which reading is THE house temperature that
   seeds `t_in[0]` and that the comfort guard compares against
@@ -708,6 +713,9 @@ the Settings simulate->confirm->apply flow). Story-3 plug point:
   says the trajectory model (gains, C) is. Nothing is auto-applied; read via
   `GET /api/v1/thermal/lwt-learning?days=14` or the Insights "LWT learning" card.
   The scorecard `lwt` section carries `lwt_backstops` (count of fired backstops).
+  **Discontinuity:** `ua_est_*` scales with the C it is fitted with, and C went
+  from 49.6 to 16.5 kWh/K at the #841 C fix (~3x): the series before/after is NOT
+  comparable. The payload carries `c_kwh_per_k` per day; compare like with like.
 
 ### Banking heat in cheap bands — consistent C, comfort ceiling, ceiling-based boost guard (#841)
 
@@ -728,11 +736,17 @@ own constants/guards used to stop it reaching the device:
 - **`LP_W3_CEILING_C`** (runtime setting, default 23.0, 18..28, validated
   `>= INDOOR_SETPOINT_C + 0.5`): W3 soft upper bound `t_in[i+1] − s_hi[i] <= ceiling`,
   slack penalised like the floor slack (`LP_W3_COMFORT_PEN_PENCE_PER_DEGC_SLOT`).
-  `plan.w3_ceiling_c` records it; `plan.comfort_slack_c` = floor shortfall +
-  ceiling overshoot (what the plausibility gate counts), `plan.comfort_slack_hi_c`
-  the overshoot part. `w3_trajectory_plausible`'s upper bound is now
-  `ceiling + 2·LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C` (was setpoint-based, vetoing a
-  legitimate bank to 22.9). `lwt_learning_log.ceiling_c` is stored per slot.
+  `plan.w3_ceiling_c` records it; `plan.comfort_slack_c` stays FLOOR slack only
+  (the model-health signal), `plan.comfort_slack_hi_c` is the ceiling overshoot.
+  The plausibility gate counts a slot with ceiling slack only when the plan HEATS
+  in it (`space_electric_kwh > 0`) — a house that starts at 23.5 against a 23
+  ceiling has unavoidable overshoot and must not disable the LP source.
+  Its upper bound is `ceiling + 2·LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C` (was
+  setpoint-based). ONE reader for the ceiling:
+  `lwt_coast.effective_w3_ceiling_c()` = `max(LP_W3_CEILING_C, INDOOR_SETPOINT_C + 0.5)`
+  (LP, boost guard, gate fallback); both settings are validated against each other.
+  `lwt_learning_log.ceiling_c` is stored per slot; `plan/fronts` `heating.ceiling_c`
+  reads the ceiling the latest plan of the day was solved with.
 - **Boost guard vs the ceiling.** A positive offset (`_preheat_lwt_offset` tier
   rule, `_lp_offsets` near-now live guard) is zeroed when the LIVE indoor reading
   `>= LP_W3_CEILING_C − DAIKIN_LWT_PREHEAT_COMFORT_BAND_C` (22.5) instead of
@@ -741,6 +755,18 @@ own constants/guards used to stop it reaching the device:
 - Telemetry: scorecard `lwt.heating_kwh_by_band` (cheap/standard/peak, 2-hourly
   `kwh_heating` prorated per 30-min slot) + `lwt.indoor_min_c/indoor_max_c` (aggregate);
   `plan/fronts` `heating.ceiling_c`.
+- **What the LP actually writes at prod constants** (UA 200 W/K, C 16.5 kWh/K,
+  floor 21 / night 20 / peak delta 0, ceiling 23): cheap bands +10 (the lift cap),
+  day-band slots −1/−2 ("hold 21"), peak coast −10. The ceiling is a BOUND, not a
+  target, and banking is capped at ~0.5 K per cheap band: net input per slot is
+  `(min(RADIATOR_MAX_KW, lift ceiling)·COP − UA·ΔT)/C` ≈ 0.09 K at UA 200 / C 16.5
+  (the LP's COP comes from `DAIKIN_COP_CURVE`, 4.1–4.5 at 6–9 °C, NOT
+  `weather.cop_space`). "Coast through 07–13" needs a lower fitted UA or a bigger
+  pump; the ceiling only starts to bind for a small-C / leaky / strong-pump house.
+- `thermal_mass_resolution` recomputes C only for `tau_x_env_ua` / `tau_x_learned_ua`
+  rows (a measured C is kept); an out-of-bounds stored C is replaced by τ×UA_eff and
+  reported (`c_recomputed`, `c_reason`); the refresh stamps C from the BOUNDED UA
+  (an out-of-bounds HDD fit never stamps C).
 - Owner comfort policy (2026-10-09, mean across sensors): day 21 floor / 23 ceiling,
   night (22–07) 20 floor (`LP_W3_NIGHT_FLOOR_C=20`, `LP_W3_PEAK_COAST_DELTA_C=0`).
 
