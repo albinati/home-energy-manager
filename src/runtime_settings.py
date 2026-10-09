@@ -211,6 +211,20 @@ SCHEMA: dict[str, SettingSpec] = {
             "(°C): how far the house may coast on stored heat through 16-19."
         ),
     ),
+    "LP_W3_CEILING_C": SettingSpec(
+        key="LP_W3_CEILING_C",
+        type_name="float",
+        env_default=_float_env("LP_W3_CEILING_C", "23.0"),
+        min_value=18.0,
+        max_value=28.0,
+        description=(
+            "W3 comfort CEILING (°C, #841): soft upper bound on the predicted "
+            "indoor temperature so the LP can bank heat in cheap bands without "
+            "overheating. Must be >= INDOOR_SETPOINT_C + 0.5. Also the reference "
+            "for the LWT boost guard (boost zeroed at ceiling - "
+            "DAIKIN_LWT_PREHEAT_COMFORT_BAND_C)."
+        ),
+    ),
     "INDOOR_COMFORT_AGGREGATE": SettingSpec(
         key="INDOOR_COMFORT_AGGREGATE",
         type_name="str",
@@ -1091,6 +1105,12 @@ def set_setting(key: str, value: Any, *, actor: str = "api") -> Any:
         raise SettingValidationError(f"unknown runtime setting: {key!r}")
 
     canonical = _validate(spec, value)
+    if key == "LP_W3_CEILING_C":
+        sp = float(get_setting("INDOOR_SETPOINT_C"))
+        if float(canonical) < sp + 0.5 - 1e-9:
+            raise SettingValidationError(
+                f"LP_W3_CEILING_C ({canonical}) must be >= INDOOR_SETPOINT_C + 0.5 ({sp + 0.5})"
+            )
     serialized = _serialize(spec, canonical)
     db.set_runtime_setting(key, serialized)
     # V11: append-only audit trail so a past LP run can be explained even

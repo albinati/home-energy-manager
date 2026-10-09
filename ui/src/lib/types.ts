@@ -1209,6 +1209,8 @@ export interface ThermalCalibration {
     tau_hours: number;
     ua_w_per_k: number;
     c_kwh_per_k: number;
+    c_basis_ua_w_per_k?: number | null;  // #841: UA the stored C was derived from
+    c_recomputed?: boolean;              // #841: C recomputed as tau x effective UA
     source: "env" | "learned";
   };
   progress: {
@@ -1389,6 +1391,7 @@ export interface PlanFrontsHeating {
   setpoint_c: number | null;
   night_floor_c: number | null;
   peak_coast_delta_c: number | null;
+  ceiling_c?: number | null;
   lwt_source: "tier" | "lp" | null;
   gate: HeatingGate | null;
   windows: HeatingPlanWindow[];

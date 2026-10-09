@@ -105,6 +105,10 @@ class LpPlan:
     gate must judge the trajectory against it, not the live config)."""
     w3_setpoint_c: float | None = None
     w3_peak_coast_delta_c: float | None = None
+    w3_ceiling_c: float | None = None
+    """#841 — the W3 comfort ceiling this plan was SOLVED with (soft upper bound)."""
+    comfort_slack_hi_c: list[float] = field(default_factory=list)
+    """#841 — the ceiling-overshoot part of ``comfort_slack_c`` (°C, len N)."""
     comfort_slack_c: list[float] = field(default_factory=list)
     """W3 per-slot comfort-floor shortfall (°C, len N). Non-zero ONLY when the
     pump physically cannot hold the floor — the precise signature of an RC
@@ -581,6 +585,10 @@ def solve_lp(
         w3_recov = float(getattr(config, "LP_W3_MAX_RECOVERY_C_PER_SLOT", 0.5))
         w3_pen = float(getattr(config, "LP_W3_COMFORT_PEN_PENCE_PER_DEGC_SLOT", 15.0))
         w3_peak_delta = float(getattr(config, "LP_W3_PEAK_COAST_DELTA_C", 1.0))
+        # #841 — soft comfort ceiling so banking heat in cheap bands cannot overheat.
+        w3_ceiling = max(
+            float(getattr(config, "LP_W3_CEILING_C", 23.0)), w3_day_sp + 0.5
+        )
 
         def _w3_floor(i: int) -> float:
             """Three-level comfort floor (#808): night floor 22–07, setpoint
@@ -704,6 +712,7 @@ def solve_lp(
         # Infeasible (regression-tested). The SOFT comfort floor governs warmth.
         t_in = pulp.LpVariable.dicts("indoor", range(n + 1), lowBound=-30.0, upBound=45.0)
         s_lo = pulp.LpVariable.dicts("comfort_slack_lo", range(n), lowBound=0)
+        s_hi = pulp.LpVariable.dicts("comfort_slack_hi", range(n), lowBound=0)
         prob += t_in[0] == float(initial.indoor_temp_c)
 
     # Piecewise stress auxiliary variables (one per battery power slot)
@@ -1098,6 +1107,8 @@ def solve_lp(
             prob += t_in[i + 1] == t_in[i] + (q_heat_space - loss_bld_j) / c_bld
             # Soft comfort floor — slack-penalised, so the LP is NEVER Infeasible.
             prob += t_in[i + 1] + s_lo[i] >= _w3_floor(i)
+            # #841 — soft ceiling (same penalty as the floor slack).
+            prob += t_in[i + 1] - s_hi[i] <= w3_ceiling
             # Gentle-recovery cap — bound the HEATING-driven rise (the pump's own
             # contribution), NOT the net delta. Capping the net delta conflicts
             # with the RC equality on a warm slot where passive conductive GAIN
@@ -1599,7 +1610,9 @@ def solve_lp(
     )
     obj_cycle = cycle_pen * pulp.lpSum(chg[i] + dis[i] for i in range(n))
     # W3 (#540): comfort-floor slack penalty (0 when W3 off → objective unchanged).
-    obj_comfort = (w3_pen * pulp.lpSum(s_lo[i] for i in range(n))) if w3 else 0.0
+    obj_comfort = (
+        w3_pen * pulp.lpSum(s_lo[i] + s_hi[i] for i in range(n))
+    ) if w3 else 0.0
     # DHW overshoot above the comfort ceiling is not a comfort issue — it's just stored
     # hot water that will drift back naturally via tank losses. A *tiny* penalty
     # (default 0.01 p/°C-slot, configurable via ``LP_TANK_HI_SLACK_PENCE_PER_DEGC_SLOT``;
@@ -1852,9 +1865,13 @@ def solve_lp(
             plan.w3_night_floor_c = w3_night_floor
             plan.w3_setpoint_c = w3_day_sp
             plan.w3_peak_coast_delta_c = w3_peak_delta
+            plan.w3_ceiling_c = w3_ceiling
             plan.indoor_temp_c.append(_v(t_in[i]))
             if i < n:
-                plan.comfort_slack_c.append(_v(s_lo[i]))
+                # comfort_slack_c = floor shortfall + ceiling overshoot (#841);
+                # the hi part is also reported on its own.
+                plan.comfort_slack_c.append(_v(s_lo[i]) + _v(s_hi[i]))
+                plan.comfort_slack_hi_c.append(_v(s_hi[i]))
 
     plan.dhw_lp_owned = _lp_owned
     if peak_import_idx:

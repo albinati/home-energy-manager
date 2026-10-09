@@ -1,5 +1,5 @@
 import { useFetch } from "../../lib/poll";
-import { getLwtLearning } from "../../lib/endpoints";
+import { getLwtLearning, getThermalCalibration } from "../../lib/endpoints";
 import type { LwtLearningSlot } from "../../lib/types";
 
 // "LWT learning" — how the house actually behaved during LWT coast windows
@@ -39,6 +39,8 @@ function Strip({ slots }: { slots: LwtLearningSlot[] }) {
 export function LwtLearningCard() {
   const res = useFetch(() => getLwtLearning(14), [], { cacheKey: "lwt-learning", track: true });
   const d = res.data;
+  const cal = useFetch(() => getThermalCalibration(), [], { cacheKey: "thermal-calibration-lwtl" });
+  const eff = cal.data?.effective;
   const rows = d?.daily ?? [];
   return (
     <section class={`lwtl${res.loading && d ? " is-updating" : ""}`}>
@@ -46,6 +48,14 @@ export function LwtLearningCard() {
         <h2>LWT learning</h2>
         <span class="muted">coast mode {d?.coast_mode ?? "—"} · pinned UA {d ? n1(d.ua_pinned_w_per_k, 0) : "—"} W/K</span>
       </header>
+      {eff && (
+        <p class="muted lwtl-thermal">
+          Thermal model ({eff.source}): τ {n1(eff.tau_hours, 1)} h · UA {n1(eff.ua_w_per_k, 0)} W/K · C{" "}
+          {n1(eff.c_kwh_per_k, 1)} kWh/K
+          {eff.c_basis_ua_w_per_k != null ? ` (stored C basis UA ${n1(eff.c_basis_ua_w_per_k, 0)} W/K)` : ""}
+          {eff.c_recomputed ? " · recomputed as τ × UA" : ""}
+        </p>
+      )}
       {res.error && !d ? (
         <p class="muted insights-empty lwtl-error">Could not load LWT learning: {res.error.message}</p>
       ) : rows.length === 0 ? (

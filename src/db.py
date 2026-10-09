@@ -1403,9 +1403,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             ua_computed_at TEXT,
             c_kwh_per_k REAL,
             c_source TEXT,
+            c_ua_basis_w_per_k REAL,
             computed_at TEXT NOT NULL
         )"""
     )
+    # #841 — the UA that C = tau x UA was computed from (NULL = unknown basis).
+    btc_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(building_thermal_calibration)")}
+    if btc_cols and "c_ua_basis_w_per_k" not in btc_cols:
+        conn.execute("ALTER TABLE building_thermal_calibration ADD COLUMN c_ua_basis_w_per_k REAL")
     # DHW LP-owned economic shadow (#714). One row per shadow solve: the committed
     # (pinned) grid cost vs the LP-owned grid cost on the SAME inputs, plus the comfort
     # deficit (°C below floor at any shower boundary). The enable gate reads this — the
@@ -1468,6 +1473,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             run_id          INTEGER,
             written_at_utc  TEXT,
             plan_updated_at_utc TEXT,
+            ceiling_c       REAL,
             source          TEXT,
             coast_mode      TEXT,
             offset_lp_raw   REAL,
@@ -1495,6 +1501,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     lwt_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(lwt_learning_log)")}
     if lwt_cols and "plan_updated_at_utc" not in lwt_cols:
         conn.execute("ALTER TABLE lwt_learning_log ADD COLUMN plan_updated_at_utc TEXT")
+    if lwt_cols and "ceiling_c" not in lwt_cols:
+        conn.execute("ALTER TABLE lwt_learning_log ADD COLUMN ceiling_c REAL")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS lwt_learning_daily (
             date            TEXT PRIMARY KEY,
@@ -5178,7 +5186,7 @@ def get_latest_lp_inputs_for_plan_date(plan_date: str) -> dict[str, Any] | None:
 # ── #838: LWT learning log ────────────────────────────────────────────────
 
 _LWT_PLANNED_COLS = (
-    "run_id", "plan_updated_at_utc", "source", "coast_mode", "offset_lp_raw", "offset_written",
+    "run_id", "plan_updated_at_utc", "ceiling_c", "source", "coast_mode", "offset_lp_raw", "offset_written",
     "indoor_pred_c", "floor_c", "margin_c", "outdoor_fc_c", "e_space_kwh",
     "cop_space", "price_band", "curve_lwt_c", "coast_target_lwt_c", "coast_delta_c",
 )
@@ -9508,6 +9516,7 @@ _THERMAL_CAL_COLS = (
     "tau_hours", "tau_r2_median", "tau_episodes", "tau_window_days",
     "tau_computed_at", "ua_w_per_k", "ua_r2", "ua_samples", "ua_window_days",
     "ua_assumed_cop", "ua_source", "ua_computed_at", "c_kwh_per_k", "c_source",
+    "c_ua_basis_w_per_k",
 )
 
 

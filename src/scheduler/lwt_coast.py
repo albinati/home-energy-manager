@@ -169,6 +169,7 @@ def record_planned(
                 "slot_time_utc": st.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "run_id": None,
                 "plan_updated_at_utc": token,
+                "ceiling_c": getattr(plan, "w3_ceiling_c", None) if traj else None,
                 "source": source_used,
                 "coast_mode": coast_mode,
                 "offset_lp_raw": float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else None,

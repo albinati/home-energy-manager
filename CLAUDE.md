@@ -709,6 +709,41 @@ the Settings simulate->confirm->apply flow). Story-3 plug point:
   `GET /api/v1/thermal/lwt-learning?days=14` or the Insights "LWT learning" card.
   The scorecard `lwt` section carries `lwt_backstops` (count of fired backstops).
 
+### Banking heat in cheap bands — consistent C, comfort ceiling, ceiling-based boost guard (#841)
+
+The LP plans "bank heat in the cheap bands, coast through day/peak"; three of our
+own constants/guards used to stop it reaching the device:
+
+- **C must match the EFFECTIVE UA.** `thermal_calibration.c_kwh_per_k` is
+  `τ × UA` for the UA it was computed with (`c_ua_basis_w_per_k`, nullable
+  column; pre-#841 rows = unknown). `get_building_thermal_mass_kwh_per_k()` /
+  `thermal_mass_resolution()` return the stored C only when the basis equals
+  `get_building_ua_w_per_k()` (±1 W/K); a different or unknown basis →
+  `τ_eff × UA_eff / 1000` (logged once). Prod: 49.6 (τ 82.7 × env UA 600) →
+  16.5 kWh/K under the 200 W/K pin — with 49.6 the plan could not hold the day
+  floor, produced `comfort_slack` in 5–6 slots and the plausibility gate fell back
+  to the tier rule. `/api/v1/sensors/thermal-calibration` `effective` carries
+  `c_basis_ua_w_per_k` + `c_recomputed`; the Insights "LWT learning" card shows
+  τ / UA / C (+ basis).
+- **`LP_W3_CEILING_C`** (runtime setting, default 23.0, 18..28, validated
+  `>= INDOOR_SETPOINT_C + 0.5`): W3 soft upper bound `t_in[i+1] − s_hi[i] <= ceiling`,
+  slack penalised like the floor slack (`LP_W3_COMFORT_PEN_PENCE_PER_DEGC_SLOT`).
+  `plan.w3_ceiling_c` records it; `plan.comfort_slack_c` = floor shortfall +
+  ceiling overshoot (what the plausibility gate counts), `plan.comfort_slack_hi_c`
+  the overshoot part. `w3_trajectory_plausible`'s upper bound is now
+  `ceiling + 2·LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C` (was setpoint-based, vetoing a
+  legitimate bank to 22.9). `lwt_learning_log.ceiling_c` is stored per slot.
+- **Boost guard vs the ceiling.** A positive offset (`_preheat_lwt_offset` tier
+  rule, `_lp_offsets` near-now live guard) is zeroed when the LIVE indoor reading
+  `>= LP_W3_CEILING_C − DAIKIN_LWT_PREHEAT_COMFORT_BAND_C` (22.5) instead of
+  `setpoint + band` (21.5). The predicted trajectory still never vetoes offsets
+  (the LP already enforces the ceiling). The backstop's floor logic is unchanged.
+- Telemetry: scorecard `lwt.heating_kwh_by_band` (cheap/standard/peak, 2-hourly
+  `kwh_heating` prorated per 30-min slot) + `lwt.indoor_min_c/indoor_max_c` (aggregate);
+  `plan/fronts` `heating.ceiling_c`.
+- Owner comfort policy (2026-10-09, mean across sensors): day 21 floor / 23 ceiling,
+  night (22–07) 20 floor (`LP_W3_NIGHT_FLOOR_C=20`, `LP_W3_PEAK_COAST_DELTA_C=0`).
+
 ## Key `.env` settings to know
 
 ```

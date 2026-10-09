@@ -152,9 +152,11 @@ def test_clamped_to_device_range(enabled, monkeypatch):
 
 
 def test_comfort_guard_suppresses_boost_when_room_warm(enabled):
-    # Room already above setpoint+band → don't pre-heat (would overshoot).
-    assert _off(5.0, COLD, indoor_c=22.0) == 0
-    # Just inside the band → boost still allowed.
+    # #841: the guard is ceiling (23) - band (0.5) = 22.5, not setpoint + band —
+    # banking heat deliberately goes above the setpoint while cheap.
+    assert _off(5.0, COLD, indoor_c=22.6) == 0
+    # Below the guard → boost still allowed (incl. above the setpoint).
+    assert _off(5.0, COLD, indoor_c=22.0) == 3
     assert _off(5.0, COLD, indoor_c=21.2) == 3
 
 

@@ -182,12 +182,20 @@ async def get_thermal_calibration() -> dict[str, Any]:
             },
         }
 
+    try:
+        c_res = tl.thermal_mass_resolution()
+    except Exception:
+        c_res = {"c_kwh_per_k": tl.get_building_thermal_mass_kwh_per_k(),
+                 "c_basis_ua_w_per_k": None, "c_recomputed": False}
     return {
         "calibration": row,  # null until the learner's quality gates pass
         "effective": {
+            # #841 — the UA that C was derived from + whether it was recomputed
+            "c_basis_ua_w_per_k": c_res.get("c_basis_ua_w_per_k"),
+            "c_recomputed": bool(c_res.get("c_recomputed")),
             "tau_hours": round(tl.get_building_tau_hours(), 2),
             "ua_w_per_k": round(tl.get_building_ua_w_per_k(), 1),
-            "c_kwh_per_k": round(tl.get_building_thermal_mass_kwh_per_k(), 2),
+            "c_kwh_per_k": round(float(c_res["c_kwh_per_k"]), 2),
             "source": "learned" if (
                 learned_tau and bool(getattr(config, "THERMAL_LEARNED_VALUES_ENABLED", True))
             ) else "env",

@@ -2542,6 +2542,14 @@ class Config:
         self._rt_set("LP_W3_NIGHT_FLOOR_C", float(value))
 
     @property
+    def LP_W3_CEILING_C(self) -> float:
+        return float(self._rt_get("LP_W3_CEILING_C"))
+
+    @LP_W3_CEILING_C.setter
+    def LP_W3_CEILING_C(self, value: float) -> None:
+        self._rt_set("LP_W3_CEILING_C", float(value))
+
+    @property
     def LP_W3_PEAK_COAST_DELTA_C(self) -> float:
         return float(self._rt_get("LP_W3_PEAK_COAST_DELTA_C"))
 
