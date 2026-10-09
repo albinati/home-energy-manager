@@ -6,6 +6,16 @@ import type { LwtLearningSlot } from "../../lib/types";
 // (#838): implied UA and pump k per day against the pinned values, plus
 // yesterday's predicted vs realised indoor temperature per slot.
 
+const localHM = (iso: string, tz: string | undefined) => {
+  try {
+    return new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz }).format(
+      new Date(iso),
+    );
+  } catch {
+    return iso.slice(11, 16);
+  }
+};
+
 const n1 = (v: number | null | undefined, d = 1) => (v == null ? "—" : v.toFixed(d));
 
 function Strip({ slots }: { slots: LwtLearningSlot[] }) {
@@ -45,6 +55,7 @@ export function LwtLearningCard() {
   const latest = rows.find((r) => r.joint_fit) ?? rows[0];
   const joint = latest?.joint_fit ?? null;
   const bands = latest?.night_rise_per_band ?? [];
+  const tz = d?.timezone;
   return (
     <section class={`lwtl${res.loading && d ? " is-updating" : ""}`}>
       <header class="lwtl-head">
@@ -93,27 +104,43 @@ export function LwtLearningCard() {
       )}
       {joint && (
         <div class="lwtl-joint">
-          <h3 class="lwtl-sub">Joint UA / C fit (last {latest?.joint_window_days ?? 14} days)</h3>
+          <h3 class="lwtl-sub">UA / C episode fit (last {latest?.joint_window_days ?? 14} days)</h3>
           {joint.identifiable ? (
             <p>
-              UA {n1(joint.ua_w_per_k, 0)} W/K · C {n1(joint.c_kwh_per_k, 1)} kWh/K · τ {n1(joint.tau_h, 0)} h · R²{" "}
-              {n1(joint.r2, 2)} · n {joint.n_heat} heat / {joint.n_coast} coast
+              UA {n1(joint.ua_w_per_k, 0)} ± {n1(joint.ua_se, 0)} W/K · C {n1(joint.c_kwh_per_k, 1)} ±{" "}
+              {n1(joint.c_se, 1)} kWh/K · τ {n1(joint.tau_h, 0)} h · gain {n1(joint.gain_kw, 2)} kW · resid{" "}
+              {n1(joint.resid_rms_c, 2)} °C · {joint.n_heat_episodes} heating episodes / {joint.n_coast_blocks} night
+              coast blocks
               <span class="muted">
                 {" "}
                 (pinned UA {d ? n1(d.ua_pinned_w_per_k, 0) : "—"} W/K
-                {eff ? `, C ${n1(eff.c_kwh_per_k, 1)} kWh/K, τ ${n1(eff.tau_hours, 0)} h` : ""})
+                {eff ? `, C ${n1(eff.c_kwh_per_k, 1)} kWh/K, τ ${n1(eff.tau_hours, 0)} h` : ""}; SEs are optimistic —
+                quantised counter, COP and lag are model error)
               </span>
             </p>
           ) : (
             <p class="muted">
-              Not identifiable yet ({joint.n_heat} heating / {joint.n_coast} coast slots; needs 4 / 8)
+              Not identifiable yet: {(joint.reason ?? "unknown").replace(/_/g, " ")} ({joint.n_heat_episodes} heating
+              episodes / {joint.n_coast_blocks} coast blocks; needs 5 / 8, Onecta-metered heat only)
               {joint.coast_tau_h != null ? ` · coast-only τ ${n1(joint.coast_tau_h, 0)} h` : ""}
             </p>
           )}
-          {joint.tau_constrained && (
+          {joint.consistency_flag && (
             <p class="muted">
-              τ-prior fit ({n1(joint.tau_prior_h, 0)} h): UA {n1(joint.tau_constrained.ua_w_per_k, 0)} W/K · C{" "}
-              {n1(joint.tau_constrained.c_kwh_per_k, 1)} kWh/K
+              Free τ {n1(joint.tau_h, 0)} h disagrees with coast-only τ {n1(joint.coast_tau_h, 0)} h by more than 25 %:
+              lag or gain contamination suspected — treat UA / C with caution.
+            </p>
+          )}
+          {joint.tau_fixed && (
+            <p class="muted">
+              τ fixed ({n1(joint.tau_prior_h, 0)} h, hard constraint): UA {n1(joint.tau_fixed.ua_w_per_k, 0)} W/K · C{" "}
+              {n1(joint.tau_fixed.c_kwh_per_k, 1)} kWh/K
+            </p>
+          )}
+          {joint.slot_fit && (
+            <p class="muted">
+              Per-slot regression (diagnostic): UA {n1(joint.slot_fit.ua_w_per_k, 0)} W/K · C{" "}
+              {n1(joint.slot_fit.c_kwh_per_k, 1)} kWh/K · R² {n1(joint.slot_fit.r2, 2)}
             </p>
           )}
           {joint.cop_sensitivity && (
@@ -132,7 +159,7 @@ export function LwtLearningCard() {
           <table class="lwtl-table">
             <thead>
               <tr>
-                <th>Band (UTC)</th>
+                <th>Band (local)</th>
                 <th class="num">Offset °C</th>
                 <th class="num">Measured °C</th>
                 <th class="num">Predicted °C</th>
@@ -141,8 +168,8 @@ export function LwtLearningCard() {
             </thead>
             <tbody>
               {bands.map((b) => (
-                <tr key={b.start_utc}>
-                  <td>{b.start_utc.slice(11, 16)}–{b.end_utc.slice(11, 16)}</td>
+                <tr key={b.start_utc} class={b.mixed_plans ? "muted" : undefined} title={b.mixed_plans ? `${b.n_plans} different plans inside this band - not comparable` : undefined}>
+                  <td>{localHM(b.start_utc, tz)}–{localHM(b.end_utc, tz)}{b.mixed_plans ? " (mixed plans)" : ""}</td>
                   <td class="num">{n1(b.mean_offset_c, 1)}</td>
                   <td class="num">{n1(b.measured_rise_c, 2)}</td>
                   <td class="num">{n1(b.predicted_rise_c, 2)}</td>
@@ -154,7 +181,7 @@ export function LwtLearningCard() {
         </div>
       )}
       <details class="lwtl-details">
-        <summary class="muted">Coast-only UA (circular: C = τ × pinned UA — not a UA measurement)</summary>
+        <summary class="muted">Coast-only UA (circular: C = τ × pinned UA, not a UA measurement)</summary>
         <table class="lwtl-table">
           <thead>
             <tr>

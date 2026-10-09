@@ -704,19 +704,34 @@ the Settings simulate->confirm->apply flow). Story-3 plug point:
   Pruned after `LWT_LEARNING_RETENTION_DAYS` (120).
 - **Reading the estimates (#843)**: coast-only data identifies **τ = C/UA only**.
   `ua_est_w_per_k` / `ua_est_night_w_per_k` (API + payload: `ua_from_tau_scaled_*`,
-  `circular: true`) is `C × decay rate` with C = τ × UA_pin (#841), so it returns ≈ the
+  `ua_est_circular: true`) is `C × decay rate` with C = τ × UA_pin (#841), so it returns ≈ the
   pin whenever nights cool at the calibration's τ — it CANNOT confirm or refute the 200
   pin; kept for audit (details block of the card), never a headline. UA and C come from
-  the **joint fit** `fit_ua_c_joint` (payload `joint_fit`, rolling `joint_window_days`=14):
-  per consecutive slot pair `C·ΔT_in = COP(To)·heating_kwh − (UA/1000)·(T_in−To)·Δt`
-  (COP = the LP's `DAIKIN_COP_CURVE`), least squares over heating slots (> 0.05 kWh) AND
-  coast slots (Q=0); needs ≥ 4 heating + ≥ 8 coast slots, else `identifiable: false`
-  with only `coast_tau_h`. Also reported: `tau_constrained` (UA/C with τ fixed to the
-  learner's τ) and `cop_sensitivity` (refit at COP ×0.8 / ×1.2 — COP is the weakest
-  link; if UA/C move a lot, don't trust them; the 2 h heating counter is also quantised).
+  the **episode estimator** `fit_ua_c_joint` (payload `joint_fit`, rolling `joint_window_days`=14).
+  Heat input is ONLY Onecta-METERED buckets (`lwt_learning_log.heating_kwh_source` starts with
+  `onecta`; `telemetry_integral` buckets are the weather-curve model `get_daikin_heating_kw ×
+  dt`, not a measurement, and are excluded; 1.0-kWh phantom Onecta buckets are zeroed in
+  `fill_realised` by `thermal_learning.sanitize_phantom_heating`). Samples: one per contiguous
+  Onecta-heating EPISODE (+ a 4-slot coast tail for emitter lag; dropped when an adjacent
+  bucket is unusable, e.g. metered 0 but `lwt_actual − indoor > 6 °C` = hidden heat the
+  whole-kWh counter rounded away) and one per 2 h Onecta-zero coast block lying wholly in the
+  local night (22–07: no solar). Model `ΔT = a·ΣQ_th − b·Σ(T−To)Δt + g·Σdt` (Q_th = COP(To) ×
+  metered kWh, COP = the LP curve with its lift derate; a=1/C, b=1/τ, g=gain/C); 3-param OLS by
+  hand, SEs σ²(XᵀX)⁻¹ + delta method (`ua_se`, `c_se`), with a method-of-moments correction for
+  the counter's known quantisation noise (1/12 kWh² per bucket). Reported: `ua_w_per_k`,
+  `c_kwh_per_k`, `tau_h`, `gain_kw`, `resid_rms_c`, `n_heat_episodes`, `n_coast_blocks` (no R²
+  headline). Gate: ≥ 5 episodes AND ≥ 8 coast blocks AND a,b > 0, else `identifiable: false`
+  with `reason` ∈ `too_few_heat_episodes | too_few_coast_blocks | nonphysical_fit | singular |
+  no_measured_input`. Diagnostics: `tau_fixed` (b HARD-fixed to the learner's τ — a
+  constraint, not a prior), `slot_fit` (old per-slot regression, biased by quantised/lagged
+  heat), `coast_tau_h`, `consistency_flag: lag_or_gain_contamination_suspected` when the free τ
+  and the coast-only τ differ by > 25 %, and `cop_sensitivity` (refit at COP ×0.8 / ×1.2 — COP
+  is the weakest link; SEs are optimistic since COP, lag and quantisation are model error).
   Honest model checks: `pred_err_*` and `night_rise_per_band` (each cheap band with a
-  positive written offset: measured vs predicted indoor rise, `model_error_c` > 0 = the
-  model is pessimistic). `k_est_kw_per_c` = median over 2-hour buckets of kWh ÷
+  positive written offset: measured vs predicted indoor rise from slots carrying BOTH readings;
+  predicted only from slots sharing the first slot's `plan_updated_at_utc` token — `mixed_plans`
+  rows are not comparable; `model_error_c` > 0 = the model is pessimistic). `k_est_kw_per_c` =
+  median over 2-hour buckets of kWh ÷
   Σ((`lwt_actual` − 18)·Δt) (≥ 3 samples, `lwt_actual` > 20); learned k pin 0.063.
   Nothing is auto-applied (`thermal_calibration` is untouched); read via
   `GET /api/v1/thermal/lwt-learning?days=14` or the Insights "LWT learning" card.
