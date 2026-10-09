@@ -488,7 +488,12 @@ def heating_windows(
     ``source_used``) — NOT the legacy ``params.lp_optimizer`` flag, which only
     means "written by the LP dispatch pipeline" (#829/#845). Rows of the same
     kind+offset whose [start, end) overlap are collapsed, preferring an
-    ``active`` row, then the newest one.
+    ``active`` row, then the newest one. ``source`` is the source of the LATEST
+    plan covering the window (the learning log is latest-plan-wins), so a
+    re-solve can relabel an older window. Tank-only ``restore`` rows (no
+    ``lwt_offset``) are not heating windows. When a later-starting row with a
+    different offset overlaps an earlier one, the earlier window is trimmed to
+    the newer start (the device switches there).
     """
     # Prefer active, then newest, so the overlap collapse keeps the best row.
     ordered = sorted(
@@ -504,6 +509,8 @@ def heating_windows(
         if at not in ("lwt_preheat", "restore"):
             continue
         params = r.get("params") if isinstance(r.get("params"), dict) else {}
+        if at == "restore" and "lwt_offset" not in params:
+            continue  # DHW restore carries tank params only
         st, en = _parse(r.get("start_time")), _parse(r.get("end_time"))
         if st is None:
             continue
@@ -527,11 +534,25 @@ def heating_windows(
         kept.append((kind, offv, st, en))
         out.append({
             "kind": kind, "offset_c": _r(off, 1) if off is not None else 0.0,
-            "start_utc": _z(st), "end_utc": _z(en),
-            "start_local": _hhmm(st, tz), "end_local": _hhmm(en, tz), "source": source,
+            "_st": st, "_en": en, "_off": offv, "source": source,
         })
-    out.sort(key=lambda w: w["start_utc"])
-    return out
+    # Device fires in start order: trim an earlier window to a later, differing one.
+    out.sort(key=lambda w: w["_st"])
+    for i, w in enumerate(out):
+        for n in out[i + 1:]:
+            if n["_st"] > w["_st"] and n["_st"] < w["_en"] and n["_off"] != w["_off"]:
+                w["_en"] = n["_st"]
+                break
+    res = []
+    for w in out:
+        st, en = w["_st"], w["_en"]
+        res.append({
+            "kind": w["kind"], "offset_c": w["offset_c"],
+            "start_utc": _z(st), "end_utc": _z(en),
+            "start_local": _hhmm(st, tz), "end_local": _hhmm(en, tz), "source": w["source"],
+        })
+    res.sort(key=lambda w: w["start_utc"])
+    return res
 
 
 def _indoor_stats(lp_slots: list[dict[str, Any]], tz: ZoneInfo) -> dict[str, Any]:

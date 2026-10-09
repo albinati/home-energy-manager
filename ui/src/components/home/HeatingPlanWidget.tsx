@@ -313,9 +313,9 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           data: pair(tank), lineStyle: { color: t.thermal, width: 1.5, type: "dashed", cap: "round" }, z: 3 },
         { name: "Tank realised", type: "line", step: "middle", showSymbol: false, connectNulls: false,
           data: pair(tankReal), lineStyle: { color: t.thermal, width: 2.5, cap: "round" }, z: 4 },
-        // ── HEATING / radiator LWT (purple) — REALISED only (the Daikin's logged
-        //    leaving-water temp across the day). Plan line dropped per request.
-        // Written plan (what the device gets) — solid purple, thinner than realised.
+        // ── HEATING / radiator LWT (purple) — realised (the Daikin's logged
+        //    leaving-water temp) plus the WRITTEN plan below: dashed purple, the
+        //    offset the device is/was given (#845), thinner than realised.
         ...(hasLwtWritten ? [{
           name: "LWT plan", type: "line" as const, step: "middle" as const, showSymbol: false,
           connectNulls: false, data: pair(lwtWritten),

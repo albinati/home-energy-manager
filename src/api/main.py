@@ -1832,7 +1832,9 @@ def _apply_written_lwt_offsets(slots_out, today_local, win_start_utc, win_end_ut
     """Fill ``lwt_offset`` / ``offset_source`` on heating-plan slots (#845).
 
     ``schedule``: covering ``lwt_preheat``/``restore`` row of ``action_schedule``
-    (active > pending > completed, then newest ``created_at``/id among overlaps).
+    (the latest-STARTING row wins its span - the device fires rows in
+    ``start_time`` order; status only filters out failed/cancelled/overridden;
+    tank-only restores ignored; a backstop-completed row stops at completion).
     ``device``: past slot with a realised ``execution_log.daikin_lwt_offset``
     (wins over a schedule row). ``none``: nothing covers the slot -> 0.
     """
@@ -1855,24 +1857,43 @@ def _apply_written_lwt_offsets(slots_out, today_local, win_start_utc, win_end_ut
     except Exception as e:
         logger.debug("heating-plan: schedule read failed: %s", e)
         rows = []
-    rank = {"active": 2, "pending": 1, "completed": 0}
+    # Precedence = what the DEVICE holds: the state machine fires rows in
+    # ``start_time`` order, so the LATEST-STARTING written row wins its span.
+    # Status is only a filter (failed/cancelled/overridden never reached it).
+    keep = {"active", "pending", "completed"}
     cand = []
     for r in rows:
-        if r.get("action_type") not in ("lwt_preheat", "restore"):
+        at = r.get("action_type")
+        if at not in ("lwt_preheat", "restore"):
             continue
-        st = rank.get(str(r.get("status") or ""))
-        if st is None:
+        if str(r.get("status") or "") not in keep:
             continue
+        params = r.get("params") if isinstance(r.get("params"), dict) else {}
+        if at == "restore" and "lwt_offset" not in params:
+            continue  # DHW/tank restore: carries tank params only
         s0, e0 = _p(r.get("start_time")), _p(r.get("end_time"))
         if s0 is None or e0 is None or e0 <= win_start_utc or s0 >= win_end_utc:
             continue
-        params = r.get("params") if isinstance(r.get("params"), dict) else {}
         try:
             off = float(params.get("lwt_offset", 0) or 0)
         except (TypeError, ValueError):
             off = 0.0
-        cand.append(((st, str(r.get("created_at") or ""), int(r.get("id") or 0)), s0, e0, off))
-    cand.sort(key=lambda c: c[0])  # ascending: later (higher priority) overwrite
+        segs = [(s0, e0, off)]
+        if str(r.get("status")) == "completed" and r.get("error_msg") == "comfort_backstop":
+            # The backstop cancelled the offset at completion: the row covers
+            # only up to then; the device holds 0 for the rest of its window.
+            ex = _p(r.get("executed_at"))
+            if ex is not None and s0 < ex < e0:
+                # zero segment starts at the next slot boundary (display grid)
+                ex_up = ex.replace(minute=0 if ex.minute < 30 else 30, second=0, microsecond=0)
+                if ex_up < ex:
+                    ex_up += _td(minutes=30)
+                segs = [(s0, ex, off), (ex_up, e0, 0.0)]
+            elif ex is not None and ex <= s0:
+                segs = [(s0, e0, 0.0)]
+        for a0, a1, ao in segs:
+            cand.append(((s0, str(r.get("created_at") or ""), int(r.get("id") or 0)), a0, a1, ao))
+    cand.sort(key=lambda c: c[0])  # ascending: later-starting rows overwrite
     by_slot: dict[str, float] = {}
     for _, s0, e0, off in cand:
         cur = max(s0, win_start_utc)
@@ -2151,6 +2172,7 @@ async def daikin_heating_plan():
     return {
         "enabled": enabled,
         "now_utc": _dt.now(UTC).isoformat().replace("+00:00", "Z"),
+        "timezone": getattr(tz, "key", None) or "UTC",
         "high_temp_c": high_c,
         "lwt_source": str(getattr(config, "DAIKIN_LWT_SOURCE", "tier") or "tier"),
         "coast_mode": str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback"),

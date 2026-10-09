@@ -163,12 +163,15 @@ def test_heating_plan_disabled_no_offset(monkeypatch):
 
 
 # ---------------------------------------------------------------- #845 written offsets
-def _insert_action(conn, *, date, start, end, action_type, offset, status="pending", created="2026-10-09T10:00:00+00:00"):
+def _insert_action(conn, *, date, start, end, action_type, offset, status="pending",
+                   created="2026-10-09T10:00:00+00:00", error_msg=None, executed_at=None, params=None):
     import json
     conn.execute(
-        "INSERT INTO action_schedule (date, start_time, end_time, device, action_type, params, status, created_at) "
-        "VALUES (?, ?, ?, 'daikin', ?, ?, ?, ?)",
-        (date, start, end, action_type, json.dumps({"lwt_offset": offset, "lp_optimizer": True}), status, created),
+        "INSERT INTO action_schedule (date, start_time, end_time, device, action_type, params, status, created_at,"
+        " error_msg, executed_at) VALUES (?, ?, ?, 'daikin', ?, ?, ?, ?, ?, ?)",
+        (date, start, end, action_type,
+         json.dumps(params if params is not None else {"lwt_offset": offset, "lp_optimizer": True}),
+         status, created, error_msg, executed_at),
     )
 
 
@@ -216,12 +219,40 @@ def test_heating_plan_written_offsets_from_schedule(monkeypatch):
     assert _slot(resp, at(7))["lwt_offset"] == -2
     assert _slot(resp, at(1))["lwt_offset"] == -1
     assert _slot(resp, at(3, 30))["lwt_offset"] == 0  # restore row
+    assert _slot(resp, at(3, 30))["offset_source"] == "schedule"
     gap = _slot(resp, at(18))
     assert gap["lwt_offset"] == 0 and gap["offset_source"] == "none"
     assert "lwt_offset_tier" in gap
 
 
-def test_heating_plan_overlapping_rows_active_then_newest_wins(monkeypatch):
+def test_heating_plan_latest_starting_row_wins(monkeypatch):
+    tmr = datetime.now(_tz()).date() + timedelta(days=1)
+    d = tmr.isoformat()
+    at = lambda h, m=0: datetime(tmr.year, tmr.month, tmr.day, h, m, tzinfo=UTC)  # noqa: E731
+    z = lambda dt: dt.isoformat().replace("+00:00", "Z")  # noqa: E731
+
+    def seed(conn):
+        # older ACTIVE row, newer PENDING row that starts later: the device
+        # switches at the newer start regardless of status.
+        _insert_action(conn, date=d, start=z(at(16)), end=z(at(19)), action_type="lwt_preheat", offset=-3,
+                       status="active", created="2026-10-09T10:00:00+00:00")
+        _insert_action(conn, date=d, start=z(at(16, 30)), end=z(at(19)), action_type="lwt_preheat", offset=-1,
+                       status="pending", created="2026-10-09T12:00:00+00:00")
+        # a failed / overridden row never reached the device
+        _insert_action(conn, date=d, start=z(at(20)), end=z(at(22)), action_type="lwt_preheat", offset=4,
+                       status="failed", created="2026-10-09T13:00:00+00:00")
+        _insert_action(conn, date=d, start=z(at(21)), end=z(at(22)), action_type="lwt_preheat", offset=5,
+                       status="overridden", created="2026-10-09T13:00:00+00:00")
+
+    resp = _run_plan(monkeypatch, seed)
+    assert _slot(resp, at(16))["lwt_offset"] == -3
+    assert _slot(resp, at(16, 30))["lwt_offset"] == -1
+    assert _slot(resp, at(18, 30))["lwt_offset"] == -1
+    assert _slot(resp, at(20))["offset_source"] == "none"
+    assert _slot(resp, at(21))["offset_source"] == "none"
+
+
+def test_heating_plan_backstop_completed_row_stops_at_execution(monkeypatch):
     tmr = datetime.now(_tz()).date() + timedelta(days=1)
     d = tmr.isoformat()
     at = lambda h, m=0: datetime(tmr.year, tmr.month, tmr.day, h, m, tzinfo=UTC)  # noqa: E731
@@ -229,18 +260,68 @@ def test_heating_plan_overlapping_rows_active_then_newest_wins(monkeypatch):
 
     def seed(conn):
         _insert_action(conn, date=d, start=z(at(16)), end=z(at(19)), action_type="lwt_preheat", offset=-2,
-                       status="pending", created="2026-10-09T10:00:00+00:00")
-        _insert_action(conn, date=d, start=z(at(16, 30)), end=z(at(19)), action_type="lwt_preheat", offset=-3,
-                       status="pending", created="2026-10-09T12:00:00+00:00")
-        _insert_action(conn, date=d, start=z(at(20)), end=z(at(22)), action_type="lwt_preheat", offset=4,
-                       status="pending", created="2026-10-09T13:00:00+00:00")
-        _insert_action(conn, date=d, start=z(at(20)), end=z(at(22)), action_type="lwt_preheat", offset=2,
-                       status="active", created="2026-10-09T09:00:00+00:00")
+                       status="completed", error_msg="comfort_backstop", executed_at=z(at(17, 10)))
+        _insert_action(conn, date=d, start=z(at(20)), end=z(at(22)), action_type="lwt_preheat", offset=-2,
+                       status="completed", error_msg="noop (state matched pre-fire)", executed_at=z(at(20, 1)))
 
     resp = _run_plan(monkeypatch, seed)
-    assert _slot(resp, at(16))["lwt_offset"] == -2      # only the older row covers 16:00
-    assert _slot(resp, at(17))["lwt_offset"] == -3      # newest wins in the overlap
-    assert _slot(resp, at(20))["lwt_offset"] == 2       # active beats newer pending
+    assert _slot(resp, at(17))["lwt_offset"] == -2
+    after = _slot(resp, at(17, 30))
+    assert after["lwt_offset"] == 0
+    assert _slot(resp, at(18, 30))["lwt_offset"] == 0
+    assert _slot(resp, at(21))["lwt_offset"] == -2  # noop rows cover their full window
+
+
+def test_heating_plan_tank_restore_ignored(monkeypatch):
+    tmr = datetime.now(_tz()).date() + timedelta(days=1)
+    d = tmr.isoformat()
+    at = lambda h, m=0: datetime(tmr.year, tmr.month, tmr.day, h, m, tzinfo=UTC)  # noqa: E731
+    z = lambda dt: dt.isoformat().replace("+00:00", "Z")  # noqa: E731
+
+    def seed(conn):
+        _insert_action(conn, date=d, start=z(at(10)), end=z(at(11)), action_type="restore", offset=0,
+                       params={"tank_power": True, "tank_temp": 45.0, "lp_optimizer": True})
+        _insert_action(conn, date=d, start=z(at(8)), end=z(at(12)), action_type="lwt_preheat", offset=-2)
+
+    resp = _run_plan(monkeypatch, seed)
+    # the tank restore sits INSIDE the -2 window and must not zero it
+    assert _slot(resp, at(10))["lwt_offset"] == -2
+
+
+def test_heating_plan_dst_day_slots_and_rows_agree(monkeypatch):
+    import asyncio
+    import src.db as db
+    from src.api import main
+
+    # 2026-10-25: UK clocks go back (25 h local day). Freeze "today" onto it.
+    real = main.datetime
+
+    class _FakeDT(real):
+        @classmethod
+        def now(cls, tz=None):
+            return real(2026, 10, 25, 12, 0, tzinfo=UTC).astimezone(tz) if tz else real(2026, 10, 25, 12, 0)
+
+    import datetime as _dtmod
+
+    monkeypatch.setattr(main, "datetime", _FakeDT, raising=False)
+    monkeypatch.setattr(_dtmod, "datetime", _FakeDT)  # the handler imports it locally
+    monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London", raising=False)
+    z = lambda dt: dt.isoformat().replace("+00:00", "Z")  # noqa: E731
+
+    def seed(conn):
+        # 00:30Z = 01:30 BST; 01:30Z = 01:30 GMT (the repeated local hour)
+        _insert_action(conn, date="2026-10-25", start=z(datetime(2026, 10, 25, 0, 30, tzinfo=UTC)),
+                       end=z(datetime(2026, 10, 25, 2, 0, tzinfo=UTC)), action_type="lwt_preheat", offset=2)
+
+    resp = _run_plan(monkeypatch, seed)
+    d25 = [s for s in resp["slots"] if s["slot_utc"].startswith("2026-10-25")]
+    assert len({s["slot_utc"] for s in d25}) == len(d25)
+    off = {s["slot_utc"]: s["lwt_offset"] for s in d25}
+    assert off["2026-10-25T00:30:00Z"] == 2 and off["2026-10-25T01:30:00Z"] == 2
+    assert off["2026-10-25T02:00:00Z"] == 0 and off["2026-10-25T00:00:00Z"] == 0
+    assert resp["timezone"] == "Europe/London"
+    assert resp["days"][1]["start_utc"] == "2026-10-24T23:00:00Z"
+    assert len([s for s in resp["slots"] if resp["days"][1]["start_utc"] <= s["slot_utc"] < resp["days"][2]["start_utc"]]) == 50
 
 
 def test_heating_plan_past_slot_uses_device_offset(monkeypatch):

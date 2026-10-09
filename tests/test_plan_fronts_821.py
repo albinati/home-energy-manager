@@ -171,7 +171,9 @@ def test_heating_windows_and_by_band():
         {"action_type": "lwt_preheat", "start_time": "2026-10-07T15:00:00Z", "end_time": "2026-10-07T18:00:00Z",
          "params": {"lwt_offset": -2}},
         {"action_type": "restore", "start_time": "2026-10-07T06:00:00Z", "end_time": "2026-10-07T06:30:00Z",
-         "params": {}},
+         "params": {"lwt_offset": 0}},
+        {"action_type": "restore", "start_time": "2026-10-07T12:00:00Z", "end_time": "2026-10-07T12:05:00Z",
+         "params": {"tank_power": True, "tank_temp": 45.0}},
         {"action_type": "tank_warmup", "start_time": "2026-10-07T12:00:00Z", "end_time": "2026-10-07T13:00:00Z",
          "params": {}},
     ]
@@ -208,10 +210,22 @@ def test_heating_windows_collapse_overlapping_same_offset():
     ]
     w = pf.heating_windows(rows, LON, fallback_source="lp")
     # one -2 window (the active row, 15:30) + the different-offset +3 row stays
-    assert [(x["kind"], x["start_utc"]) for x in w] == [
-        ("setback", "2026-10-07T15:30:00Z"), ("boost", "2026-10-07T15:30:00Z")] or \
-        sorted((x["kind"], x["start_utc"]) for x in w) == [("boost", "2026-10-07T15:30:00Z"), ("setback", "2026-10-07T15:30:00Z")]
+    assert sorted((x["kind"], x["start_utc"]) for x in w) == [
+        ("boost", "2026-10-07T15:30:00Z"), ("setback", "2026-10-07T15:30:00Z")]
     assert sum(1 for x in w if x["kind"] == "setback") == 1
+
+
+def test_heating_windows_trim_older_to_newer_start():
+    rows = [
+        {"id": 1, "status": "active", "created_at": "a", "action_type": "lwt_preheat",
+         "start_time": "2026-10-07T16:00:00Z", "end_time": "2026-10-07T19:00:00Z", "params": {"lwt_offset": -3}},
+        {"id": 2, "status": "pending", "created_at": "b", "action_type": "lwt_preheat",
+         "start_time": "2026-10-07T16:30:00Z", "end_time": "2026-10-07T19:00:00Z", "params": {"lwt_offset": -1}},
+    ]
+    w = pf.heating_windows(rows, LON)
+    assert [(x["start_utc"], x["end_utc"], x["offset_c"]) for x in w] == [
+        ("2026-10-07T16:00:00Z", "2026-10-07T16:30:00Z", -3.0),
+        ("2026-10-07T16:30:00Z", "2026-10-07T19:00:00Z", -1.0)]
 
 
 # ---------------------------------------------------------------------- tank

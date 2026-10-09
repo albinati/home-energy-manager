@@ -77,6 +77,12 @@ const HeatingPlanWidget = lazy(() =>
 // Bands are separated by spacing only (no labels) — minimal, Apple-style.
 // "Today's tariff" widget removed: its info is already in the Hero (current
 // import/export p/kWh) + Energy flow day-view (price line).
+function houseDateOf(utc: string, tz?: string): string {
+  try {
+    return new Date(utc).toLocaleDateString("sv", tz ? { timeZone: tz } : undefined);
+  } catch { return new Date(utc).toLocaleDateString("sv"); }
+}
+
 export default function Landing() {
   // Cache-only endpoints — poll while the tab is visible (usePoll auto-pauses
   // via visibilitychange). All of these read SQLite/memory, no cloud calls.
@@ -128,15 +134,33 @@ export default function Landing() {
   // #845: Today / Tomorrow toggle. Default = Tomorrow once it's >= 16:00 local
   // AND the heating-plan API already carries tomorrow's scheduled LP rows (the
   // evening replan makes tomorrow's plan the one that matters); else Today.
+  // "Tomorrow" and the current hour come from the API's house timezone
+  // (heating-plan `days` + `now_utc` + `timezone`), not the browser clock, so a
+  // viewer abroad still gets the house's evening default. Browser clock is the
+  // fallback only until the heating-plan response has loaded.
+  const hp = heatingPlan.data;
+  const houseTz = hp?.timezone;
   const tomorrowIso = (() => {
+    const fromApi = hp?.days?.find((x) => x.label === "Tomorrow")?.date;
+    if (fromApi) return fromApi;
     const d = new Date(); d.setDate(d.getDate() + 1);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   })();
+  const houseHour = (() => {
+    try {
+      if (hp?.now_utc && houseTz) {
+        const h = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone: houseTz })
+          .formatToParts(new Date(hp.now_utc)).find((p) => p.type === "hour")?.value;
+        if (h != null) return Number(h);
+      }
+    } catch { /* unknown tz -> browser clock */ }
+    return new Date().getHours();
+  })();
   const [frontsPick, setFrontsPick] = useState<"today" | "tomorrow" | null>(null);
-  const tomorrowPlanned = (heatingPlan.data?.slots ?? []).some(
-    (sl) => sl.offset_source === "schedule" && new Date(sl.slot_utc).toLocaleDateString("sv") === tomorrowIso,
+  const tomorrowPlanned = (hp?.slots ?? []).some(
+    (sl) => sl.offset_source === "schedule" && houseDateOf(sl.slot_utc, houseTz) === tomorrowIso,
   );
-  const frontsDefault: "today" | "tomorrow" = new Date().getHours() >= 16 && tomorrowPlanned ? "tomorrow" : "today";
+  const frontsDefault: "today" | "tomorrow" = houseHour >= 16 && tomorrowPlanned ? "tomorrow" : "today";
   const frontsChoice = frontsPick ?? frontsDefault;
   const pastNav = period.gran === "day" && period.anchor < todayIso;
   const frontsDate = pastNav ? period.anchor : frontsChoice === "tomorrow" ? tomorrowIso : todayIso;

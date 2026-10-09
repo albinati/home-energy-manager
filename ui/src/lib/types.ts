@@ -609,6 +609,7 @@ export interface HeatingPlanDay {
 export interface HeatingPlanResponse {
   enabled: boolean;
   now_utc: string;
+  timezone?: string;              // house IANA timezone (BULLETPROOF_TIMEZONE)
   high_temp_c: number;            // heating cutoff (DAIKIN_WEATHER_CURVE_HIGH_C)
   lwt_source?: "tier" | "lp";
   coast_mode?: string;
