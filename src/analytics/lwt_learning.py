@@ -198,6 +198,181 @@ def estimate_ua_w_per_k(
     return round(c_kwh_per_k * (sum_log / sum_dt) * 1000.0, 1), n_coast
 
 
+# ---------------------------------------------------------------------------
+# #843 — joint UA / C fit (heating + coast slots) and cheap-band rise check
+# ---------------------------------------------------------------------------
+JOINT_WINDOW_DAYS = 14
+JOINT_MIN_HEAT_SLOTS = 4
+JOINT_MIN_COAST_SLOTS = 8
+JOINT_HEAT_KWH_MIN = 0.05      # a slot counts as heating above this (kWh electric)
+COP_SENSITIVITY_FACTORS = (0.8, 1.2)
+
+
+def _default_cop_fn() -> Any:
+    """The LP's COP(outdoor): ``config.DAIKIN_COP_CURVE`` interpolated."""
+    from ..config import cop_at_temperature
+    curve = config.DAIKIN_COP_CURVE
+    return lambda t_out: max(1.0, cop_at_temperature(curve, float(t_out)))
+
+
+def _joint_samples(rows: list[dict[str, Any]], cop_fn: Any) -> list[tuple[float, float, float, bool]]:
+    """Per consecutive slot pair (i -> i+1, both with a realised indoor reading and
+    slot i with an outdoor reading): ``(dT, q_th_kwh, x, is_heat)`` with
+    ``x = (T_i - To_i) * dt_h`` so that ``C*dT = Q_th - (UA/1000) * x``.
+    Slots with heating between COAST_HEATING_KWH_EPS and JOINT_HEAT_KWH_MIN are
+    ambiguous (quantised counter) and skipped; coast slots carry Q = 0."""
+    dt_h = SLOT_MIN / 60.0
+    out: list[tuple[float, float, float, bool]] = []
+    for a, b in zip(rows, rows[1:], strict=False):
+        try:
+            ta = datetime.fromisoformat(a["slot_time_utc"].replace("Z", "+00:00"))
+            tb = datetime.fromisoformat(b["slot_time_utc"].replace("Z", "+00:00"))
+        except (ValueError, KeyError, AttributeError):
+            continue
+        if tb - ta != timedelta(minutes=SLOT_MIN):
+            continue
+        if a.get("indoor_real_c") is None or b.get("indoor_real_c") is None or a.get("outdoor_real_c") is None:
+            continue
+        hk = a.get("heating_kwh")
+        if hk is not None and float(hk) > JOINT_HEAT_KWH_MIN:
+            is_heat, q = True, float(hk) * float(cop_fn(float(a["outdoor_real_c"])))
+        elif hk is None or float(hk) <= COAST_HEATING_KWH_EPS:
+            if hk is None and not (a.get("device_offset") is not None and float(a["device_offset"]) < 0):
+                continue  # unmeasured and not a known coast: no usable Q
+            is_heat, q = False, 0.0
+        else:
+            continue
+        d_t = float(b["indoor_real_c"]) - float(a["indoor_real_c"])
+        x = (float(a["indoor_real_c"]) - float(a["outdoor_real_c"])) * dt_h
+        out.append((d_t, q, x, is_heat))
+    return out
+
+
+def _solve_joint(samples: list[tuple[float, float, float, bool]], tau_prior_h: float | None) -> dict[str, Any] | None:
+    """Least squares ``dT = a*Q - b*x`` (a = 1/C, b = UA/(1000*C) = 1/tau): hand-rolled
+    2x2 normal equations (free) or the 1-parameter solve for ``b = 1/tau_prior``."""
+    n = len(samples)
+    if n < 2:
+        return None
+    sqq = sum(q * q for _d, q, _x, _h in samples)
+    sxx = sum(x * x for _d, _q, x, _h in samples)
+    sqx = sum(q * x for _d, q, x, _h in samples)
+    sdq = sum(d * q for d, q, _x, _h in samples)
+    sdx = sum(d * x for d, _q, x, _h in samples)
+    if tau_prior_h is None:
+        # unknowns (a, c = -b): [[sqq, sqx],[sqx, sxx]] [a, c]^T = [sdq, sdx]^T
+        det = sqq * sxx - sqx * sqx
+        if det <= 1e-12 * max(1.0, sqq * sxx):
+            return None
+        a = (sdq * sxx - sdx * sqx) / det
+        c = (sqq * sdx - sqx * sdq) / det
+        b = -c
+    else:
+        if sqq <= 1e-12:
+            return None
+        b = 1.0 / float(tau_prior_h)
+        a = (sdq + b * sqx) / sqq
+    if a <= 0 or b <= 0:
+        return None
+    pred = [a * q - b * x for _d, q, x, _h in samples]
+    mean_d = sum(d for d, _q, _x, _h in samples) / n
+    ss_tot = sum((d - mean_d) ** 2 for d, _q, _x, _h in samples)
+    ss_res = sum((d - p) ** 2 for (d, _q, _x, _h), p in zip(samples, pred, strict=True))
+    r2 = (1.0 - ss_res / ss_tot) if ss_tot > 1e-12 else None
+    c_k = 1.0 / a
+    return {"ua_w_per_k": round(b * c_k * 1000.0, 1), "c_kwh_per_k": round(c_k, 2),
+            "tau_h": round(1.0 / b, 1), "r2": None if r2 is None else round(r2, 3)}
+
+
+def _coast_tau(samples: list[tuple[float, float, float, bool]]) -> float | None:
+    """tau from coast pairs alone: ``dT = -(1/tau) * x``."""
+    co = [(d, x) for d, _q, x, h in samples if not h]
+    sxx = sum(x * x for _d, x in co)
+    if len(co) < 2 or sxx <= 1e-12:
+        return None
+    inv = -sum(d * x for d, x in co) / sxx
+    return round(1.0 / inv, 1) if inv > 0 else None
+
+
+def night_rise_per_band(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """For each contiguous run of ``cheap``-band slots with a POSITIVE written
+    offset: measured indoor rise over the run vs the plan's predicted rise (first
+    to last slot of the run that carry both readings) — the direct check on
+    whether the thermal model is pessimistic."""
+    out: list[dict[str, Any]] = []
+    run: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        if len(run) >= 2:
+            real = [r for r in run if r.get("indoor_real_c") is not None]
+            pred = [r for r in run if r.get("indoor_pred_c") is not None]
+            if len(real) >= 2 and len(pred) >= 2:
+                m = float(real[-1]["indoor_real_c"]) - float(real[0]["indoor_real_c"])
+                p = float(pred[-1]["indoor_pred_c"]) - float(pred[0]["indoor_pred_c"])
+                offs = [float(r["offset_written"]) for r in run]
+                out.append({
+                    "start_utc": run[0]["slot_time_utc"], "end_utc": run[-1]["slot_time_utc"],
+                    "n_slots": len(run), "mean_offset_c": round(sum(offs) / len(offs), 2),
+                    "measured_rise_c": round(m, 2), "predicted_rise_c": round(p, 2),
+                    "model_error_c": round(p - m, 2),
+                })
+        run.clear()
+
+    prev: datetime | None = None
+    for r in rows:
+        ts = datetime.fromisoformat(r["slot_time_utc"].replace("Z", "+00:00"))
+        ok = (str(r.get("price_band") or "") == "cheap"
+              and r.get("offset_written") is not None and float(r["offset_written"]) > 0)
+        if ok and run and (prev is None or ts - prev != timedelta(minutes=SLOT_MIN)):
+            flush()
+        if ok:
+            run.append(r)
+        else:
+            flush()
+        prev = ts
+    flush()
+    return out
+
+
+def fit_ua_c_joint(
+    rows: list[dict[str, Any]], *, cop_fn: Any = None, tau_prior_h: float | None = None,
+) -> dict[str, Any]:
+    """Joint least-squares fit of UA and C from heating AND coast slots (#843).
+
+    Per slot ``C*dT = COP(To)*heating_kwh - (UA/1000)*(T_in - To)*dt``. Coast alone
+    identifies only tau = C/UA; the heating slots add a known input. Returns the free
+    fit, the tau-prior-constrained fit (``tau_prior_h``), ``identifiable``, ``n_heat``,
+    ``n_coast`` and the COP sensitivity (refit with COP x0.8 / x1.2) — COP is the
+    weakest link. Needs >= JOINT_MIN_HEAT_SLOTS heating and >= JOINT_MIN_COAST_SLOTS
+    coast slots; otherwise ``identifiable: False`` and only ``coast_tau_h`` is given.
+    Analytics only: nothing here is applied anywhere."""
+    cop_fn = cop_fn or _default_cop_fn()
+    samples = _joint_samples(rows, cop_fn)
+    n_heat = sum(1 for s in samples if s[3])
+    n_coast = len(samples) - n_heat
+    res: dict[str, Any] = {
+        "identifiable": False, "n_heat": n_heat, "n_coast": n_coast, "tau_prior_h": tau_prior_h,
+        "ua_w_per_k": None, "c_kwh_per_k": None, "tau_h": None, "r2": None,
+        "coast_tau_h": _coast_tau(samples), "tau_constrained": None, "cop_sensitivity": None,
+    }
+    if n_heat < JOINT_MIN_HEAT_SLOTS or n_coast < JOINT_MIN_COAST_SLOTS:
+        return res
+    free = _solve_joint(samples, None)
+    if free is None:
+        return res
+    res.update(free)
+    res["identifiable"] = True
+    if tau_prior_h:
+        res["tau_constrained"] = _solve_joint(samples, tau_prior_h)
+    sens: dict[str, Any] = {}
+    for f in COP_SENSITIVITY_FACTORS:
+        alt = _solve_joint(_joint_samples(rows, lambda t, f=f: f * float(cop_fn(t))), None)
+        sens[f"x{f}"] = (None if alt is None else
+                         {k: alt[k] for k in ("ua_w_per_k", "c_kwh_per_k", "tau_h")})
+    res["cop_sensitivity"] = sens
+    return res
+
+
 K_MIN_SAMPLES = 3        # telemetry samples needed in a 2 h bucket
 K_MIN_LWT_C = 20.0       # ignore samples with the water barely above idle
 K_MIN_BUCKET_KWH = 0.05  # bucket must really have heated
@@ -309,12 +484,16 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
         k_pin = float(get_kw_per_degc_lwt())
     except Exception:
         k_pin = None
+    joint = _joint_for_day(day, tz)
     row = {
         "date": day.isoformat(), "n_coast_slots": n_coast, "n_heat_slots": n_heat,
         "ua_est_w_per_k": ua, "k_est_kw_per_c": k,
         "pred_err_mean_c": pm, "pred_err_p90_c": p90,
         "ua_est_night_w_per_k": ua_night,
         "payload": {"c_kwh_per_k": c, "ua_est_night_w_per_k": ua_night,
+                    # #843: the coast-only UA is C x decay rate with C = tau x UA_pin -> circular
+                    "ua_from_tau_scaled_w_per_k": ua, "ua_from_tau_scaled_night_w_per_k": ua_night,
+                    "circular": True, **joint,
                     "n_coast_night_slots": n_coast_night, "n_k_buckets": n_k_buckets, "ua_pinned_w_per_k": ua_pin, "k_pinned_kw_per_c": k_pin,
                     "n_rows": len(rows),
                     "coast_delta_configured_c": float(getattr(config, "DAIKIN_LWT_COAST_DELTA_C", 2.0)),
@@ -327,3 +506,24 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
     except Exception:
         logger.debug("lwt_learning_summary log failed", exc_info=True)
     return row
+
+
+def _joint_for_day(day: date, tz: ZoneInfo) -> dict[str, Any]:
+    """#843 payload keys: rolling-window joint fit + cheap-band rise table. Never raises."""
+    try:
+        start = day_slots_utc(day - timedelta(days=JOINT_WINDOW_DAYS - 1), tz)[0]
+        end = day_slots_utc(day, tz)[-1] + timedelta(minutes=SLOT_MIN)
+        rows = db.get_lwt_learning_rows(_z(start), _z(end))
+        try:
+            from .thermal_learning import get_building_tau_hours
+            tau = float(get_building_tau_hours())
+        except Exception:
+            tau = None
+        fit = fit_ua_c_joint(rows, tau_prior_h=tau)
+        day_start, day_end = _z(day_slots_utc(day, tz)[0]), _z(end)
+        day_rows = [r for r in rows if day_start <= r["slot_time_utc"] < day_end]
+        return {"joint_fit": fit, "joint_window_days": JOINT_WINDOW_DAYS,
+                "night_rise_per_band": night_rise_per_band(day_rows)}
+    except Exception:
+        logger.warning("lwt_learning joint fit failed", exc_info=True)
+        return {"joint_fit": None, "joint_window_days": JOINT_WINDOW_DAYS, "night_rise_per_band": []}

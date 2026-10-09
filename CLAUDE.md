@@ -702,20 +702,28 @@ the Settings simulate->confirm->apply flow). Story-3 plug point:
   `plan_updated_at_utc` as the plan token, `written_at_utc` stays the first write);
   `offset_written` is recorded after the quota-cap trim (NULL for dropped windows).
   Pruned after `LWT_LEARNING_RETENTION_DAYS` (120).
-- **Reading the estimates**: `ua_est_w_per_k` fits `T−To ∝ exp(−UA/C·t)` over
-  runs of ≥3 consecutive coast slots (measured heating ≤ 0.02 kWh/slot or unmeasured,
-  AND device offset < 0 or ~0 heating) with the learned C, reported for all coasts
-  and as `ua_est_night_w_per_k` (local 22–07, PV ≈ 0 — prefer this one);
-  `k_est_kw_per_c` = median over 2-hour buckets of kWh ÷ Σ((`lwt_actual` − 18)·Δt)
-  over the bucket's telemetry (≥ 3 samples, `lwt_actual` > 20). Compare with the pins (`BUILDING_UA_W_PER_K=200`, learned k
-  0.063): estimates well above/below for several days with a small
-  `pred_err_p90_c` say the pin is wrong; a large `pred_err` with a consistent UA
-  says the trajectory model (gains, C) is. Nothing is auto-applied; read via
+- **Reading the estimates (#843)**: coast-only data identifies **τ = C/UA only**.
+  `ua_est_w_per_k` / `ua_est_night_w_per_k` (API + payload: `ua_from_tau_scaled_*`,
+  `circular: true`) is `C × decay rate` with C = τ × UA_pin (#841), so it returns ≈ the
+  pin whenever nights cool at the calibration's τ — it CANNOT confirm or refute the 200
+  pin; kept for audit (details block of the card), never a headline. UA and C come from
+  the **joint fit** `fit_ua_c_joint` (payload `joint_fit`, rolling `joint_window_days`=14):
+  per consecutive slot pair `C·ΔT_in = COP(To)·heating_kwh − (UA/1000)·(T_in−To)·Δt`
+  (COP = the LP's `DAIKIN_COP_CURVE`), least squares over heating slots (> 0.05 kWh) AND
+  coast slots (Q=0); needs ≥ 4 heating + ≥ 8 coast slots, else `identifiable: false`
+  with only `coast_tau_h`. Also reported: `tau_constrained` (UA/C with τ fixed to the
+  learner's τ) and `cop_sensitivity` (refit at COP ×0.8 / ×1.2 — COP is the weakest
+  link; if UA/C move a lot, don't trust them; the 2 h heating counter is also quantised).
+  Honest model checks: `pred_err_*` and `night_rise_per_band` (each cheap band with a
+  positive written offset: measured vs predicted indoor rise, `model_error_c` > 0 = the
+  model is pessimistic). `k_est_kw_per_c` = median over 2-hour buckets of kWh ÷
+  Σ((`lwt_actual` − 18)·Δt) (≥ 3 samples, `lwt_actual` > 20); learned k pin 0.063.
+  Nothing is auto-applied (`thermal_calibration` is untouched); read via
   `GET /api/v1/thermal/lwt-learning?days=14` or the Insights "LWT learning" card.
   The scorecard `lwt` section carries `lwt_backstops` (count of fired backstops).
-  **Discontinuity:** `ua_est_*` scales with the C it is fitted with, and C went
-  from 49.6 to 16.5 kWh/K at the #841 C fix (~3x): the series before/after is NOT
-  comparable. The payload carries `c_kwh_per_k` per day; compare like with like.
+  **Discontinuity:** the circular `ua_est_*` scales with the C it is fitted with, and C
+  went from 49.6 to 16.5 kWh/K at the #841 C fix (~3x): that series before/after is NOT
+  comparable. The payload carries `c_kwh_per_k` per day.
 
 ### Banking heat in cheap bands — consistent C, comfort ceiling, ceiling-based boost guard (#841)
 

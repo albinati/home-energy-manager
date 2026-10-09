@@ -1543,8 +1543,42 @@ export interface CosyScorecardResponse {
 }
 
 /* ----- LWT coast learning (#838) ----- */
+export interface LwtJointFitSolve {
+  ua_w_per_k: number | null;
+  c_kwh_per_k: number | null;
+  tau_h: number | null;
+  r2?: number | null;
+}
+
+export interface LwtJointFit extends LwtJointFitSolve {
+  identifiable: boolean;
+  n_heat: number;
+  n_coast: number;
+  tau_prior_h: number | null;
+  coast_tau_h: number | null;
+  tau_constrained: LwtJointFitSolve | null;
+  cop_sensitivity: Record<string, Omit<LwtJointFitSolve, "r2"> | null> | null;
+}
+
+export interface LwtBandRise {
+  start_utc: string;
+  end_utc: string;
+  n_slots: number;
+  mean_offset_c: number;
+  measured_rise_c: number;
+  predicted_rise_c: number;
+  model_error_c: number;
+}
+
 export interface LwtLearningDaily {
   date: string;
+  /** #843: true — the coast-only UA estimate is C(=tau x UA_pin) x decay rate. */
+  circular?: boolean;
+  ua_from_tau_scaled_w_per_k?: number | null;
+  ua_from_tau_scaled_night_w_per_k?: number | null;
+  joint_fit?: LwtJointFit | null;
+  joint_window_days?: number;
+  night_rise_per_band?: LwtBandRise[];
   n_coast_slots: number | null;
   n_heat_slots: number | null;
   ua_est_w_per_k: number | null;

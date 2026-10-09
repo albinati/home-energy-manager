@@ -42,6 +42,9 @@ export function LwtLearningCard() {
   const cal = useFetch(() => getThermalCalibration(), [], { cacheKey: "thermal-calibration-lwtl" });
   const eff = cal.data?.effective;
   const rows = d?.daily ?? [];
+  const latest = rows.find((r) => r.joint_fit) ?? rows[0];
+  const joint = latest?.joint_fit ?? null;
+  const bands = latest?.night_rise_per_band ?? [];
   return (
     <section class={`lwtl${res.loading && d ? " is-updating" : ""}`}>
       <header class="lwtl-head">
@@ -67,9 +70,6 @@ export function LwtLearningCard() {
               <tr>
                 <th>Day</th>
                 <th class="num">Coast slots</th>
-                <th class="num">UA night W/K</th>
-                <th class="num">UA all-coast W/K</th>
-                <th class="num">UA pinned</th>
                 <th class="num">k est kW/°C</th>
                 <th class="num">k pinned</th>
                 <th class="num">Pred err mean °C</th>
@@ -81,9 +81,6 @@ export function LwtLearningCard() {
                 <tr key={r.date}>
                   <td>{r.date.slice(5)}</td>
                   <td class="num">{r.n_coast_slots ?? "—"}</td>
-                  <td class="num">{n1(r.ua_est_night_w_per_k, 0)}</td>
-                  <td class="num">{n1(r.ua_est_w_per_k, 0)}</td>
-                  <td class="num">{n1(r.ua_pinned_w_per_k, 0)}</td>
                   <td class="num">{n1(r.k_est_kw_per_c, 3)}</td>
                   <td class="num">{n1(r.k_pinned_kw_per_c, 3)}</td>
                   <td class="num">{n1(r.pred_err_mean_c, 2)}</td>
@@ -94,6 +91,89 @@ export function LwtLearningCard() {
           </table>
         </div>
       )}
+      {joint && (
+        <div class="lwtl-joint">
+          <h3 class="lwtl-sub">Joint UA / C fit (last {latest?.joint_window_days ?? 14} days)</h3>
+          {joint.identifiable ? (
+            <p>
+              UA {n1(joint.ua_w_per_k, 0)} W/K · C {n1(joint.c_kwh_per_k, 1)} kWh/K · τ {n1(joint.tau_h, 0)} h · R²{" "}
+              {n1(joint.r2, 2)} · n {joint.n_heat} heat / {joint.n_coast} coast
+              <span class="muted">
+                {" "}
+                (pinned UA {d ? n1(d.ua_pinned_w_per_k, 0) : "—"} W/K
+                {eff ? `, C ${n1(eff.c_kwh_per_k, 1)} kWh/K, τ ${n1(eff.tau_hours, 0)} h` : ""})
+              </span>
+            </p>
+          ) : (
+            <p class="muted">
+              Not identifiable yet ({joint.n_heat} heating / {joint.n_coast} coast slots; needs 4 / 8)
+              {joint.coast_tau_h != null ? ` · coast-only τ ${n1(joint.coast_tau_h, 0)} h` : ""}
+            </p>
+          )}
+          {joint.tau_constrained && (
+            <p class="muted">
+              τ-prior fit ({n1(joint.tau_prior_h, 0)} h): UA {n1(joint.tau_constrained.ua_w_per_k, 0)} W/K · C{" "}
+              {n1(joint.tau_constrained.c_kwh_per_k, 1)} kWh/K
+            </p>
+          )}
+          {joint.cop_sensitivity && (
+            <p class="muted">
+              COP sensitivity:{" "}
+              {Object.entries(joint.cop_sensitivity)
+                .map(([k, v]) => `${k} → ${v ? `UA ${n1(v.ua_w_per_k, 0)} / C ${n1(v.c_kwh_per_k, 1)}` : "no fit"}`)
+                .join(" · ")}
+            </p>
+          )}
+        </div>
+      )}
+      {bands.length > 0 && (
+        <div class="lwtl-scroll">
+          <h3 class="lwtl-sub">Cheap-band rise: measured vs predicted ({latest?.date.slice(5)})</h3>
+          <table class="lwtl-table">
+            <thead>
+              <tr>
+                <th>Band (UTC)</th>
+                <th class="num">Offset °C</th>
+                <th class="num">Measured °C</th>
+                <th class="num">Predicted °C</th>
+                <th class="num">Model err °C</th>
+              </tr>
+            </thead>
+            <tbody>
+              {bands.map((b) => (
+                <tr key={b.start_utc}>
+                  <td>{b.start_utc.slice(11, 16)}–{b.end_utc.slice(11, 16)}</td>
+                  <td class="num">{n1(b.mean_offset_c, 1)}</td>
+                  <td class="num">{n1(b.measured_rise_c, 2)}</td>
+                  <td class="num">{n1(b.predicted_rise_c, 2)}</td>
+                  <td class="num">{n1(b.model_error_c, 2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <details class="lwtl-details">
+        <summary class="muted">Coast-only UA (circular: C = τ × pinned UA — not a UA measurement)</summary>
+        <table class="lwtl-table">
+          <thead>
+            <tr>
+              <th>Day</th>
+              <th class="num">UA night W/K</th>
+              <th class="num">UA all-coast W/K</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.date}>
+                <td>{r.date.slice(5)}</td>
+                <td class="num">{n1(r.ua_from_tau_scaled_night_w_per_k ?? r.ua_est_night_w_per_k, 0)}</td>
+                <td class="num">{n1(r.ua_from_tau_scaled_w_per_k ?? r.ua_est_w_per_k, 0)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </details>
       <h3 class="lwtl-sub">Yesterday {d?.yesterday.date.slice(5) ?? ""}: predicted vs realised indoor</h3>
       <Strip slots={d?.yesterday.slots ?? []} />
       <p class="muted lwtl-legend">
