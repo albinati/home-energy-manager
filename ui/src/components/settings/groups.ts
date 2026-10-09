@@ -43,6 +43,7 @@ export const SETTINGS_GROUPS: GroupSpec[] = [
       "INDOOR_COMFORT_AGGREGATE",
       "LP_W3_NIGHT_FLOOR_C",
       "LP_W3_PEAK_COAST_DELTA_C",
+      "LP_W3_CEILING_C",
     ],
   },
   {
@@ -121,6 +122,7 @@ export const KEY_LABELS: Record<string, string> = {
   INDOOR_COMFORT_AGGREGATE: "Comfort temperature (mean | min | max | room:<name>)",
   LP_W3_NIGHT_FLOOR_C: "Night comfort floor (°C)",
   LP_W3_PEAK_COAST_DELTA_C: "Peak-band coast drop (°C)",
+  LP_W3_CEILING_C: "Comfort ceiling (°C)",
   OPTIMIZATION_PRESET: "Household mode",
   DHW_TEMP_NORMAL_C: "Normal tank target",
   DHW_TEMP_COMFORT_C: "Comfort tank target (plunge fill)",

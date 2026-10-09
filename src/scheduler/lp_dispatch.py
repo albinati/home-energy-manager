@@ -431,6 +431,14 @@ def _overnight_tank_idle_enabled() -> bool:
 # tank-only invariant grep-provable.
 
 
+def _boost_guard_c() -> float:
+    """#841 — indoor temperature at/above which a POSITIVE LWT offset is zeroed:
+    ``LP_W3_CEILING_C − DAIKIN_LWT_PREHEAT_COMFORT_BAND_C`` (23 − 0.5 = 22.5)."""
+    from .lwt_coast import effective_w3_ceiling_c
+    ceiling = effective_w3_ceiling_c()
+    return ceiling - float(config.DAIKIN_LWT_PREHEAT_COMFORT_BAND_C)
+
+
 def _preheat_lwt_offset(
     price_p: float,
     outdoor_c: float,
@@ -474,7 +482,8 @@ def _preheat_lwt_offset(
 
     ``indoor_c`` is a forward-looking hook for a future room sensor. While no
     sensor exists it is ``None`` and the comfort guard is a no-op. Once wired,
-    it suppresses boosting when the room is already warm (≥ setpoint + band)
+    it suppresses boosting when the room is already warm (≥ comfort ceiling
+    ``LP_W3_CEILING_C`` − band, #841)
     and suppresses setback when it's already cold (≤ setpoint − band).
     """
     if not config.DAIKIN_LWT_PREHEAT_ENABLED:
@@ -484,6 +493,9 @@ def _preheat_lwt_offset(
     neg_boost = int(getattr(config, "DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C", boost))
     setback = int(config.DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C)
     band = float(config.DAIKIN_LWT_PREHEAT_COMFORT_BAND_C)
+    # #841 — the boost guard is the comfort CEILING minus the hysteresis band
+    # (banking heat deliberately goes above the setpoint while cheap).
+    boost_guard_c = _boost_guard_c()
     setpoint = float(config.INDOOR_SETPOINT_C)
     # Exogenous outdoor cutoff — suppresses POSITIVE offsets only (see docstring).
     # A non-finite temp (sensor/forecast glitch) fails SAFE → suppress, since the
@@ -509,12 +521,12 @@ def _preheat_lwt_offset(
         # the compressor would only wake to waste it (#540 phantom-heat guard).
         off = 0 if too_warm_for_heat else neg_boost
         # Comfort guard (sensor-ready): don't over-heat an already-warm room.
-        if indoor_c is not None and indoor_c >= setpoint + band:
+        if indoor_c is not None and indoor_c >= boost_guard_c:
             off = 0
     elif tier == "cheap":
         off = 0 if too_warm_for_heat else boost
         # Comfort guard (sensor-ready): don't pre-heat an already-warm room.
-        if indoor_c is not None and indoor_c >= setpoint + band:
+        if indoor_c is not None and indoor_c >= boost_guard_c:
             off = 0
     elif tier == "peak":
         # 2026-07-04 (owner report): the setback used to be exempt from the
@@ -608,7 +620,10 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
 
     With an unfitted UA the RC model cannot hold the house: the predicted
     temperature falls monotonically, the comfort slack dominates the objective
-    and the "plan" is to heat at the ceiling 24/7. Gate: no trajectory, or any
+    and the "plan" is to heat at the ceiling 24/7. Gate: no trajectory, or more
+    than ``LP_W3_MAX_SLACK_SLOTS`` slots with FLOOR slack, or with ceiling slack
+    while the plan heats (overheating on purpose; a house that starts above the
+    ceiling and is left to cool is NOT a veto), or any
     predicted value more than ``LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C`` under the
     night floor / 2× that above the setpoint → ``(False, reason)``.
     """
@@ -620,22 +635,38 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     # floor — an unfitted UA shows up here in ordinary UK weather long before
     # the absolute band below would trip.
     slack = plan.comfort_slack_c or []
+    slack_hi = getattr(plan, "comfort_slack_hi_c", None) or []
+    heat = getattr(plan, "space_electric_kwh", None) or []
     s_tol = float(getattr(config, "LP_W3_SLACK_TOL_C", 0.1))
     max_slack_slots = int(getattr(config, "LP_W3_MAX_SLACK_SLOTS", 4))
-    n_slack = sum(1 for s in slack if float(s) > s_tol)
+    n_slack = 0
+    for i in range(max(len(slack), len(slack_hi))):
+        lo_bad = i < len(slack) and float(slack[i]) > s_tol
+        # #841: ceiling overshoot only vetoes when the plan is HEATING in that
+        # slot (overheating on purpose); a house that merely starts above the
+        # ceiling has unavoidable overshoot and must not disable the LP source.
+        hi_bad = (
+            i < len(slack_hi) and float(slack_hi[i]) > s_tol
+            and i < len(heat) and float(heat[i]) > 1e-6
+        )
+        if lo_bad or hi_bad:
+            n_slack += 1
     if n_slack > max_slack_slots:
         return False, f"comfort_slack:{n_slack}_slots>{max_slack_slots}"
     # Judge the trajectory against the floor/setpoint the plan was SOLVED with;
     # live config only for older plans that did not record them.
     floor = float(plan.w3_night_floor_c if plan.w3_night_floor_c is not None
                   else getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5))
-    setpoint = float(plan.w3_setpoint_c if plan.w3_setpoint_c is not None
-                     else config.INDOOR_SETPOINT_C)
+    # #841: the upper plausibility bound is the CEILING (banking heat to 22.9
+    # is legitimate), not the setpoint; older plans fall back to live config.
+    from .lwt_coast import effective_w3_ceiling_c
+    ceiling = float(plan.w3_ceiling_c if getattr(plan, "w3_ceiling_c", None) is not None
+                    else effective_w3_ceiling_c())
     tol = float(getattr(config, "LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C", 2.0))
     lo, hi = min(traj), max(traj)
     if lo < floor - tol:
         return False, f"trajectory_implausible_min:{lo:.1f}"
-    if hi > setpoint + 2 * tol:
+    if hi > ceiling + 2 * tol:
         return False, f"trajectory_implausible_max:{hi:.1f}"
     return True, "ok"
 
@@ -784,7 +815,7 @@ def _lp_offsets(
             off = max(lo, min(hi, off))
             if (
                 off > 0 and live_indoor_c is not None
-                and live_indoor_c >= setpoint + band and near
+                and live_indoor_c >= _boost_guard_c() and near
             ):
                 off = 0
         if off < 0:

@@ -1385,6 +1385,7 @@ def _persist_lp_snapshots(
         "LP_W3_TIN_ENABLED": bool(getattr(config, "LP_W3_TIN_ENABLED", False)),
         "LP_W3_PEAK_COAST_DELTA_C": float(getattr(config, "LP_W3_PEAK_COAST_DELTA_C", 1.0)),
         "LP_W3_NIGHT_FLOOR_C": float(getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5)),
+        "LP_W3_CEILING_C": float(getattr(config, "LP_W3_CEILING_C", 23.0)),
         "INDOOR_COMFORT_AGGREGATE": str(getattr(config, "INDOOR_COMFORT_AGGREGATE", "mean")),
         "DAIKIN_LWT_LP_OFFSET_MIN": float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5)),
         "DAIKIN_LWT_LP_OFFSET_MAX": float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5)),

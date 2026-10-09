@@ -251,7 +251,78 @@ def _tank(day: date, tz: ZoneInfo) -> dict[str, Any]:
 
 
 # ----------------------------------------------------------------------- lwt
-def _lwt(day: date, tz: ZoneInfo, a: datetime, b: datetime) -> dict[str, Any]:
+def _band_name(w: Any) -> str:
+    if _is_peak(w):
+        return "peak"
+    k = f"{w.key} {w.label}".lower()
+    return "cheap" if "cheap" in k else "standard"
+
+
+def _heating_kwh_by_band(day: date, windows: list[Any], tz: ZoneInfo, a: datetime, b: datetime) -> dict[str, Any]:
+    """#841 — Daikin space-heating kWh per tariff band. The 2-hourly
+    ``kwh_heating`` bucket is prorated over its 30-min slots (as
+    ``lwt_learning.fill_realised`` does) and each slot is assigned to the band
+    window covering its LOCAL (hour, minute). ``None`` when no consumption row."""
+    cons = {int(r["bucket_idx"]): r.get("kwh_heating")
+            for r in db.get_daikin_consumption_2hourly_range(day.isoformat(), day.isoformat())}
+    if not cons:
+        return {"cheap": None, "standard": None, "peak": None}
+    slot_band: dict[tuple[int, int], str] = {}
+    for w in windows:
+        for hm in w.local_slots:
+            slot_band[hm] = _band_name(w)
+    out = {"cheap": 0.0, "standard": 0.0, "peak": 0.0}
+    st = a
+    slots = []
+    while st < b:
+        slots.append(st.astimezone(tz))
+        st += timedelta(minutes=30)
+    per_bucket: dict[int, int] = {}
+    for lt in slots:
+        per_bucket[lt.hour // 2] = per_bucket.get(lt.hour // 2, 0) + 1
+    for lt in slots:
+        kb = cons.get(lt.hour // 2)
+        if kb is None:
+            continue
+        band = slot_band.get((lt.hour, 30 if lt.minute >= 30 else 0), "standard")
+        out[band] += float(kb) / max(1, per_bucket.get(lt.hour // 2, 4))
+    return {k: _r(v, 3) for k, v in out.items()}
+
+
+def _indoor_min_max(day: date, tz: ZoneInfo, a: datetime, b: datetime) -> tuple[float | None, float | None]:
+    """Min / max of the AGGREGATE house temperature (INDOOR_COMFORT_AGGREGATE)
+    over the local day, 15-min buckets (same bucketing as ``_comfort``)."""
+    buckets: dict[datetime, dict[str, float]] = {}
+    for r in db.get_indoor_readings_range(_z(a), _z(b)):
+        t = _parse(r.get("captured_at"))
+        if t is None or r.get("temp_c") is None:
+            continue
+        bt = t.replace(minute=(t.minute // 15) * 15, second=0, microsecond=0)
+        # later reading in the same bucket wins (the range is time-ordered)
+        buckets.setdefault(bt, {})[str(r.get("room") or "home")] = float(r["temp_c"])
+    all_rooms: set[str] = set()
+    for rooms_b in buckets.values():
+        all_rooms.update(rooms_b)
+    # A room on a slower cadence is absent from some buckets; aggregating only
+    # the rooms that happened to report biases min/max. Carry each room's last
+    # reading forward, and aggregate only once EVERY room seen has reported.
+    last: dict[str, float] = {}
+    vals: list[float] = []
+    for bt in sorted(buckets):
+        last.update(buckets[bt])
+        if bt.astimezone(tz).date() != day:
+            continue
+        if len(last) < len(all_rooms):
+            continue
+        try:
+            _m, house = db.aggregate_indoor_c(dict(last))
+        except ValueError:
+            continue
+        vals.append(float(house))
+    return (_r(min(vals), 1), _r(max(vals), 1)) if vals else (None, None)
+
+
+def _lwt(day: date, tz: ZoneInfo, a: datetime, b: datetime, windows: list[Any] | None = None) -> dict[str, Any]:
     n_pre = n_restore = 0
     for pd in ((day - timedelta(days=1)).isoformat(), day.isoformat()):
         for r in db.get_actions_for_plan_date(pd, "daikin"):
@@ -294,8 +365,19 @@ def _lwt(day: date, tz: ZoneInfo, a: datetime, b: datetime) -> dict[str, Any]:
                 n_backstops += 1
     except Exception:  # noqa: BLE001
         logger.debug("cosy_scorecard: backstop count failed", exc_info=True)
+    by_band: dict[str, Any] | None = None
+    try:
+        by_band = _heating_kwh_by_band(day, windows or [], tz, a, b)
+    except Exception:  # noqa: BLE001
+        logger.debug("cosy_scorecard: heating_kwh_by_band failed", exc_info=True)
+    imin = imax = None
+    try:
+        imin, imax = _indoor_min_max(day, tz, a, b)
+    except Exception:  # noqa: BLE001
+        logger.debug("cosy_scorecard: indoor min/max failed", exc_info=True)
     return {"preheat_rows": n_pre, "restore_rows": n_restore, "write_verify": verify,
-            "source_diff_last": diff, "lwt_backstops": n_backstops}
+            "source_diff_last": diff, "lwt_backstops": n_backstops,
+            "heating_kwh_by_band": by_band, "indoor_min_c": imin, "indoor_max_c": imax}
 
 
 def _ops(a: datetime, b: datetime) -> dict[str, Any]:
@@ -402,7 +484,7 @@ def build_scorecard(day: date, *, tz: ZoneInfo | None = None) -> dict[str, Any]:
 
     payload["comfort"] = _section("comfort", _comfort, day, windows, tz, a, b)
     payload["tank"] = _section("tank", _tank, day, tz)
-    payload["lwt"] = _section("lwt", _lwt, day, tz, a, b)
+    payload["lwt"] = _section("lwt", _lwt, day, tz, a, b, windows)
     payload["ops"] = _section("ops", _ops, a, b)
 
     money: dict[str, Any] = {}

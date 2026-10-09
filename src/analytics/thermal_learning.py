@@ -670,13 +670,17 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
         )
     tau_h = row.get("tau_hours")
     if tau_h is not None:
-        if row.get("ua_w_per_k") is not None:
-            ua_for_c = float(row["ua_w_per_k"])
+        ua_row = row.get("ua_w_per_k")
+        # Same bounds the reader applies: an out-of-bounds HDD fit must not
+        # stamp C = tau x (e.g. 2000 W/K) when the plan will run on the env UA.
+        if ua_row is not None and _UA_BOUNDS[0] <= float(ua_row) <= _UA_BOUNDS[1]:
+            ua_for_c = float(ua_row)
             row["c_source"] = "tau_x_learned_ua"
         else:
             ua_for_c = float(config.BUILDING_UA_W_PER_K)
             row["c_source"] = "tau_x_env_ua"
         row["c_kwh_per_k"] = float(tau_h) * ua_for_c / 1000.0
+        row["c_ua_basis_w_per_k"] = float(ua_for_c)
     try:
         db.upsert_building_thermal_calibration(row)
     except Exception:  # pragma: no cover
@@ -815,14 +819,85 @@ def get_building_ua_w_per_k() -> float:
     return ua if _UA_BOUNDS[0] <= ua <= _UA_BOUNDS[1] else fallback
 
 
-def get_building_thermal_mass_kwh_per_k() -> float:
-    """Learned C = τ·UA when present + in bounds; env constant otherwise."""
+_C_RECOMPUTE_LOGGED: set[tuple[float, float]] = set()
+_C_BASIS_TOL_W_PER_K = 1.0
+_C_TAU_UA_SOURCES = frozenset({"tau_x_env_ua", "tau_x_learned_ua"})
+
+
+def thermal_mass_resolution(row: dict[str, Any] | None = None) -> dict[str, Any]:
+    """#841 — resolve C and say HOW. A stored C = τ·UA is only valid for the UA
+    it was computed from (``c_ua_basis_w_per_k``). When that basis differs from
+    the EFFECTIVE UA (or is unknown — pre-migration rows), C is recomputed as
+    ``τ_eff × UA_eff / 1000`` so the RC model stays internally consistent.
+
+    Only rows whose ``c_source`` is a tau x UA derivation are recomputed; a
+    measured C is kept. Returns ``{c_kwh_per_k, c_basis_ua_w_per_k,
+    c_recomputed, c_reason, ua_eff_w_per_k}``.
+    """
+    if row is None:
+        row = _calibration_row()
     fallback = float(config.BUILDING_THERMAL_MASS_KWH_PER_K)
-    row = _calibration_row()
+    ua_eff = get_building_ua_w_per_k()
+    out: dict[str, Any] = {
+        "c_kwh_per_k": fallback, "c_basis_ua_w_per_k": None,
+        "c_recomputed": False, "c_reason": None, "ua_eff_w_per_k": ua_eff,
+    }
     if row is None or row.get("c_kwh_per_k") is None:
-        return fallback
+        return out
     c = float(row["c_kwh_per_k"])
-    return c if _C_BOUNDS[0] <= c <= _C_BOUNDS[1] else fallback
+    basis = row.get("c_ua_basis_w_per_k")
+    basis_f = float(basis) if basis is not None else None
+    out["c_basis_ua_w_per_k"] = basis_f
+
+    def _derived() -> float | None:
+        c_new = get_building_tau_hours() * ua_eff / 1000.0
+        return c_new if _C_BOUNDS[0] <= c_new <= _C_BOUNDS[1] else None
+
+    def _log(c_old: float, c_new: float) -> None:
+        key = (round(c_old, 2), round(ua_eff, 1))
+        if key not in _C_RECOMPUTE_LOGGED:
+            _C_RECOMPUTE_LOGGED.add(key)
+            logger.info(
+                "thermal_learning: stored C=%.1f kWh/K was derived from UA=%s W/K, "
+                "effective UA is %.0f W/K — using tau x UA = %.1f kWh/K",
+                c_old, f"{basis_f:.0f}" if basis_f is not None else "unknown", ua_eff, c_new,
+            )
+
+    if not (_C_BOUNDS[0] <= c <= _C_BOUNDS[1]):
+        # Stored C rejected on bounds: fall back to the tau x UA derivation
+        # (or the env constant when that is out of bounds too).
+        c_new = _derived()
+        if c_new is not None:
+            _log(c, c_new)
+            out.update(c_kwh_per_k=c_new, c_recomputed=True, c_reason="stored_c_out_of_bounds")
+        else:
+            out["c_reason"] = "stored_c_out_of_bounds_env_fallback"
+        return out
+    out["c_kwh_per_k"] = c
+    # Only a tau x UA derivation is tied to a UA; a real heat-capacity fit
+    # (any other c_source) is a measurement and is kept as stored.
+    if str(row.get("c_source") or "") not in _C_TAU_UA_SOURCES:
+        return out
+    if basis_f is not None and abs(basis_f - ua_eff) <= _C_BASIS_TOL_W_PER_K:
+        return out
+    c_new = _derived()
+    if c_new is None:
+        return out
+    _log(c, c_new)
+    out.update(
+        c_kwh_per_k=c_new, c_recomputed=True,
+        c_reason="basis_unknown" if basis_f is None else "basis_mismatch",
+    )
+    return out
+
+
+def get_building_thermal_mass_kwh_per_k() -> float:
+    """Learned C = τ·UA when present + in bounds; env constant otherwise.
+
+    #841: a stored C whose UA basis differs from the effective UA (or is
+    unknown) is recomputed as τ_eff × UA_eff / 1000 (see
+    :func:`thermal_mass_resolution`)."""
+    return float(thermal_mass_resolution()["c_kwh_per_k"])
 
 
 def get_building_tau_hours() -> float:
