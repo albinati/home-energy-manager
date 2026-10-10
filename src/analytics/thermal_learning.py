@@ -673,7 +673,8 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
         ua_row = row.get("ua_w_per_k")
         # Same bounds the reader applies: an out-of-bounds HDD fit must not
         # stamp C = tau x (e.g. 2000 W/K) when the plan will run on the env UA.
-        if ua_row is not None and _UA_BOUNDS[0] <= float(ua_row) <= _UA_BOUNDS[1]:
+        if (ua_row is not None and _UA_BOUNDS[0] <= float(ua_row) <= _UA_BOUNDS[1]
+                and bool(getattr(config, "BUILDING_UA_LEARNED_AUTO_APPLY", False))):
             ua_for_c = float(ua_row)
             row["c_source"] = "tau_x_learned_ua"
         else:
@@ -686,6 +687,11 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
     except Exception:  # pragma: no cover
         logger.exception("thermal_learning: upsert failed")
         return _done({"status": "error", "reason": "upsert failed"})
+    if ua_fit.get("status") == "ok":
+        try:
+            notify_ua_learned_pending(float(ua_fit["ua_w_per_k"]))
+        except Exception:  # noqa: BLE001
+            logger.exception("thermal_learning: ua pending alert failed")
     logger.info(
         "thermal_learning: tau=%s h (eps=%s r2=%s) ua=%s W/K (src=%s) c=%s kWh/K",
         _fmt(row.get("tau_hours")), row.get("tau_episodes"),
@@ -809,14 +815,61 @@ def _calibration_row() -> dict[str, Any] | None:
         return None
 
 
-def get_building_ua_w_per_k() -> float:
-    """Learned UA when present + in bounds; env constant otherwise."""
-    fallback = float(config.BUILDING_UA_W_PER_K)
+def get_learned_ua_w_per_k() -> float | None:
+    """#859 — the stored learned UA when present + in bounds, else None.
+    Display/alert only unless ``BUILDING_UA_LEARNED_AUTO_APPLY``."""
     row = _calibration_row()
     if row is None or row.get("ua_w_per_k") is None:
-        return fallback
+        return None
     ua = float(row["ua_w_per_k"])
-    return ua if _UA_BOUNDS[0] <= ua <= _UA_BOUNDS[1] else fallback
+    return ua if _UA_BOUNDS[0] <= ua <= _UA_BOUNDS[1] else None
+
+
+def ua_effective_source() -> str:
+    """``learned`` only when auto-apply is on AND a learned UA is in bounds."""
+    if bool(getattr(config, "BUILDING_UA_LEARNED_AUTO_APPLY", False)) \
+            and get_learned_ua_w_per_k() is not None:
+        return "learned"
+    return "pin"
+
+
+def get_building_ua_w_per_k() -> float:
+    """The UA every consumer uses. The ``BUILDING_UA_W_PER_K`` pin unless
+    ``BUILDING_UA_LEARNED_AUTO_APPLY`` is on and a learned UA is in bounds (#859)."""
+    if ua_effective_source() == "learned":
+        return float(get_learned_ua_w_per_k())  # type: ignore[arg-type]
+    return float(config.BUILDING_UA_W_PER_K)
+
+
+def notify_ua_learned_pending(learned: float | None = None) -> bool:
+    """#859 — one ``notify_risk`` + ``action_log`` per value bucket (10 W/K) when
+    a learned UA differs from the pin by > 25 % and is NOT being applied."""
+    if bool(getattr(config, "BUILDING_UA_LEARNED_AUTO_APPLY", False)):
+        return False
+    if learned is None:
+        learned = get_learned_ua_w_per_k()
+    pin = float(config.BUILDING_UA_W_PER_K)
+    if learned is None or pin <= 0 or abs(learned - pin) / pin <= 0.25:
+        return False
+    from .. import db
+    key = f"ua_learned_pending_{int(round(learned / 10.0) * 10)}"
+    if db.is_warning_acknowledged(key):
+        return False
+    msg = (f"UA aprendido {learned:.0f} W/K vs pino {pin:.0f} - nao aplicado; "
+           "ver Insights (BUILDING_UA_LEARNED_AUTO_APPLY=false).")
+    try:
+        from ..notifier import notify_risk
+        notify_risk(msg, extra={"warning_key": key})
+    except Exception:  # noqa: BLE001
+        logger.exception("thermal_learning: ua_learned_pending notify failed")
+    try:
+        db.log_action(device="thermal", action="ua_learned_pending", params={
+            "learned_w_per_k": learned, "pinned_w_per_k": pin}, result="success",
+            trigger="thermal_learning")
+    except Exception:  # noqa: BLE001
+        logger.exception("thermal_learning: ua_learned_pending log failed")
+    db.acknowledge_warning(key)
+    return True
 
 
 _C_RECOMPUTE_LOGGED: set[tuple[float, float]] = set()
