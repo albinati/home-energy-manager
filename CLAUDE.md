@@ -853,6 +853,42 @@ own constants/guards used to stop it reaching the device:
 - Owner comfort policy (2026-10-09, mean across sensors): day 21 floor / 23 ceiling,
   night (22–07) 20 floor (`LP_W3_NIGHT_FLOOR_C=20`, `LP_W3_PEAK_COAST_DELTA_C=0`).
 
+### Solar + internal gains in the W3 RC model (#854)
+
+The RC equation used to carry NO gains, so a sunny afternoon was planned like an
+overcast one and boosted +9/+10 "to hold 21". Now
+`C·ΔT = e_space·COP + q_gain·Δt − UA·(T_in − T_out)·Δt` with
+`q_gain[i] = LP_W3_INTERNAL_GAIN_KW + LP_W3_SOLAR_GAIN_KW_PER_PV_KW × pv_kw[i]`
+(thermal kW; `pv_kw` = the SAME per-slot PV the battery side uses, `pv_avail / 0.5 h`,
+so the optimistic/pessimistic scenario PV factors scale the gain automatically).
+
+- Knobs (runtime-tunable, `PUT /api/v1/settings`, no restart, Settings > comfort group):
+  `LP_W3_INTERNAL_GAIN_KW` (code default **0**, 0..1) and `LP_W3_SOLAR_GAIN_KW_PER_PV_KW`
+  (code default **0**, 0..2). **Both 0 = the pre-#854 equation, bit-for-bit** (the gain term
+  is not even added to the constraint) = the kill switch.
+- The gentle-recovery cap still bounds only the HEATING-driven rise (`q_heat/C`), never the
+  net delta, so gains cannot make it infeasible; the soft ceiling still binds (a slot that
+  heats never plans a ceiling overshoot). A gain-heavy sunny window can legitimately push the
+  predicted indoor above the ceiling with `e_space = 0`: that is ceiling SLACK without planned
+  heat, which the plausibility gate ignores.
+- Recorded on the plan (`w3_internal_gain_kw`, `w3_solar_gain_kw_per_pv_kw`, `w3_gain_kw[i]`),
+  in `lp_inputs_snapshot` config snapshot, and per slot in `lwt_learning_log.gain_kw`
+  (`pv_real_kw` = realised PV mean kW, filled by the nightly job from `pv_realtime_history`).
+- **Learned values (not auto-applied).** `fit_ua_c_joint` adds a solar regressor
+  `Σ pv_kw·Δt` (realised PV) to the episode model and ALSO admits DAYTIME coast blocks
+  (Onecta heat 0, offset <= 0, realised PV on every slot) — used ONLY by the solar fit; the
+  headline UA/C/gain fit is unchanged (night coast + heating episodes). Payload (`joint_fit`):
+  `solar_gain_kw_per_pv_kw` ± `solar_gain_se`, `internal_gain_kw` ± `internal_gain_se`,
+  `n_day_coast_blocks`, `solar_identifiable`, `solar_reason` ∈ `no_daytime_coast_blocks |
+  too_few_daytime_coast_blocks (< 6) | singular | nonphysical_fit`, and the full 4-parameter
+  `solar_fit`. Read it on the LWT learning card next to the pinned values; the internal gain
+  is collinear with UA on night-coast data (only a coarse estimate), the solar coefficient is
+  the useful one. Suggested path: let it accrue ~2 weeks of mixed sun/cloud days, then
+  `PUT /api/v1/settings` the learned (rounded, conservative) values.
+- **Residual check** (`lwt_learning_daily.payload.pred_resid`): realised minus PLANNED indoor
+  (positive = plan too cold = missing gains) for day vs night and, for daytime slots, by PV
+  tercile. High-PV tercile clearly above the low one = the model lacks solar gain.
+
 ## Key `.env` settings to know
 
 ```

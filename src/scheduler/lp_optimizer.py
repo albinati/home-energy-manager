@@ -107,6 +107,11 @@ class LpPlan:
     w3_peak_coast_delta_c: float | None = None
     w3_ceiling_c: float | None = None
     """#841 — the W3 comfort ceiling this plan was SOLVED with (soft upper bound)."""
+    w3_internal_gain_kw: float | None = None
+    w3_solar_gain_kw_per_pv_kw: float | None = None
+    w3_gain_kw: list[float] = field(default_factory=list)
+    """#854 — the thermal gains (kW) the W3 RC model assumed per slot
+    (``internal + solar_coeff x pv_kw``), len N; empty when W3 off or both knobs 0."""
     comfort_slack_hi_c: list[float] = field(default_factory=list)
     """#841 — per-slot ceiling overshoot (°C, len N), reported SEPARATELY from
     ``comfort_slack_c``: a house that starts above the ceiling produces
@@ -590,6 +595,12 @@ def solve_lp(
         # #841 — soft comfort ceiling so banking heat in cheap bands cannot overheat.
         from .lwt_coast import effective_w3_ceiling_c
         w3_ceiling = max(effective_w3_ceiling_c(), w3_day_sp + 0.5)
+        # #854 — internal + PV-driven solar gains in the RC model (both default 0 =
+        # the pre-#854 equation, bit-for-bit). ``pv_avail`` is the same per-slot PV the
+        # battery side uses (scenario PV factors are already applied to it).
+        w3_g_int = max(0.0, float(getattr(config, "LP_W3_INTERNAL_GAIN_KW", 0.0) or 0.0))
+        w3_g_sol = max(0.0, float(getattr(config, "LP_W3_SOLAR_GAIN_KW_PER_PV_KW", 0.0) or 0.0))
+        w3_gain_kw = [w3_g_int + w3_g_sol * (max(0.0, float(pv_avail[_i])) / slot_h) for _i in range(n)]
 
         def _w3_floor(i: int) -> float:
             """Three-level comfort floor (#808): night floor 22–07, setpoint
@@ -1105,7 +1116,11 @@ def solve_lp(
         if w3:
             q_heat_space = e_space[i] * cop_space[i] * j_per_kwh
             loss_bld_j = ua_bld * (t_in[i] - t_out[i]) * dt_s
-            prob += t_in[i + 1] == t_in[i] + (q_heat_space - loss_bld_j) / c_bld
+            if w3_g_int > 0 or w3_g_sol > 0:
+                gain_j = w3_gain_kw[i] * slot_h * j_per_kwh
+                prob += t_in[i + 1] == t_in[i] + (q_heat_space - loss_bld_j + gain_j) / c_bld
+            else:
+                prob += t_in[i + 1] == t_in[i] + (q_heat_space - loss_bld_j) / c_bld
             # Soft comfort floor — slack-penalised, so the LP is NEVER Infeasible.
             prob += t_in[i + 1] + s_lo[i] >= _w3_floor(i)
             # #841 — soft ceiling (same penalty as the floor slack).
@@ -1867,6 +1882,10 @@ def solve_lp(
             plan.w3_setpoint_c = w3_day_sp
             plan.w3_peak_coast_delta_c = w3_peak_delta
             plan.w3_ceiling_c = w3_ceiling
+            plan.w3_internal_gain_kw = w3_g_int
+            plan.w3_solar_gain_kw_per_pv_kw = w3_g_sol
+            if (w3_g_int > 0 or w3_g_sol > 0) and not plan.w3_gain_kw:
+                plan.w3_gain_kw = [float(g) for g in w3_gain_kw]
             plan.indoor_temp_c.append(_v(t_in[i]))
             if i < n:
                 # comfort_slack_c = FLOOR shortfall only (the unfitted-model
