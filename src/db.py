@@ -1492,6 +1492,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             written_at_utc  TEXT,
             plan_updated_at_utc TEXT,
             ceiling_c       REAL,
+            gain_kw         REAL,
+            pv_real_kw      REAL,
             source          TEXT,
             coast_mode      TEXT,
             offset_lp_raw   REAL,
@@ -1522,6 +1524,10 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE lwt_learning_log ADD COLUMN plan_updated_at_utc TEXT")
     if lwt_cols and "ceiling_c" not in lwt_cols:
         conn.execute("ALTER TABLE lwt_learning_log ADD COLUMN ceiling_c REAL")
+    if lwt_cols and "gain_kw" not in lwt_cols:
+        conn.execute("ALTER TABLE lwt_learning_log ADD COLUMN gain_kw REAL")
+    if lwt_cols and "pv_real_kw" not in lwt_cols:
+        conn.execute("ALTER TABLE lwt_learning_log ADD COLUMN pv_real_kw REAL")
     if lwt_cols and "heating_kwh_source" not in lwt_cols:
         conn.execute("ALTER TABLE lwt_learning_log ADD COLUMN heating_kwh_source TEXT")
     conn.execute(
@@ -5273,13 +5279,13 @@ def get_latest_lp_inputs_for_plan_date(plan_date: str) -> dict[str, Any] | None:
 # ── #838: LWT learning log ────────────────────────────────────────────────
 
 _LWT_PLANNED_COLS = (
-    "run_id", "plan_updated_at_utc", "ceiling_c", "source", "coast_mode", "offset_lp_raw", "offset_written",
+    "run_id", "plan_updated_at_utc", "ceiling_c", "gain_kw", "source", "coast_mode", "offset_lp_raw", "offset_written",
     "indoor_pred_c", "floor_c", "margin_c", "outdoor_fc_c", "e_space_kwh",
     "cop_space", "price_band", "curve_lwt_c", "coast_target_lwt_c", "coast_delta_c",
 )
 _LWT_REALISED_COLS = (
     "indoor_real_c", "indoor_rooms_json", "indoor_min_c", "outdoor_real_c",
-    "lwt_actual_c", "device_offset", "heating_kwh", "heating_kwh_source",
+    "lwt_actual_c", "device_offset", "heating_kwh", "heating_kwh_source", "pv_real_kw",
 )
 
 

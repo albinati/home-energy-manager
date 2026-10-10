@@ -1571,6 +1571,26 @@ export type LwtJointFitReason =
   | "singular"
   | "no_measured_input";
 
+/** #854 — why the solar gain could not be fitted. */
+export type LwtSolarReason =
+  | "no_daytime_coast_blocks"
+  | "too_few_daytime_coast_blocks"
+  | "nonphysical_fit"
+  | "singular";
+
+export interface LwtPredResidGroup {
+  n: number;
+  mean_c: number | null;
+}
+
+/** #854 — measured residual (real minus predicted indoor): positive = plan too cold = missing gains. */
+export interface LwtPredResid {
+  sign: string;
+  day: LwtPredResidGroup;
+  night: LwtPredResidGroup;
+  by_pv_tercile: { tercile: "low" | "mid" | "high"; n: number; pv_mean_kw: number; mean_c: number | null }[];
+}
+
 /** Episode estimator (#843): one sample per Onecta-metered heating episode / night coast block. */
 export interface LwtJointFit extends LwtJointFitSolve {
   identifiable: boolean;
@@ -1578,6 +1598,14 @@ export interface LwtJointFit extends LwtJointFitSolve {
   ua_se: number | null;
   n_heat_episodes: number;
   n_coast_blocks: number;
+  /** #854 solar / internal gains (thermal kW), analytics only. */
+  solar_identifiable?: boolean;
+  solar_reason?: LwtSolarReason | null;
+  n_day_coast_blocks?: number;
+  solar_gain_kw_per_pv_kw?: number | null;
+  solar_gain_se?: number | null;
+  internal_gain_kw?: number | null;
+  internal_gain_se?: number | null;
   tau_prior_h: number | null;
   coast_tau_h: number | null;
   tau_fixed: LwtJointFitSolve | null;
@@ -1608,6 +1636,7 @@ export interface LwtLearningDaily {
   joint_fit?: LwtJointFit | null;
   joint_window_days?: number;
   night_rise_per_band?: LwtBandRise[];
+  pred_resid?: LwtPredResid;
   n_coast_slots: number | null;
   n_heat_slots: number | null;
   ua_est_w_per_k: number | null;
@@ -1638,6 +1667,9 @@ export interface LwtLearningResponse {
   coast_mode: string;
   timezone?: string;
   ua_pinned_w_per_k: number;
+  /** #854: gains the LP currently assumes (0 = off). */
+  internal_gain_pinned_kw?: number;
+  solar_gain_pinned_kw_per_pv_kw?: number;
   daily: LwtLearningDaily[];
   yesterday: { date: string; slots: LwtLearningSlot[] };
 }

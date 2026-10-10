@@ -125,6 +125,27 @@ export function LwtLearningCard() {
               {joint.coast_tau_h != null ? ` · coast-only τ ${n1(joint.coast_tau_h, 0)} h` : ""}
             </p>
           )}
+          <p class={joint.solar_identifiable ? "" : "muted"}>
+            Gains (thermal): internal {n1(joint.internal_gain_kw, 2)} ± {n1(joint.internal_gain_se, 2)} kW (pinned{" "}
+            {n1(d?.internal_gain_pinned_kw, 2)}) · solar{" "}
+            {joint.solar_identifiable
+              ? `${n1(joint.solar_gain_kw_per_pv_kw, 2)} ± ${n1(joint.solar_gain_se, 2)} kW per PV kW`
+              : `not identifiable (${(joint.solar_reason ?? "no data").replace(/_/g, " ")}, ${
+                  joint.n_day_coast_blocks ?? 0
+                } daytime coast blocks; needs 6)`}{" "}
+            (pinned {n1(d?.solar_gain_pinned_kw_per_pv_kw, 2)}). Not auto-applied.
+          </p>
+          {latest?.pred_resid && (
+            <p class="muted">
+              Plan residual (real − predicted indoor; positive = plan too cold = missing gains): day{" "}
+              {n1(latest.pred_resid.day.mean_c, 2)} °C (n {latest.pred_resid.day.n}) · night{" "}
+              {n1(latest.pred_resid.night.mean_c, 2)} °C (n {latest.pred_resid.night.n})
+              {latest.pred_resid.by_pv_tercile.length > 0 &&
+                ` · by PV tercile ${latest.pred_resid.by_pv_tercile
+                  .map((t) => `${t.tercile} ${n1(t.mean_c, 2)}`)
+                  .join(" / ")}`}
+            </p>
+          )}
           {joint.consistency_flag && (
             <p class="muted">
               Free τ {n1(joint.tau_h, 0)} h disagrees with coast-only τ {n1(joint.coast_tau_h, 0)} h by more than 25 %:

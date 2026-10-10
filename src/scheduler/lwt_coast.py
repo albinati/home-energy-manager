@@ -180,6 +180,9 @@ def record_planned(
                 "run_id": None,
                 "plan_updated_at_utc": token,
                 "ceiling_c": getattr(plan, "w3_ceiling_c", None) if traj else None,
+                # #854: thermal gain (kW) the W3 RC model assumed in this slot
+                "gain_kw": (round(float(plan.w3_gain_kw[i]), 4)
+                            if traj and i < len(getattr(plan, "w3_gain_kw", []) or []) else (0.0 if traj else None)),
                 "source": source_used,
                 "coast_mode": coast_mode,
                 "offset_lp_raw": float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else None,
