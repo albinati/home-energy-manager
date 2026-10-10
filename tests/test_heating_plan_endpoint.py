@@ -272,6 +272,22 @@ def test_heating_plan_backstop_completed_row_stops_at_execution(monkeypatch):
     assert _slot(resp, at(21))["lwt_offset"] == -2  # noop rows cover their full window
 
 
+def test_heating_plan_warm_backstop_caps_row(monkeypatch):
+    tmr = datetime.now(_tz()).date() + timedelta(days=1)
+    d = tmr.isoformat()
+    at = lambda h, m=0: datetime(tmr.year, tmr.month, tmr.day, h, m, tzinfo=UTC)  # noqa: E731
+    z = lambda dt: dt.isoformat().replace("+00:00", "Z")  # noqa: E731
+
+    def seed(conn):
+        _insert_action(conn, date=d, start=z(at(13)), end=z(at(16)), action_type="lwt_preheat", offset=10,
+                       status="completed", error_msg="warm_backstop", executed_at=z(at(14, 10)))
+
+    resp = _run_plan(monkeypatch, seed)
+    assert _slot(resp, at(14))["lwt_offset"] == 10
+    assert _slot(resp, at(14, 30))["lwt_offset"] == 0
+    assert _slot(resp, at(15, 30))["lwt_offset"] == 0
+
+
 def test_heating_plan_tank_restore_ignored(monkeypatch):
     tmr = datetime.now(_tz()).date() + timedelta(days=1)
     d = tmr.isoformat()

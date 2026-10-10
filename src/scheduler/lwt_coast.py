@@ -25,6 +25,7 @@ from ..config import config, cop_at_temperature
 logger = logging.getLogger(__name__)
 
 _backstop_ticks: int = 0
+_warm_ticks: int = 0
 
 
 def effective_w3_ceiling_c() -> float:
@@ -277,8 +278,9 @@ def _active_negative_row(plan_date: str, now_utc: datetime) -> dict[str, Any] | 
 
 
 def reset_backstop() -> None:
-    global _backstop_ticks
+    global _backstop_ticks, _warm_ticks
     _backstop_ticks = 0
+    _warm_ticks = 0
 
 
 def backstop_tick(
@@ -393,4 +395,159 @@ def backstop_tick(
         out["replanned"] = replanned
     except Exception as e:  # the backstop must never break the heartbeat
         logger.warning("lwt comfort backstop error: %s", e, exc_info=True)
+    return out
+
+
+# ------------------------------------------------------------ warm backstop
+# #855 — mirror of the cold backstop: cancels an ACTIVE positive lwt_preheat row
+# once the measured house reaches the comfort ceiling band. Cold acts only on
+# NEGATIVE rows, warm only on POSITIVE rows; separate counter + separate hold key.
+_WARM_HOLD_KEY = "lwt_warm_backstop_hold_until"
+
+
+def get_warm_hold_until() -> datetime | None:
+    try:
+        raw = db.get_kv(_WARM_HOLD_KEY)
+        if not raw:
+            return None
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except Exception:
+        return None
+
+
+def active_warm_hold_until(now_utc: datetime | None = None) -> datetime | None:
+    h = get_warm_hold_until()
+    if h is None:
+        return None
+    return h if h > (now_utc or datetime.now(UTC)) else None
+
+
+def _set_warm_hold(until: datetime) -> None:
+    try:
+        db.set_kv(_WARM_HOLD_KEY, until.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        logger.warning("lwt warm backstop: could not persist hold", exc_info=True)
+
+
+def _active_positive_row(plan_date: str, now_utc: datetime) -> dict[str, Any] | None:
+    try:
+        d0 = datetime.fromisoformat(plan_date).date()
+    except ValueError:
+        d0 = now_utc.astimezone(_tz()).date()
+    best: dict[str, Any] | None = None
+    for d in (d0, d0 - timedelta(days=1), d0 + timedelta(days=1)):
+        for act in db.get_actions_for_plan_date(d.isoformat(), device="daikin"):
+            if act.get("action_type") != "lwt_preheat" or act.get("status") != "active":
+                continue
+            if act.get("overridden_by_user_at"):
+                continue
+            try:
+                s = datetime.fromisoformat(str(act["start_time"]).replace("Z", "+00:00"))
+                e = datetime.fromisoformat(str(act["end_time"]).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if not (s <= now_utc < e):
+                continue
+            off = (act.get("params") or {}).get("lwt_offset")
+            if off is None or float(off) <= 0:
+                continue
+            if best is None or str(act["start_time"]) > str(best["start_time"]):
+                best = act
+    return best
+
+
+def warm_backstop_threshold_c() -> float:
+    band = float(getattr(config, "DAIKIN_LWT_PREHEAT_COMFORT_BAND_C", 0.5))
+    return effective_w3_ceiling_c() - band
+
+
+def warm_backstop_tick(
+    *,
+    now_utc: datetime,
+    plan_date: str,
+    dev: Any,
+    client: Any,
+    replan_fn: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """One heartbeat evaluation of the warm-side backstop (#855). Never raises."""
+    global _warm_ticks
+    out: dict[str, Any] = {"active_row": None, "ticks": 0, "fired": False}
+    try:
+        if not bool(getattr(config, "LWT_WARM_BACKSTOP_ENABLED", True)):
+            return out
+        if str(getattr(config, "DAIKIN_CONTROL_MODE", "passive")) != "active" or bool(
+            getattr(config, "OPENCLAW_READ_ONLY", False)
+        ):
+            _warm_ticks = 0
+            return out
+        row = _active_positive_row(plan_date, now_utc)
+        if row is None:
+            _warm_ticks = 0
+            return out
+        out["active_row"] = int(row["id"])
+        reading = db.get_latest_indoor_reading(
+            max_age_minutes=int(getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30))
+        )
+        if reading is None or reading.get("temp_c") is None:
+            return out  # stale/absent sensor: HOLD the counter
+        indoor = float(reading["temp_c"])
+        threshold = warm_backstop_threshold_c()
+        out.update(indoor=indoor, threshold=threshold)
+        if indoor < threshold:
+            _warm_ticks = 0
+            return out
+        _warm_ticks += 1
+        out["ticks"] = _warm_ticks
+        if _warm_ticks < max(1, int(getattr(config, "LWT_WARM_BACKSTOP_TICKS", 2))):
+            return out
+
+        from ..daikin.client import DaikinError
+        from ..daikin_bulletproof import apply_scheduled_daikin_params
+
+        offset_was = float((row.get("params") or {}).get("lwt_offset"))
+        log_params = {"indoor": indoor, "threshold": threshold,
+                      "offset_was": offset_was, "row_id": int(row["id"])}
+        try:
+            wrote = apply_scheduled_daikin_params(
+                dev, client, {"lwt_offset": 0}, trigger="lwt_warm_backstop", skip_if_matches=False,
+            )
+        except (DaikinError, ValueError) as e:
+            logger.warning("lwt warm backstop write failed: %s", e)
+            db.log_action(
+                device="daikin", action="lwt_warm_backstop", params=log_params,
+                result="failure", trigger="heartbeat", error_msg=str(e),
+            )
+            return out
+        if not wrote:
+            db.log_action(
+                device="daikin", action="lwt_warm_backstop", params=log_params,
+                result="skipped", trigger="heartbeat",
+                error_msg="apply_scheduled_daikin_params did not write (passive/read_only/unchanged)",
+            )
+            return out
+        db.mark_action(int(row["id"]), "completed", error_msg="warm_backstop")
+        _warm_ticks = 0
+        out["fired"] = True
+        hold_minutes = max(0, int(getattr(config, "LWT_WARM_BACKSTOP_HOLD_MINUTES", 60)))
+        hold_until = now_utc + timedelta(minutes=hold_minutes)
+        _set_warm_hold(hold_until)
+        out["hold_until"] = hold_until.isoformat().replace("+00:00", "Z")
+        db.log_action(
+            device="daikin", action="lwt_warm_backstop",
+            params={**log_params, "hold_until": out["hold_until"]},
+            result="ok", trigger="heartbeat",
+        )
+        replanned: bool | None = None
+        if replan_fn is not None:
+            try:
+                replanned = bool(replan_fn(
+                    force_write_devices=True, trigger_reason="lwt_warm_backstop", bypass_cooldown=True,
+                ))
+            except Exception as e:
+                logger.warning("lwt warm backstop replan failed: %s", e)
+                replanned = False
+        out["replanned"] = replanned
+    except Exception as e:
+        logger.warning("lwt warm backstop error: %s", e, exc_info=True)
     return out

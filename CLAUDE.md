@@ -731,6 +731,20 @@ Tomorrow when local time >= 16:00 and tomorrow has scheduled rows).
   (±`INDOOR_SENSOR_STALE_MINUTES`) is zeroed when the fresh reading ≤ that slot's
   floor − `LWT_COMFORT_BACKSTOP_MARGIN_C` (`lwt_source_diff.guards`). Notify dedupe
   key = the hold start.
+- **Warm-side backstop (#855)** (`LWT_WARM_BACKSTOP_ENABLED=true`, `_TICKS=2`,
+  `_HOLD_MINUTES=60`; `scheduler/lwt_coast.py:warm_backstop_tick`, heartbeat right after
+  the cold tick): an ACTIVE `lwt_preheat` row with a POSITIVE offset and the fresh
+  aggregate indoor reading `>= effective_w3_ceiling_c() - DAIKIN_LWT_PREHEAT_COMFORT_BAND_C`
+  (22.5 at ceiling 23) for N consecutive ticks -> `apply_scheduled_daikin_params({"lwt_offset": 0})`,
+  row `completed` with `error_msg='warm_backstop'`, `action_log` `lwt_warm_backstop`, then
+  `bulletproof_mpc_job(bypass_cooldown=True, trigger_reason="lwt_warm_backstop")`. No Telegram
+  (system working as intended); counted in scorecard `lwt.warm_backstops`. Same gating as
+  the cold one (active, not read-only, fired only when apply returns True, stale sensor holds
+  the counter). Own counter and own hold (`kv_state` `lwt_warm_backstop_hold_until`,
+  `space_heating_gate_state()["warm_backstop_hold_until"]`): `_lp_offsets`/`_tier_offsets`
+  zero POSITIVE offsets on slots starting before it. Cold acts only on negative rows, warm
+  only on positive rows, so the two cannot fight. `/daikin/heating-plan` caps a
+  `warm_backstop` row at its `executed_at` like `comfort_backstop`.
 - **Learning log** `lwt_learning_log` (PK `slot_time_utc`): PLANNED fields
   (`run_id, source, coast_mode, offset_lp_raw, offset_written` = after smoothing,
   `indoor_pred_c, floor_c, margin_c` = predicted headroom over the floor,

@@ -1001,6 +1001,11 @@ class Config:
     # After the backstop fires, negative offsets are suppressed on slots starting
     # before now + this many minutes (anti backstop<->replan oscillation).
     LWT_COMFORT_BACKSTOP_HOLD_MINUTES: int = int(os.getenv("LWT_COMFORT_BACKSTOP_HOLD_MINUTES", "90"))
+    # #855 warm-side backstop: cancel an active positive LWT boost once the
+    # measured house reaches ceiling - DAIKIN_LWT_PREHEAT_COMFORT_BAND_C.
+    LWT_WARM_BACKSTOP_ENABLED: bool = os.getenv("LWT_WARM_BACKSTOP_ENABLED", "true").lower() in ("true", "1", "yes")
+    LWT_WARM_BACKSTOP_TICKS: int = int(os.getenv("LWT_WARM_BACKSTOP_TICKS", "2"))
+    LWT_WARM_BACKSTOP_HOLD_MINUTES: int = int(os.getenv("LWT_WARM_BACKSTOP_HOLD_MINUTES", "60"))
     # Absolute LWT ceiling on the LP heating path (backup-heater exposure): a
     # positive offset never lifts the water above this (curve_lwt + offset <= max).
     DAIKIN_LWT_ABS_MAX_C: float = float(os.getenv("DAIKIN_LWT_ABS_MAX_C", "45"))
