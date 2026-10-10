@@ -498,6 +498,35 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   `_indoor_for_slot_fn` trajectory guard of the first #808 cut no longer exists.)
 - When `DAIKIN_LWT_SOURCE=lp` the LP's `e_space` ceiling is capped at the ±5
   clamp so the plan never assumes more lift than the device will get.
+- **Demand gate blocks boosts, never coasts (#847).** The gate
+  (`DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH` over the trailing
+  `DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS`) only excludes 2-h buckets overlapped by
+  POSITIVE-offset windows (`get_nonzero_lwt_offset_windows(positive_only=True)`); coasts
+  cannot wake the compressor, and excluding them made an `lp` plan close the gate on
+  itself (2026-10-09 22:55Z: no rows written, rows already cleared, device on the curve
+  off the battery for 4 h). Closed gate = `_write_lwt_preheat_actions` zeroes positive
+  offsets and still writes the negative/zero rows (`action_log` `lwt_demand_gate`:
+  `measured_kwh`, `excluded_buckets`, `windows_suppressed`; one `notify_risk` per local
+  day under `source=lp` with space heat planned). **Hysteresis:**
+  `DAIKIN_LWT_PREHEAT_DEMAND_HOLD_HOURS` (24; 0 = off) keeps the gate open after it was
+  last measured open (`kv_state` `lwt_demand_gate_open_until`) unless outdoor >= cutoff.
+  **Never empty:** `write_daikin_from_lp_plan` snapshots the pending `lwt_preheat`/`restore`
+  rows before the regime's `clear_actions_in_range` and re-inserts them if the LWT writer
+  skipped (quota headroom) or raised (`lwt_rows_preserved`). Status:
+  `space_heating_gate_state()` has `demand_gate_hold_until`, `demand_gate_held`,
+  `excluded_buckets`, `demand_gate_reason`; scorecard `lwt.demand_gate_closed_dispatches`
+  + `lwt.demand_gate_windows_suppressed`. **Under the LP source the plan's own demand IS
+  the signal:** when `source_used == "lp"` and `sum(plan.space_electric_kwh) > 0` the
+  measured gate is BYPASSED (reason `lp_plan_demand`, `lwt_source_diff.guards.
+  demand_gate_bypassed_lp_plan`; the per-slot outdoor cutoff still applies) — with
+  `coast_mode=lp` the compressor is off outside boosts, so nearly all measured heating
+  lands in positive windows and the measured gate would close every other day. The tier
+  source keeps the measured gate. A closed gate with NO planned space heat writes no rows
+  at all (a summer setback is quota churn). Restored rows are re-stamped with the
+  CURRENT dispatch `plan_date` (the heartbeat reconciles `date == today` only), are
+  restored on an exception only when the writer wrote nothing, and never overwrite a new
+  pending row at the same `start_time`. The warm-outdoor hold override trusts live
+  telemetry only when <= 3 h old (else the plan's first-slot outdoor).
 - **Plausibility gate** (`w3_trajectory_plausible`): the LP source is
   unavailable (diff row `lp_available=false`, `lp_reason`) when the plan
   carries comfort SLACK (`plan.comfort_slack_c` = FLOOR shortfall only, >

@@ -990,6 +990,9 @@ export interface LwtGateState {
   threshold_kwh: number;
   lookback_hours: number;
   preheat_suppressed: boolean;
+  // #847: hysteresis hold keeping the gate open after measured demand lapsed.
+  demand_gate_held?: boolean;
+  demand_gate_reason?: string | null;
   // Exogenous warm-day cutoff (#540) — optional so an older hem image (which
   // doesn't send them) degrades to the demand-gate-only label.
   outdoor_cutoff_c?: number;

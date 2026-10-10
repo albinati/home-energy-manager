@@ -5,6 +5,7 @@ import dataclasses
 import logging
 import json
 import math
+import threading
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import TYPE_CHECKING, Any
@@ -1557,26 +1558,96 @@ def _apply_write_budget(
     return keep, dropped
 
 
-def _space_heating_demand_present() -> bool:
-    """True when the trailing window shows real measured space-heating demand.
+_GATE_OPEN_KEY = "lwt_demand_gate_open_until"
 
-    Reads ``db.measured_space_heating_kwh_excluding_offset_windows`` — the
-    exclusion matters: counting offset-induced heating would let the gate
-    feed on its own output and never close (June 2026). Fail-open on errors:
-    a broken telemetry read must not silently disable winter pre-heat.
+
+def _gate_open_until() -> datetime | None:
+    """End of the demand-gate hysteresis hold (UTC) from ``kv_state``, or None."""
+    try:
+        raw = db.get_kv(_GATE_OPEN_KEY)
+        if not raw:
+            return None
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except Exception:
+        return None
+
+
+def _demand_gate_verdict(*, persist: bool = True, plan_outdoor_c: float | None = None) -> dict[str, Any]:
+    """Demand-gate verdict with the INPUTS (#847).
+
+    ``open`` = measured >= floor, OR the hysteresis hold
+    (``DAIKIN_LWT_PREHEAT_DEMAND_HOLD_HOURS`` after the gate was last measured
+    open, ``kv_state`` ``lwt_demand_gate_open_until``) is still running and the
+    live outdoor temp is below the cutoff. Fail-open on read errors.
+    ``persist=False`` (status reads) never writes the hold. The warm-outdoor
+    override reads the live telemetry row only when it is <= 3 h old, else
+    ``plan_outdoor_c`` (the plan's first-slot forecast outdoor temp).
     """
     floor = float(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5))
+    out: dict[str, Any] = {
+        "open": True, "measured_kwh": None, "excluded_buckets": None,
+        "held": False, "hold_until": None, "floor_kwh": floor,
+    }
     if floor <= 0:
-        return True  # gate disabled
+        return out  # gate disabled
     lookback = int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48))
+    diag: dict[str, Any] = {}
     try:
         measured = db.measured_space_heating_kwh_excluding_offset_windows(
-            lookback, rows_filter=_demand_gate_rows_filter(lookback),
+            lookback, rows_filter=_demand_gate_rows_filter(lookback), diag=diag,
         )
     except Exception:  # pragma: no cover — gate must never break dispatch
         logger.exception("LWT pre-heat demand gate read failed — failing open")
-        return True
-    return measured >= floor
+        return out
+    out["measured_kwh"] = round(float(measured), 3)
+    out["excluded_buckets"] = diag.get("excluded_buckets")
+    now = datetime.now(UTC)
+    hold_h = max(0.0, float(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_HOLD_HOURS", 24)))
+    if measured >= floor:
+        if persist and hold_h > 0:
+            try:
+                db.set_kv(_GATE_OPEN_KEY, (now + timedelta(hours=hold_h)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            except Exception:  # pragma: no cover
+                logger.debug("demand gate: could not persist hold", exc_info=True)
+        return out
+    until = _gate_open_until()
+    out["hold_until"] = until.isoformat().replace("+00:00", "Z") if until else None
+    if hold_h > 0 and until is not None and until > now:
+        warm = False
+        try:
+            cutoff = float(getattr(config, "DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C", 15.0))
+            out_c: float | None = None
+            tel = db.get_latest_daikin_telemetry(source="live")
+            if tel and tel.get("outdoor_temp_c") is not None:
+                if now.timestamp() - float(tel.get("fetched_at") or 0.0) <= 3 * 3600:
+                    out_c = float(tel["outdoor_temp_c"])
+            if out_c is None:
+                out_c = plan_outdoor_c
+            warm = out_c is not None and out_c >= cutoff
+        except Exception:  # pragma: no cover
+            warm = False
+        if not warm:
+            out["held"] = True
+            return out
+    out["open"] = False
+    return out
+
+
+def _space_heating_demand_present(*, persist: bool = True, plan_outdoor_c: float | None = None) -> bool:
+    """True when the trailing window shows real measured space-heating demand.
+
+    Reads ``db.measured_space_heating_kwh_excluding_offset_windows`` — the
+    exclusion (POSITIVE offset windows only, #847) matters: counting
+    offset-induced heating would let the gate feed on its own output and never
+    close (June 2026). Fail-open on errors: a broken telemetry read must not
+    silently disable winter pre-heat. Hysteresis: see :func:`_demand_gate_verdict`.
+    """
+    if plan_outdoor_c is None:
+        plan_outdoor_c = getattr(_PRESERVE, "plan_outdoor_c", None)
+    verdict = _demand_gate_verdict(persist=persist, plan_outdoor_c=plan_outdoor_c)
+    _PRESERVE.verdict = verdict
+    return bool(verdict["open"])
 
 
 def _demand_gate_rows_filter(lookback_hours: int):
@@ -1627,14 +1698,13 @@ def space_heating_gate_state() -> dict[str, Any]:
     """
     floor = float(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5))
     lookback = int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48))
-    measured: float | None = None
-    try:
-        measured = round(db.measured_space_heating_kwh_excluding_offset_windows(
-            lookback, rows_filter=_demand_gate_rows_filter(lookback),
-        ), 2)
-    except Exception:  # pragma: no cover - defensive: status read must not fail
-        logger.debug("space_heating_gate_state: measured read failed", exc_info=True)
-    demand_present = _space_heating_demand_present()
+    _verdict = _demand_gate_verdict(persist=False)
+    measured: float | None = (
+        round(float(_verdict["measured_kwh"]), 2) if _verdict.get("measured_kwh") is not None else None
+    )
+    excluded_buckets: int | None = _verdict.get("excluded_buckets")
+    demand_present = bool(_verdict["open"])
+    _hold = _gate_open_until()
     preheat_enabled = bool(getattr(config, "DAIKIN_LWT_PREHEAT_ENABLED", False))
     lwt_source = _lwt_source()
     lwt_source_last_diff: dict[str, Any] | None = None
@@ -1670,6 +1740,12 @@ def space_heating_gate_state() -> dict[str, Any]:
         "gate_enabled": floor > 0,
         "demand_present": demand_present,
         "measured_window_kwh": measured,
+        "excluded_buckets": excluded_buckets,
+        "demand_gate_hold_until": _hold.astimezone(UTC).isoformat().replace("+00:00", "Z") if _hold else None,
+        "demand_gate_held": bool(_verdict.get("held")),
+        # Why the last dispatch let boosts through / not (#847): lp_plan_demand when
+        # the LP source's own space-heat plan bypassed the measured gate.
+        "demand_gate_reason": _last_gate_reason(),
         "threshold_kwh": floor,
         "lookback_hours": lookback,
         "outdoor_cutoff_c": cutoff,
@@ -1677,12 +1753,75 @@ def space_heating_gate_state() -> dict[str, Any]:
         # Positive offsets (boost / neg-boost) are cut when warm REGARDLESS of
         # the demand gate; the −2 peak setback still fires (it can only coast).
         "positive_offset_suppressed_by_outdoor": suppressed_by_outdoor,
-        # Demand-gate verdict: when shut, _write_lwt_preheat_actions writes NO
-        # rows at all (setback included). Kept scoped to the demand gate so the
-        # chip can distinguish "all LWT off" (this) from "positives off, setback
-        # still active" (positive_offset_suppressed_by_outdoor) on a warm day.
+        # Demand-gate verdict (#847): when shut, _write_lwt_preheat_actions zeroes
+        # POSITIVE offsets only; coasts/setbacks are still written.
         "preheat_suppressed": preheat_enabled and floor > 0 and not demand_present,
     }
+
+
+_GATE_REASON_KEY = "lwt_demand_gate_reason"
+
+
+def _last_gate_reason() -> str | None:
+    try:
+        return db.get_kv(_GATE_REASON_KEY) or None
+    except Exception:  # pragma: no cover
+        return None
+
+
+def _zero_positive_offsets(offsets: list[int | None]) -> tuple[list[int | None], int]:
+    """Zero every POSITIVE offset; return the list and the number of contiguous
+    positive runs (= boost windows) suppressed."""
+    out: list[int | None] = []
+    runs = 0
+    prev_pos = False
+    for o in offsets:
+        pos = o is not None and o > 0
+        if pos and not prev_pos:
+            runs += 1
+        prev_pos = pos
+        out.append(0 if pos else o)
+    return out, runs
+
+
+def _log_demand_gate_closed(plan: LpPlan, gate: dict[str, Any], source_used: str, n_windows: int) -> None:
+    """``action_log`` ``lwt_demand_gate`` + one deduped ``notify_risk`` per local
+    day when the gate closes under ``DAIKIN_LWT_SOURCE=lp`` with space heat planned.
+    Nothing is logged or notified when no boost window was actually suppressed."""
+    if n_windows <= 0:
+        return
+    try:
+        db.log_action(
+            device="daikin", action="lwt_demand_gate",
+            params={
+                "measured_kwh": gate.get("measured_kwh"),
+                "floor_kwh": gate.get("floor_kwh"),
+                "excluded_buckets": gate.get("excluded_buckets"),
+                "windows_suppressed": n_windows,
+                "source_used": source_used,
+                "hold_until": gate.get("hold_until"),
+            },
+            result="boosts_suppressed", trigger="dispatch",
+        )
+    except Exception:  # pragma: no cover — telemetry must never break dispatch
+        logger.debug("lwt_demand_gate log failed", exc_info=True)
+    try:
+        if source_used == "lp" and any(float(x or 0.0) > 0 for x in (getattr(plan, "space_electric_kwh", None) or [])):
+            tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+            _d0 = plan.slot_starts_utc[0] if plan.slot_starts_utc else datetime.now(UTC)
+            key = f"lwt_demand_gate_{_d0.astimezone(tz):%Y-%m-%d}"
+            if not db.is_warning_acknowledged(key):
+                from ..notifier import notify_risk
+
+                notify_risk(
+                    f"LWT demand gate closed (measured {gate.get('measured_kwh')} kWh < "
+                    f"{gate.get('floor_kwh')} kWh) while the LP plans space heating: "
+                    f"{n_windows} boost window(s) suppressed, coasts still written.",
+                    extra={"warning_key": key},
+                )
+                db.acknowledge_warning(key)
+    except Exception:  # pragma: no cover
+        logger.debug("lwt_demand_gate notify failed", exc_info=True)
 
 
 def _write_lwt_preheat_actions(
@@ -1706,26 +1845,39 @@ def _write_lwt_preheat_actions(
     if not config.DAIKIN_LWT_PREHEAT_ENABLED:
         return 0
 
-    # Demand gate (#540 quick win): no pre-heat offsets without measured
+    # Demand gate (#540 quick win, #847): no BOOST offsets without measured
     # space-heating demand in the trailing window. A positive offset can WAKE
     # the compressor the firmware would have left off (June 2026: heating went
     # 0 → 3-8 kWh/day within days of enabling pre-heat, with the LP budgeting
-    # ~0.2). Pre-heating thermal mass the house isn't draining buys nothing;
-    # when a cold snap starts, the firmware heats naturally and the gate opens
-    # once that shows in the 2-hourly split — up to ~24 h (02:35 UTC rollup).
-    # Comfort-safe: the firmware heats regardless; only HEM's price-shaping is
-    # delayed. Negative (setback) offsets are gated too: with the compressor
-    # off they are pure quota churn.
-    if not _space_heating_demand_present():
-        logger.info(
-            "LWT pre-heat: skipped — no measured space-heating demand in the "
-            "trailing %dh window (floor %.1f kWh)",
-            int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48)),
-            float(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5)),
-        )
-        from .lwt_coast import record_planned
-        record_planned(plan, source_used=_lwt_source(), coast_mode=_coast_mode(), written_offsets=None)
+    # ~0.2). A coast/setback cannot induce heating, so a closed gate zeroes
+    # POSITIVE offsets only and still writes the negative rows (2026-10-09: the
+    # old "skip everything" wiped the LP's overnight coasts and the device ran
+    # the curve off the battery for 4 h).
+    _PRESERVE.verdict = None
+    _plan_out: float | None = None
+    try:
+        if getattr(plan, "temp_outdoor_c", None):
+            _plan_out = float(plan.temp_outdoor_c[0])
+    except (TypeError, ValueError, IndexError):
+        _plan_out = None
+    _PRESERVE.plan_outdoor_c = _plan_out
+    gate_closed = not _space_heating_demand_present()
+    gate = getattr(_PRESERVE, "verdict", None) or {"floor_kwh": float(getattr(
+        config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5))}
+    plan_has_space_heat = any(float(x or 0.0) > 0 for x in (getattr(plan, "space_electric_kwh", None) or []))
+    gate_reason = "measured_open" if not gate_closed else "closed"
+    if gate_closed and not plan_has_space_heat:
+        # Nothing to boost AND no space heat planned: a setback on a non-heating
+        # house is pure quota churn -> old behaviour, write no rows (#847 review).
+        logger.info("LWT pre-heat: demand gate closed and no space heat planned — no rows written")
         return 0
+    if gate_closed:
+        logger.info(
+            "LWT pre-heat: demand gate closed (measured %.2f kWh < floor %.1f over %dh) — "
+            "boosts suppressed, coasts still written",
+            float(gate.get("measured_kwh") or 0.0), float(gate["floor_kwh"]),
+            int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48)),
+        )
 
     # Indoor temperature for the comfort guard: the house room sensors are the
     # ONLY source (#540 W1). Daikin is NOT consulted — the Altherma has no room
@@ -1753,8 +1905,25 @@ def _write_lwt_preheat_actions(
     if source_used == "lp" and lp_offsets is None:
         logger.info("LWT source=lp requested but the LP trajectory is unavailable (%s) — using the tier rule", lp_reason)
         source_used = "tier"
+    if gate_closed and source_used == "lp":
+        # The LP's own planned space-heat demand IS the signal under the LP source:
+        # with coast_mode=lp the compressor is off outside boosts, so measured
+        # heating lands in positive windows and the measured gate would close
+        # every other day. The per-slot outdoor cutoff still applies downstream.
+        gate_closed = False
+        gate_reason = "lp_plan_demand"
+        guards["demand_gate_bypassed_lp_plan"] = 1
+        gate = dict(gate, open=True, reason=gate_reason)
+        _PRESERVE.verdict = gate
+    try:
+        db.set_kv(_GATE_REASON_KEY, gate_reason)
+    except Exception:  # pragma: no cover
+        pass
     _log_lwt_source_diff(plan, tier_offsets, lp_offsets, source_used, lp_reason=lp_reason, guards=guards)
     chosen = lp_offsets if source_used == "lp" else tier_offsets
+    if gate_closed:
+        chosen, n_win = _zero_positive_offsets(list(chosen))
+        _log_demand_gate_closed(plan, gate, source_used, n_win)
     smoothed = _smoothed_offsets(list(chosen), source_used, plan)
     pairs = _pairs_from_offsets(plan, chosen, source=source_used)
 
@@ -1794,6 +1963,7 @@ def _write_lwt_preheat_actions(
             len(pairs), headroom,
         )
         _record(list(pairs))
+        _PRESERVE.flag = True  # rows were already cleared: put the old ones back (#847)
         return 0
     if len(pairs) > max_pairs:
         logger.info(
@@ -1833,6 +2003,7 @@ def _write_lwt_preheat_actions(
             db.update_action_restore_link(aid, rid)
         count += 1
 
+    _PRESERVE.written_count = count
     logger.info(
         "write_daikin_from_lp_plan: LWT pre-heat — wrote %d offset row(s)", count
     )
@@ -1960,7 +2131,127 @@ def _write_lp_owned_tank_schedule(plan_date: str, plan: LpPlan) -> int:
     return count
 
 
+_PRESERVE = threading.local()
+
+
+def _snapshot_pending_lwt_rows(plan: LpPlan) -> list[tuple[dict[str, Any] | None, dict[str, Any]]]:
+    """Pending ``lwt_preheat`` rows (+ their linked restore rows) over the plan
+    window — what ``clear_actions_in_range`` is about to delete (#847)."""
+    if not plan.slot_starts_utc:
+        return []
+    ws = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
+    we = (plan.slot_starts_utc[-1] + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+    rows = db.get_pending_actions_in_range(ws, we, "daikin", ("lwt_preheat", "restore"))
+    restores = {int(r["id"]): r for r in rows if r.get("action_type") == "restore"}
+    return [
+        (restores.get(int(r["restore_action_id"])) if r.get("restore_action_id") else None, r)
+        for r in rows if r.get("action_type") == "lwt_preheat"
+    ]
+
+
+def _restore_lwt_rows(
+    snapshot: list[tuple[dict[str, Any] | None, dict[str, Any]]], plan_date: str,
+    plan: LpPlan | None = None,
+) -> int:
+    """Re-insert snapshot rows the writer did not replace (natural-key upsert →
+    never duplicates a row the new plan did write). With the demand gate closed,
+    positive (boost) rows are NOT restored. Past rows are dropped. Rows are
+    stamped with the CURRENT dispatch ``plan_date`` (the heartbeat reconciles only
+    ``date == today``), and a snapshot row whose ``start_time`` already has a
+    pending row is skipped (never overwrite a new row's params with old ones)."""
+    existing: set[tuple[str, str]] = set()
+    if plan is not None and plan.slot_starts_utc:
+        try:
+            ws = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
+            we = (plan.slot_starts_utc[-1] + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+            existing = {
+                (str(r.get("action_type")), str(r.get("start_time")))
+                for r in db.get_pending_actions_in_range(ws, we, "daikin", ("lwt_preheat", "restore"))
+            }
+        except Exception:  # pragma: no cover
+            existing = set()
+    now_iso = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    _v = getattr(_PRESERVE, "verdict", None)  # the writer's verdict for THIS dispatch
+    gate_closed = bool(_v) and not _v.get("open", True)
+    n = 0
+    for restore_row, act in snapshot:
+        if str(act.get("end_time") or "") <= now_iso:
+            continue
+        params = act.get("params") or {}
+        try:
+            if gate_closed and float(params.get("lwt_offset", 0) or 0) > 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if ("lwt_preheat", str(act.get("start_time"))) in existing:
+            continue
+        rid = None
+        if restore_row is not None and ("restore", str(restore_row.get("start_time"))) not in existing:
+            rid = db.upsert_action(
+                plan_date=plan_date, start_time=restore_row["start_time"],
+                end_time=restore_row["end_time"], device="daikin", action_type="restore",
+                params=restore_row.get("params") or {}, status="pending",
+            )
+            n += 1
+        aid = db.upsert_action(
+            plan_date=plan_date, start_time=act["start_time"], end_time=act["end_time"],
+            device="daikin", action_type="lwt_preheat", params=params, status="pending",
+            restore_action_id=rid,
+        )
+        if rid is not None:
+            db.update_action_restore_link(aid, rid)
+        n += 1
+    if n:
+        logger.warning("write_daikin_from_lp_plan: restored %d previously pending LWT row(s) the writer did not replace (#847)", n)
+        try:
+            db.log_action(device="daikin", action="lwt_rows_preserved", params={"rows": n},
+                          result="ok", trigger="dispatch")
+        except Exception:  # pragma: no cover
+            pass
+    return n
+
+
 def write_daikin_from_lp_plan(
+    plan_date: str,
+    plan: LpPlan,
+    forecast: list[HourlyForecast],
+) -> int:
+    """#847 wrapper: never leave the horizon without LWT rows.
+
+    Every regime clears the pending Daikin rows over the plan window BEFORE the
+    LWT writer runs. If that writer then writes nothing for a reason other than
+    "the plan has no offsets" (quota headroom skip, or an exception), the rows it
+    cleared are re-inserted. See :func:`_write_daikin_from_lp_plan_impl`.
+    """
+    snapshot: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
+    if config.DAIKIN_CONTROL_MODE != "passive" and config.DAIKIN_LWT_PREHEAT_ENABLED:
+        try:
+            snapshot = _snapshot_pending_lwt_rows(plan)
+        except Exception:  # pragma: no cover — snapshot is best-effort
+            logger.debug("lwt snapshot failed", exc_info=True)
+    _PRESERVE.flag = False
+    _PRESERVE.verdict = None
+    _PRESERVE.written_count = 0
+    try:
+        count = _write_daikin_from_lp_plan_impl(plan_date, plan, forecast)
+    except Exception:
+        # Only when the LWT writer wrote nothing: rows it already wrote are the new truth.
+        if snapshot and not getattr(_PRESERVE, "written_count", 0):
+            try:
+                _restore_lwt_rows(snapshot, plan_date, plan)
+            except Exception:  # pragma: no cover
+                logger.exception("lwt row restore after failure failed")
+        raise
+    if snapshot and getattr(_PRESERVE, "flag", False):
+        try:
+            _restore_lwt_rows(snapshot, plan_date, plan)
+        except Exception:  # pragma: no cover
+            logger.exception("lwt row restore failed")
+    _PRESERVE.flag = False
+    return count
+
+
+def _write_daikin_from_lp_plan_impl(
     plan_date: str,
     plan: LpPlan,
     forecast: list[HourlyForecast],

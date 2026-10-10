@@ -52,6 +52,7 @@ export function FeedbackPanel({ pv }: { pv: PvTodayResponse | null }) {
   ].join(" · ");
 
   const gate = d.lwt_gate;
+  const gateHeld = gate.demand_gate_held === true;
   let gateLabel: string;
   let gateOk = true;
   if (!gate.preheat_enabled) {
@@ -60,18 +61,20 @@ export function FeedbackPanel({ pv }: { pv: PvTodayResponse | null }) {
     gateLabel = "Pre-heat ungated";
     gateOk = false; // gate disabled = offsets can fire with zero heating demand
   } else if (gate.preheat_suppressed) {
-    gateLabel = "Pre-heat gated — no heating demand";
+    gateLabel = "Boosts gated — no measured heating demand (coasts still written)";
   } else if (gate.positive_offset_suppressed_by_outdoor) {
     // Demand gate is open but the warm-day cutoff vetoes every boost anyway
     // (only the −2 peak setback can still fire). "Active" here read as "about
     // to spend energy" — say idle and show why.
     gateLabel = `Pre-heat idle — warm day (${gate.current_outdoor_c != null ? `${gate.current_outdoor_c.toFixed(0)}°` : "outdoor"} ≥ ${gate.outdoor_cutoff_c?.toFixed(0)}° cutoff)`;
+  } else if (gateHeld) {
+    gateLabel = "Pre-heat active — held open (recent demand)";
   } else {
     // Past-tense wording: this is MEASURED trailing heating (the gate input),
     // not a forecast of upcoming consumption.
     gateLabel = `Pre-heat active — ${fmtKwh(gate.measured_window_kwh)} heated in last ${gate.lookback_hours}h`;
   }
-  const gateTip = `measured space heating ${fmtKwh(gate.measured_window_kwh, 2)} over the last ${gate.lookback_hours}h vs ${fmtKwh(gate.threshold_kwh, 2)} threshold (HEM's own offset windows excluded)${
+  const gateTip = `${gateHeld ? "gate held open by hysteresis · " : ""}measured space heating ${fmtKwh(gate.measured_window_kwh, 2)} over the last ${gate.lookback_hours}h vs ${fmtKwh(gate.threshold_kwh, 2)} threshold (HEM's own offset windows excluded)${
     gate.positive_offset_suppressed_by_outdoor ? " · boosts vetoed while outdoor ≥ cutoff; the peak setback still fires" : ""
   }`;
 
