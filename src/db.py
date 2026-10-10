@@ -1197,6 +1197,24 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE appliances ADD COLUMN "
             "rearm_block_until_off INTEGER NOT NULL DEFAULT 0"
         )
+    # #849: when the latch was set (UTC ISO) — drives the "blocked > 30 min"
+    # notification and the API's rearm_blocked_since. NULL = not blocked / legacy.
+    if "rearm_blocked_since" not in ap_cols:
+        conn.execute("ALTER TABLE appliances ADD COLUMN rearm_blocked_since TEXT")
+    # #849 review: HEM-observed arm-signal state (survives restarts).
+    for _col in (
+        "last_switch_value", "last_switch_ts", "switch_on_ts", "switch_on_observed_at",
+        "last_remote_ts", "remote_cand_ts", "remote_cand_observed_at", "last_remote_mode",
+    ):
+        if _col not in ap_cols:
+            conn.execute(f"ALTER TABLE appliances ADD COLUMN {_col} TEXT")
+    # Legacy latched rows (pre-#849) have no since-stamp: backfill so the
+    # blocked notification / evidence reference work for them too.
+    conn.execute(
+        "UPDATE appliances SET rearm_blocked_since = ? "
+        "WHERE rearm_block_until_off = 1 AND rearm_blocked_since IS NULL",
+        (datetime.now(UTC).isoformat(),),
+    )
 
     # V11-A (#194): closed-loop replay needs cloud cover at solve-time.
     # Without this column, lp_replay._reconstruct_weather passes 0.0 to
@@ -9105,11 +9123,85 @@ def set_appliance_rearm_block(appliance_id: int, blocked: bool) -> None:
     with _lock:
         conn = get_connection()
         try:
+            if blocked:
+                # NEW episode (no since-stamp yet): drop observations from any
+                # previous episode so a stale `off` can't count as the observed off.
+                conn.execute(
+                    "UPDATE appliances SET last_switch_value = NULL, last_switch_ts = NULL, "
+                    "switch_on_ts = NULL, switch_on_observed_at = NULL, remote_cand_ts = NULL, "
+                    "remote_cand_observed_at = NULL "
+                    "WHERE id = ? AND rearm_blocked_since IS NULL",
+                    (appliance_id,),
+                )
+                # Keep the ORIGINAL since-stamp if already blocked (episode start).
+                conn.execute(
+                    "UPDATE appliances SET rearm_block_until_off = 1, "
+                    "rearm_blocked_since = COALESCE(rearm_blocked_since, ?) WHERE id = ?",
+                    (datetime.now(UTC).isoformat(), appliance_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE appliances SET rearm_block_until_off = 0, "
+                    "rearm_blocked_since = NULL, switch_on_ts = NULL, "
+                    "switch_on_observed_at = NULL, remote_cand_ts = NULL, "
+                    "remote_cand_observed_at = NULL WHERE id = ?",
+                    (appliance_id,),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+_ARM_OBS_COLS = (
+    "last_switch_value", "last_switch_ts", "switch_on_ts", "switch_on_observed_at",
+    "last_remote_ts", "remote_cand_ts", "remote_cand_observed_at", "last_remote_mode",
+)
+
+
+def get_appliance_arm_obs(appliance_id: int) -> dict[str, Any]:
+    """HEM-observed arm-signal state for an appliance (all keys, None if unset)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                f"SELECT {', '.join(_ARM_OBS_COLS)} FROM appliances WHERE id = ?",
+                (appliance_id,),
+            )
+            r = cur.fetchone()
+            return {c: (r[i] if r else None) for i, c in enumerate(_ARM_OBS_COLS)}
+        finally:
+            conn.close()
+
+
+def set_appliance_arm_obs(appliance_id: int, **fields: Any) -> None:
+    keys = [k for k in fields if k in _ARM_OBS_COLS]
+    if not keys:
+        return
+    with _lock:
+        conn = get_connection()
+        try:
             conn.execute(
-                "UPDATE appliances SET rearm_block_until_off = ? WHERE id = ?",
-                (1 if blocked else 0, appliance_id),
+                f"UPDATE appliances SET {', '.join(k + ' = ?' for k in keys)} WHERE id = ?",
+                [fields[k] for k in keys] + [appliance_id],
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+def get_appliance_rearm_blocked_since(appliance_id: int) -> str | None:
+    """UTC ISO of when the re-arm latch was set (None when not blocked / legacy row)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT rearm_block_until_off, rearm_blocked_since FROM appliances WHERE id = ?",
+                (appliance_id,),
+            )
+            r = cur.fetchone()
+            if not r or not r[0]:
+                return None
+            return r[1]
         finally:
             conn.close()
 

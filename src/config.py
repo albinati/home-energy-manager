@@ -614,6 +614,22 @@ class Config:
     APPLIANCE_LEARNED_KW_LOOKBACK: int = int(
         os.getenv("APPLIANCE_LEARNED_KW_LOOKBACK", "10")
     )
+    # #849 — fresh-arm evidence after a completed cycle while the re-arm latch is
+    # set: a switch/cycle/completionTime event must be newer than the last job's
+    # end by at least this many minutes (post-cycle unloading noise must not
+    # re-arm the same episode).
+    APPLIANCE_FRESH_ARM_MIN_GAP_MINUTES: int = int(
+        os.getenv("APPLIANCE_FRESH_ARM_MIN_GAP_MINUTES", "60")
+    )
+    # #849 - the arm signal must still read the same after this many minutes.
+    APPLIANCE_FRESH_ARM_DEBOUNCE_MINUTES: int = int(
+        os.getenv("APPLIANCE_FRESH_ARM_DEBOUNCE_MINUTES", "10")
+    )
+    # #849 — latch blocking a remote-on appliance for longer than this → one
+    # notify_risk per episode.
+    APPLIANCE_REARM_BLOCK_NOTIFY_MINUTES: int = int(
+        os.getenv("APPLIANCE_REARM_BLOCK_NOTIFY_MINUTES", "30")
+    )
     APPLIANCE_LEARNED_KW_MIN_SAMPLES: int = int(
         os.getenv("APPLIANCE_LEARNED_KW_MIN_SAMPLES", "3")
     )

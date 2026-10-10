@@ -58,6 +58,9 @@ class SmartThingsClient:
     No retry on most 4xx; one retry on 5xx; one refresh+retry on 401.
     SmartThings is not Daikin-quota-constrained — the appliance dispatcher
     reads remote_mode at most once per LP solve (~50 reads/day total).
+    While an appliance's re-arm latch is set with Smart Control on (#849), the
+    heartbeat adds one ``get_full_status`` per heartbeat for that appliance
+    (~288/day at 5 min) until the latch is released; fire time adds one more.
 
     Pass ``access_token=None`` (default) to source from the OAuth file via
     :func:`src.smartthings.auth.get_valid_access_token`. Pass an explicit
