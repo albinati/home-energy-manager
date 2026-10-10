@@ -1879,7 +1879,7 @@ def _apply_written_lwt_offsets(slots_out, today_local, win_start_utc, win_end_ut
         except (TypeError, ValueError):
             off = 0.0
         segs = [(s0, e0, off)]
-        if str(r.get("status")) == "completed" and r.get("error_msg") == "comfort_backstop":
+        if str(r.get("status")) == "completed" and r.get("error_msg") in ("comfort_backstop", "warm_backstop"):
             # The backstop cancelled the offset at completion: the row covers
             # only up to then; the device holds 0 for the rest of its window.
             ex = _p(r.get("executed_at"))

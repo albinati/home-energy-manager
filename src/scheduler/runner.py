@@ -2394,6 +2394,7 @@ def bulletproof_heartbeat_tick() -> None:
         _lwt_comfort_backstop_tick(
             now_utc=now_utc, plan_date=plan_date, dev=dev0, client=_dc, price=price,
         )
+        _lwt_warm_backstop_tick(now_utc=now_utc, plan_date=plan_date, dev=dev0, client=_dc)
         reconcile_daikin_schedule_for_date(
             plan_date,
             _dc,
@@ -2713,6 +2714,22 @@ def _lwt_comfort_backstop_tick(
         )
     except Exception as exc:
         logger.debug("lwt comfort backstop error: %s", exc)
+        return {}
+
+
+def _lwt_warm_backstop_tick(
+    *, now_utc: datetime, plan_date: str, dev: Any, client: Any,
+) -> dict[str, Any]:
+    """#855 — warm-side real-time backstop (``lwt_coast.warm_backstop_tick``). Never raises."""
+    try:
+        from .lwt_coast import warm_backstop_tick
+
+        return warm_backstop_tick(
+            now_utc=now_utc, plan_date=plan_date, dev=dev, client=client,
+            replan_fn=bulletproof_mpc_job,
+        )
+    except Exception as exc:
+        logger.debug("lwt warm backstop error: %s", exc)
         return {}
 
 
