@@ -366,6 +366,14 @@ def _lwt(day: date, tz: ZoneInfo, a: datetime, b: datetime, windows: list[Any] |
                 n_backstops += 1
     except Exception:  # noqa: BLE001
         logger.debug("cosy_scorecard: backstop count failed", exc_info=True)
+    n_warm_backstops = 0
+    try:
+        for r in db.get_action_logs(device="daikin", action="lwt_warm_backstop", since=a.isoformat(), limit=200):
+            t = _parse(r.get("timestamp"))
+            if t is not None and t < b and str(r.get("result") or "") == "ok":
+                n_warm_backstops += 1
+    except Exception:  # noqa: BLE001
+        logger.debug("cosy_scorecard: warm backstop count failed", exc_info=True)
     n_gate_skips = 0
     n_gate_windows = 0
     try:
@@ -392,7 +400,7 @@ def _lwt(day: date, tz: ZoneInfo, a: datetime, b: datetime, windows: list[Any] |
     except Exception:  # noqa: BLE001
         logger.debug("cosy_scorecard: indoor min/max failed", exc_info=True)
     return {"preheat_rows": n_pre, "restore_rows": n_restore, "write_verify": verify,
-            "source_diff_last": diff, "lwt_backstops": n_backstops,
+            "source_diff_last": diff, "lwt_backstops": n_backstops, "warm_backstops": n_warm_backstops,
             "demand_gate_closed_dispatches": n_gate_skips,
             "demand_gate_windows_suppressed": n_gate_windows,
             "heating_kwh_by_band": by_band, "indoor_min_c": imin, "indoor_max_c": imax}

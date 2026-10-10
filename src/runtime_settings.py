@@ -225,6 +225,30 @@ SCHEMA: dict[str, SettingSpec] = {
             "DAIKIN_LWT_PREHEAT_COMFORT_BAND_C)."
         ),
     ),
+    "LP_W3_INTERNAL_GAIN_KW": SettingSpec(
+        key="LP_W3_INTERNAL_GAIN_KW",
+        type_name="float",
+        env_default=_float_env("LP_W3_INTERNAL_GAIN_KW", "0.0"),
+        min_value=0.0,
+        max_value=1.0,
+        description=(
+            "W3 RC model (#854): constant internal heat gain (people, appliances, "
+            "thermal kW). 0 = off (pre-#854 equation). See the learned "
+            "internal_gain_kw on the LWT learning card."
+        ),
+    ),
+    "LP_W3_SOLAR_GAIN_KW_PER_PV_KW": SettingSpec(
+        key="LP_W3_SOLAR_GAIN_KW_PER_PV_KW",
+        type_name="float",
+        env_default=_float_env("LP_W3_SOLAR_GAIN_KW_PER_PV_KW", "0.0"),
+        min_value=0.0,
+        max_value=2.0,
+        description=(
+            "W3 RC model (#854): solar heat gain through glazing, thermal kW per kW of "
+            "forecast PV generation (PV is the irradiance proxy). 0 = off. See the "
+            "learned solar_gain_kw_per_pv_kw on the LWT learning card."
+        ),
+    ),
     "INDOOR_COMFORT_AGGREGATE": SettingSpec(
         key="INDOOR_COMFORT_AGGREGATE",
         type_name="str",

@@ -91,6 +91,15 @@ def fill_realised(day: date, tz: ZoneInfo | None = None) -> int:
             continue
         if i is not None:
             offs.setdefault(i, []).append(float(r["daikin_lwt_offset"]))
+    # realised PV generation per slot (#854): kWh/slot -> mean kW (solar-gain regressor)
+    pv_kw: dict[int, float] = {}
+    try:
+        for k_, kwh_ in db.half_hourly_kwh_for_utc_range(start, end, "solar_power_kw").items():
+            i_ = idx(datetime.fromisoformat(str(k_).replace("Z", "+00:00")))
+            if i_ is not None:
+                pv_kw[i_] = float(kwh_) / (SLOT_MIN / 60.0)
+    except Exception:
+        logger.debug("realised pv skipped", exc_info=True)
     # heating kWh: local 2h bucket prorated over its slots
     cons_rows = db.get_daikin_consumption_2hourly_range(day.isoformat(), day.isoformat())
     # #843: drop the #749-family phantom 1.0-kWh Onecta buckets (the weather curve
@@ -137,6 +146,8 @@ def fill_realised(day: date, tz: ZoneInfo | None = None) -> int:
         if kb is not None:
             f["heating_kwh"] = round(float(kb) / max(1, per_bucket.get(b, 4)), 4)
             f["heating_kwh_source"] = str(ksrc) if ksrc is not None else None
+        if i in pv_kw:
+            f["pv_real_kw"] = round(pv_kw[i], 4)
         db.update_lwt_learning_realised(_z(st), f)
         n += 1
     return n
@@ -219,6 +230,7 @@ JOINT_MIN_HEAT_SLOTS = 4        # slot-level diagnostic fit
 JOINT_MIN_COAST_SLOTS = 8
 JOINT_MIN_HEAT_EPISODES = 5     # episode estimator (the headline)
 JOINT_MIN_COAST_BLOCKS = 8
+JOINT_MIN_DAY_COAST_BLOCKS = 6  # #854: daytime coast blocks (with realised PV) needed for the solar term
 JOINT_HEAT_KWH_MIN = 0.05       # a slot counts as heating above this (kWh electric)
 JOINT_TAIL_SLOTS = 4            # coast tail appended to a heating episode (lag recovery)
 COAST_LWT_DELTA_MAX_C = 6.0     # a metered-zero bucket whose water ran this far above indoor was NOT a coast
@@ -362,7 +374,8 @@ def _coast_tau(samples: list[tuple[float, float, float, bool]]) -> float | None:
 # -- episode estimator ------------------------------------------------------
 
 # one sample: (dT_in, sum_q_th, sum_x, sum_dt_h, is_heat_episode, var_of_sum_q_th)
-_EpSample = tuple[float, float, float, float, bool, float]
+# (dT, sumQ_th, sumX, sum_dt, is_heat, q_noise_var, sum_pv_kwh|None, daytime_coast)
+_EpSample = tuple[float, float, float, float, bool, float, float | None, bool]
 
 
 def _inverse(m: list[list[float]]) -> list[list[float]] | None:
@@ -475,7 +488,10 @@ def _episode_samples(rows: list[dict[str, Any]], cop_fn: Any, tz: ZoneInfo) -> t
             qvar = (heat_slots / 4.0) / 12.0 * (sum(cops) / len(cops)) ** 2
         else:
             qvar = 0.0
-        return d_t, q, x, len(rs) * dt_h, is_heat, qvar
+        pvs = [r.get("pv_real_kw") for r in rs]  # type: ignore[union-attr]
+        s_pv = (sum(float(v) * dt_h for v in pvs if v is not None)
+                if all(v is not None for v in pvs) else None)
+        return d_t, q, x, len(rs) * dt_h, is_heat, qvar, s_pv, False
 
     out: list[_EpSample] = []
     used_tail: set[datetime] = set()
@@ -507,10 +523,16 @@ def _episode_samples(rows: list[dict[str, Any]], cop_fn: Any, tz: ZoneInfo) -> t
             out.append(s)
         i = j + 1
     for start, slots, kind in kinds:
-        if kind == "coast" and start not in used_tail and _bucket_in_night(start, tz):
+        if kind == "coast" and start not in used_tail:
             s = window(slots, 0, False)
-            if s is not None:
+            if s is None:
+                continue
+            if _bucket_in_night(start, tz):
                 out.append(s)
+            elif s[6] is not None:
+                # #854: a DAYTIME coast block carries a solar term -> usable only by the
+                # solar fit, and only with realised PV on every slot of the block.
+                out.append((*s[:7], True))
     return out, n_measured
 
 
@@ -525,9 +547,32 @@ def _bucket_in_night(start: datetime, tz: ZoneInfo) -> bool:
     return h >= ns or h + 2 <= ne
 
 
+def _fit_solar(samples: list[_EpSample]) -> dict[str, Any] | None:
+    """#854 — ``dT = a*sumQ - b*sumX + g*sumdt + h*sumPV`` over ALL samples (night coast,
+    heating episodes, daytime coast; ``sumPV`` = realised PV kWh, 0 where unknown). With a=1/C,
+    b=1/tau, internal gain = g/a (kW), solar gain = h/a (thermal kW per PV kW). SEs by the delta
+    method. ``None`` = singular, ``{"nonphysical": True}`` = a or b <= 0."""
+    y = [s[0] for s in samples]
+    res = _ols([[s[1], -s[2], s[3], (s[6] or 0.0)] for s in samples], y, sum(s[5] for s in samples))
+    if res is None:
+        return None
+    (a, b, g, h), cov, ssr = res
+    if a <= 0 or b <= 0:
+        return {"nonphysical": True}
+    va, vg, vh = cov[0][0], cov[2][2], cov[3][3]
+    var_g = (g / a ** 2) ** 2 * va + (1 / a) ** 2 * vg - 2 * (g / a ** 2) * (1 / a) * cov[0][2]
+    var_h = (h / a ** 2) ** 2 * va + (1 / a) ** 2 * vh - 2 * (h / a ** 2) * (1 / a) * cov[0][3]
+    return {"internal_gain_kw": g / a, "internal_gain_se": math.sqrt(max(0.0, var_g)),
+            "solar_gain_kw_per_pv_kw": h / a, "solar_gain_se": math.sqrt(max(0.0, var_h)),
+            "ua_w_per_k": 1000.0 * b / a, "c_kwh_per_k": 1.0 / a, "tau_h": 1.0 / b,
+            "resid_rms_c": math.sqrt(ssr / (len(y) - 4))}
+
+
 def _fit_episodes(samples: list[_EpSample], tau_prior_h: float | None = None) -> dict[str, Any] | None:
     """``dT = a*sumQ - b*sumX + g*sumdt`` (a=1/C, b=UA/(1000 C)=1/tau, g=gain_kW/C). Free (3
-    params, SEs by the delta method) or, with ``tau_prior_h``, b FIXED = 1/tau (2 params)."""
+    params, SEs by the delta method) or, with ``tau_prior_h``, b FIXED = 1/tau (2 params).
+    Daytime coast blocks (#854) are excluded: they belong to :func:`_fit_solar`."""
+    samples = [s for s in samples if not s[7]]
     y = [s[0] for s in samples]
     if tau_prior_h is None:
         res = _ols([[s[1], -s[2], s[3]] for s in samples], y, sum(s[5] for s in samples))
@@ -635,7 +680,8 @@ def fit_ua_c_joint(
     tz = tz or _tz()
     ep, n_measured = _episode_samples(rows, cop_fn, tz)
     n_he = sum(1 for s in ep if s[4])
-    n_cb = len(ep) - n_he
+    n_dc = sum(1 for s in ep if s[7])
+    n_cb = len(ep) - n_he - n_dc
     slot = _joint_samples(rows, cop_fn)
     n_sh = sum(1 for s in slot if s[3])
     n_sc = len(slot) - n_sh
@@ -649,6 +695,10 @@ def fit_ua_c_joint(
         "identifiable": False, "reason": None, "n_heat_episodes": n_he, "n_coast_blocks": n_cb,
         "tau_prior_h": tau_prior_h, "ua_w_per_k": None, "ua_se": None, "c_kwh_per_k": None,
         "c_se": None, "tau_h": None, "gain_kw": None, "resid_rms_c": None,
+        # #854: solar / internal gains (analytics only, nothing auto-applied)
+        "solar_identifiable": False, "solar_reason": None, "n_day_coast_blocks": n_dc,
+        "solar_gain_kw_per_pv_kw": None, "solar_gain_se": None,
+        "internal_gain_kw": None, "internal_gain_se": None,
         "coast_tau_h": _coast_tau(coast_pairs) if coast_pairs else _coast_tau(slot),
         "tau_fixed": None, "consistency_flag": None, "cop_sensitivity": None, "slot_fit": slot_fit,
     }
@@ -673,6 +723,26 @@ def fit_ua_c_joint(
     assert r is not None
     res.update(r)
     res["identifiable"] = True
+    res["internal_gain_kw"], res["internal_gain_se"] = res.get("gain_kw"), res.get("gain_se")
+    if n_dc == 0:
+        res["solar_reason"] = "no_daytime_coast_blocks"
+    elif n_dc < JOINT_MIN_DAY_COAST_BLOCKS:
+        res["solar_reason"] = "too_few_daytime_coast_blocks"
+    else:
+        sf = _fit_solar(ep)
+        if sf is None:
+            res["solar_reason"] = "singular"
+        elif sf.get("nonphysical"):
+            res["solar_reason"] = "nonphysical_fit"
+        else:
+            sr = _rnd(sf, {"internal_gain_kw": 3, "internal_gain_se": 3, "solar_gain_kw_per_pv_kw": 3,
+                           "solar_gain_se": 3, "ua_w_per_k": 1, "c_kwh_per_k": 2, "tau_h": 1,
+                           "resid_rms_c": 3})
+            assert sr is not None
+            res["solar_identifiable"] = True
+            res["solar_fit"] = sr
+            for k_ in ("internal_gain_kw", "internal_gain_se", "solar_gain_kw_per_pv_kw", "solar_gain_se"):
+                res[k_] = sr[k_]
     ct = res["coast_tau_h"]
     if ct and abs(res["tau_h"] - ct) / ct > TAU_CONSISTENCY_TOL:
         res["consistency_flag"] = "lag_or_gain_contamination_suspected"
@@ -776,6 +846,47 @@ def prediction_error(rows: list[dict[str, Any]]) -> tuple[float | None, float | 
     return round(sum(errs) / len(errs), 3), round(p90, 3)
 
 
+def pred_resid_breakdown(rows: list[dict[str, Any]], tz: ZoneInfo) -> dict[str, Any]:
+    """#854 — measured residual ``real - predicted`` indoor (°C) by local day vs night and, for
+    daytime slots with realised PV, by PV tercile. POSITIVE = the plan was too COLD = missing
+    gains (solar / internal); read the high-PV tercile against the low one. Rows must carry both
+    ``indoor_real_c`` and ``indoor_pred_c``."""
+    ns = int(getattr(config, "LP_W3_NIGHT_START_HOUR_LOCAL", 22))
+    ne = int(getattr(config, "LP_W3_NIGHT_END_HOUR_LOCAL", 7))
+    day_r: list[float] = []
+    night_r: list[float] = []
+    day_pv: list[tuple[float, float]] = []
+    for r in rows:
+        if r.get("indoor_pred_c") is None or r.get("indoor_real_c") is None:
+            continue
+        t = _ts(r)
+        if t is None:
+            continue
+        h = (t + timedelta(minutes=SLOT_MIN // 2)).astimezone(tz).hour
+        night = (h >= ns or h < ne) if ns > ne else (ns <= h < ne)
+        e = float(r["indoor_real_c"]) - float(r["indoor_pred_c"])
+        if night:
+            night_r.append(e)
+        else:
+            day_r.append(e)
+            if r.get("pv_real_kw") is not None:
+                day_pv.append((float(r["pv_real_kw"]), e))
+
+    def agg(v: list[float]) -> dict[str, Any]:
+        return {"n": len(v), "mean_c": round(sum(v) / len(v), 3) if v else None}
+
+    terciles: list[dict[str, Any]] = []
+    if len(day_pv) >= 6:
+        srt = sorted(day_pv)
+        k = len(srt) // 3
+        for name, part in (("low", srt[:k]), ("mid", srt[k:len(srt) - k]), ("high", srt[len(srt) - k:])):
+            terciles.append({"tercile": name, "n": len(part),
+                             "pv_mean_kw": round(sum(p for p, _e in part) / len(part), 3),
+                             "mean_c": round(sum(e for _p, e in part) / len(part), 3)})
+    return {"sign": "real_minus_pred (positive = plan too cold = missing gains)",
+            "day": agg(day_r), "night": agg(night_r), "by_pv_tercile": terciles}
+
+
 def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
     tz = tz or _tz()
     fill_realised(day, tz)
@@ -814,6 +925,7 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
                     "ua_est_circular": True, **joint,
                     "n_coast_night_slots": n_coast_night, "n_k_buckets": n_k_buckets, "ua_pinned_w_per_k": ua_pin, "k_pinned_kw_per_c": k_pin,
                     "n_rows": len(rows),
+                    "pred_resid": pred_resid_breakdown(rows, tz),
                     "coast_delta_configured_c": float(getattr(config, "DAIKIN_LWT_COAST_DELTA_C", 2.0)),
                     **pump_off_delta(rows)},
     }

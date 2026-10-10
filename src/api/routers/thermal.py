@@ -35,6 +35,9 @@ def _build(days: int) -> dict[str, Any]:
         "timezone": str(config.BULLETPROOF_TIMEZONE),
         "coast_mode": str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback"),
         "ua_pinned_w_per_k": float(getattr(config, "BUILDING_UA_W_PER_K", 200)),
+        # #854: the gains the LP is steering with right now (0 = off), next to the learned ones
+        "internal_gain_pinned_kw": float(getattr(config, "LP_W3_INTERNAL_GAIN_KW", 0.0)),
+        "solar_gain_pinned_kw_per_pv_kw": float(getattr(config, "LP_W3_SOLAR_GAIN_KW_PER_PV_KW", 0.0)),
         "daily": daily,
         "yesterday": {"date": yday.isoformat(), "slots": rows},
     }

@@ -1012,6 +1012,11 @@ class Config:
     # After the backstop fires, negative offsets are suppressed on slots starting
     # before now + this many minutes (anti backstop<->replan oscillation).
     LWT_COMFORT_BACKSTOP_HOLD_MINUTES: int = int(os.getenv("LWT_COMFORT_BACKSTOP_HOLD_MINUTES", "90"))
+    # #855 warm-side backstop: cancel an active positive LWT boost once the
+    # measured house reaches ceiling - DAIKIN_LWT_PREHEAT_COMFORT_BAND_C.
+    LWT_WARM_BACKSTOP_ENABLED: bool = os.getenv("LWT_WARM_BACKSTOP_ENABLED", "true").lower() in ("true", "1", "yes")
+    LWT_WARM_BACKSTOP_TICKS: int = int(os.getenv("LWT_WARM_BACKSTOP_TICKS", "2"))
+    LWT_WARM_BACKSTOP_HOLD_MINUTES: int = int(os.getenv("LWT_WARM_BACKSTOP_HOLD_MINUTES", "60"))
     # Absolute LWT ceiling on the LP heating path (backup-heater exposure): a
     # positive offset never lifts the water above this (curve_lwt + offset <= max).
     DAIKIN_LWT_ABS_MAX_C: float = float(os.getenv("DAIKIN_LWT_ABS_MAX_C", "45"))
@@ -2573,6 +2578,22 @@ class Config:
     @LP_W3_NIGHT_FLOOR_C.setter
     def LP_W3_NIGHT_FLOOR_C(self, value: float) -> None:
         self._rt_set("LP_W3_NIGHT_FLOOR_C", float(value))
+
+    @property
+    def LP_W3_INTERNAL_GAIN_KW(self) -> float:
+        return float(self._rt_get("LP_W3_INTERNAL_GAIN_KW"))
+
+    @LP_W3_INTERNAL_GAIN_KW.setter
+    def LP_W3_INTERNAL_GAIN_KW(self, value: float) -> None:
+        self._rt_set("LP_W3_INTERNAL_GAIN_KW", float(value))
+
+    @property
+    def LP_W3_SOLAR_GAIN_KW_PER_PV_KW(self) -> float:
+        return float(self._rt_get("LP_W3_SOLAR_GAIN_KW_PER_PV_KW"))
+
+    @LP_W3_SOLAR_GAIN_KW_PER_PV_KW.setter
+    def LP_W3_SOLAR_GAIN_KW_PER_PV_KW(self, value: float) -> None:
+        self._rt_set("LP_W3_SOLAR_GAIN_KW_PER_PV_KW", float(value))
 
     @property
     def LP_W3_CEILING_C(self) -> float:
