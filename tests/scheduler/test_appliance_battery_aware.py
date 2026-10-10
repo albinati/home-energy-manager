@@ -41,6 +41,7 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "APPLIANCE_VARIANCE_MIN_SAMPLES", 3, raising=False)
     monkeypatch.setattr(config, "APPLIANCE_VARIANCE_LOOKBACK_JOBS", 20, raising=False)
     monkeypatch.setattr(config, "APPLIANCE_FALLBACK_SAFETY_MARGIN_KWH", 0.3, raising=False)
+    monkeypatch.setattr(config, "APPLIANCE_EARLY_START_TOLERANCE_PENCE", 0.0, raising=False)  # legacy (#853)
     monkeypatch.setattr(config, "BATTERY_CAPACITY_KWH", 10.0, raising=False)
     monkeypatch.setattr(config, "MIN_SOC_RESERVE_PERCENT", 15.0, raising=False)
     # Freeze "now" just before the fixed test base (12:00) so the seeded LP

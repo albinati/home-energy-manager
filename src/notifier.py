@@ -736,6 +736,7 @@ def notify_appliance_armed(
     duration_minutes: int,
     avg_price_pence: float,
     replan: bool = False,
+    tradeoff: str | None = None,
 ) -> None:
     """🧺 LP picked a window for this appliance and armed the cron.
 
@@ -752,8 +753,11 @@ def notify_appliance_armed(
         f"{planned_start_local}→{planned_end_local} · "
         f"{duration_minutes} min · {avg_price_pence:.1f}p/kWh · by {deadline_local}"
     )
+    if tradeoff:
+        body += f"\n{tradeoff}"
     extra = {
         "appliance": appliance_name,
+        "tradeoff": tradeoff,
         "planned_start_local": planned_start_local,
         "planned_end_local": planned_end_local,
         "deadline_local": deadline_local,

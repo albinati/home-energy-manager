@@ -645,6 +645,17 @@ class Config:
     APPLIANCE_BATTERY_ROUND_TRIP_EFF: float = float(
         os.getenv("APPLIANCE_BATTERY_ROUND_TRIP_EFF", "0.92")
     )
+    # #853 — earliest-start policy. The picker chooses the EARLIEST candidate
+    # whose TOTAL cycle cost (pence) is within this tolerance of the cheapest
+    # candidate. 0 = legacy (strictly cheapest, ties -> grid, then earliest).
+    APPLIANCE_EARLY_START_TOLERANCE_PENCE: float = float(
+        os.getenv("APPLIANCE_EARLY_START_TOLERANCE_PENCE", "10")
+    )
+    # #853 — optional cap (hours from now; 0 = none): never start later than
+    # now + N h when a window inside it is within 3x the tolerance of the cheapest.
+    APPLIANCE_MAX_DELAY_HOURS: float = float(
+        os.getenv("APPLIANCE_MAX_DELAY_HOURS", "0")
+    )
     # Max age (hours) of the LP solution before the battery-aware picker
     # treats it as stale and falls back to cheapest-grid. 2 h covers a
     # typical LP cadence; older forecasts encode outdated tariff/weather.

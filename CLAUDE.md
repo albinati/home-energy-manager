@@ -297,6 +297,23 @@ appliance IS the consent gate — no MCP confirm.
 `setMachineState run` command for all three. Register multiple devices
 via the discover/register MCP tools or REST endpoints.
 
+**Earliest start within a cost tolerance (#853).** `find_battery_aware_window`
+(and the marginal-cost cheapest picker) choose the EARLIEST candidate whose
+TOTAL cycle cost is within `APPLIANCE_EARLY_START_TOLERANCE_PENCE` (default 10;
+0 = legacy strict-cheapest) of the cheapest, instead of delaying a wash 12 h to
+save 2 p. `APPLIANCE_MAX_DELAY_HOURS` (default 0 = off) never waits past now+N h
+when a window inside it is within 3x tolerance. Battery-aware effective pricing
+(refill / round-trip) is unchanged. `action_log` `appliance_window_choice`
+(`chosen_start/total_p`, `cheapest_start/total_p`, `tolerance_p`) and the arm
+notification ("lavo às 09:30 — esperar até 22:00 economizaria 2p"). Env-only knobs.
+
+**Units of the picker's "price" (#853 review).** `build_marginal_cost_per_slot`
+returns PENCE PER 30-MIN SLOT of the appliance's own energy (`typical_kw x 0.5`
+kWh x p/kWh), NOT p/kWh: a 0.327 kW cycle (0.164 kWh/slot) shows 2.04 at the 12.49p
+cheap band, 4.15 at 25.45p, 6.25 at 38.17p (PV-covered slots: forgone export).
+`avg_price_pence` / "p/kWh" in logs and the arm ping inherit that scale (a mislabel,
+not a ranking bug: every candidate shares it). Cycle total = value x slots.
+
 **Learned `typical_kw` (#222).** The cycle-energy estimate prefers the rolling
 mean of recent completed runs' measured `actual_kwh` (SmartThings energy
 counter, #235) over the static registration `typical_kw`, once
