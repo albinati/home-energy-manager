@@ -110,6 +110,15 @@ def _appliance_window_suggestion_line(tz: ZoneInfo) -> str | None:
     """
     try:
         from ..scheduler import appliance_dispatch
+        # #849: Smart Control already on but the re-arm latch is blocking it →
+        # never tell the owner to "load the machine"; say it is blocked.
+        blocked = appliance_dispatch.blocked_remote_on_appliances()
+        if blocked:
+            names = ", ".join(str(a.get("name") or a["id"]) for a in blocked)
+            return (
+                f"🧺 {names}: Smart Control ligado mas bloqueada (ciclo anterior ainda "
+                "travado) — desligue/ligue o Smart Control ou mande rodar."
+            )
         now = datetime.now(UTC)
         thr = float(getattr(config, "APPLIANCE_WINDOW_NUDGE_BRIEF_THRESHOLD_P", 8.0))
         horizon_h = float(getattr(config, "APPLIANCE_WINDOW_NUDGE_HORIZON_HOURS", 24))

@@ -76,7 +76,21 @@ def _public_appliance(row: dict[str, Any]) -> dict[str, Any]:
             learned_kw, learned_n = learned
     except Exception:  # pragma: no cover — display enrichment must never 500
         pass
+    # #849 — re-arm latch visibility.
+    blocked = False
+    blocked_since: str | None = None
+    evidence: list[dict[str, Any]] = []
+    try:
+        from ...scheduler import appliance_dispatch as _ad
+        blocked = db.is_appliance_rearm_blocked(int(row["id"]))
+        blocked_since = db.get_appliance_rearm_blocked_since(int(row["id"]))
+        evidence = list(_ad._last_fresh_evidence.get(int(row["id"]), []))
+    except Exception:  # pragma: no cover
+        pass
     return {
+        "rearm_blocked": blocked,
+        "rearm_blocked_since": blocked_since,
+        "fresh_arm_evidence": evidence,
         "id": row["id"],
         "vendor": row["vendor"],
         "vendor_device_id": row["vendor_device_id"],

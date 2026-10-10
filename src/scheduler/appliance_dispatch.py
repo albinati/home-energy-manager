@@ -45,6 +45,8 @@ _pat_invalid_notified: bool = False
 # EDGE (toggle) only — never on a steady state. Seeded without firing on the
 # first observation after start, so a restart can't auto-arm a leftover state.
 _last_remote_mode: dict[int, bool] = {}
+# #849: last fresh-arm evidence seen per appliance (exposed by the API).
+_last_fresh_evidence: dict[int, list[dict[str, Any]]] = {}
 
 
 def _record_reconcile_error(appliance_id: int, err: Exception) -> None:
@@ -1331,6 +1333,16 @@ def pending_arm_change() -> bool:
             # heartbeat) so the user's next off→on is honoured as a fresh arm,
             # without waiting for a regular solve's reconcile.
             db.set_appliance_rearm_block(appliance_id, False)
+        if remote_mode and db.is_appliance_rearm_blocked(appliance_id):
+            # #849: latched but Smart Control stayed on — a switch/cycle event
+            # after the last cycle is a fresh manual arm (needs a solve), and a
+            # long block gets one notification.
+            if _check_fresh_arm(appliance, client):
+                job = db.get_active_appliance_job(appliance_id)
+                if (job.get("status") if job else None) not in ("scheduled", "running"):
+                    fire = True
+            else:
+                _maybe_notify_rearm_blocked(appliance)
         if prev is None or prev == remote_mode:
             # First observation (seed only) or no toggle → never fire.
             continue
@@ -1491,6 +1503,161 @@ def _poll_running_jobs() -> None:
             )
 
 
+# --- #849 fresh-arm evidence while the re-arm latch is set --------------------
+
+# (capability, attribute, must_be_on) — SmartThings status events that mean the
+# owner physically did something NEW to the machine (powered on, picked a
+# cycle, re-stamped the completion time, closed the door on a load).
+_FRESH_ARM_SIGNALS: tuple[tuple[str, str, bool], ...] = (
+    ("switch", "switch", True),
+    ("samsungce.switch", "switch", True),
+    ("samsungce.washerCycle", "cycleType", False),
+    ("washerCycle", "washerCycle", False),
+    ("washerOperatingState", "completionTime", False),
+    ("samsungce.doorState", "doorState", False),
+)
+
+
+def _parse_iso_utc(v: Any) -> datetime | None:
+    if not isinstance(v, str) or not v:
+        return None
+    try:
+        dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def _rearm_reference_utc(appliance_id: int) -> datetime | None:
+    """End of the episode the latch protects: the latest job's completed_at_utc
+    (or, for a failed/cancelled job, its updated_at); falls back to the moment
+    the latch was set. Evidence must post-date this (+ the min gap)."""
+    ref: datetime | None = None
+    try:
+        jobs = db.get_appliance_jobs(appliance_id=appliance_id, limit=5)
+    except Exception:
+        jobs = []
+    for j in jobs:
+        if j.get("status") not in ("completed", "failed", "cancelled"):
+            continue
+        t = _parse_iso_utc(j.get("completed_at_utc")) or _parse_iso_utc(j.get("updated_at"))
+        if t is not None and (ref is None or t > ref):
+            ref = t
+    since = _parse_iso_utc(db.get_appliance_rearm_blocked_since(appliance_id))
+    if ref is None:
+        ref = since
+    return ref
+
+
+def fresh_arm_evidence(appliance_id: int, status: Any) -> list[dict[str, Any]]:
+    """Events in a SmartThings ``get_full_status`` payload proving a NEW manual
+    load after the completed cycle.
+
+    An event counts only when its own timestamp is newer than the last job's
+    end by ``APPLIANCE_FRESH_ARM_MIN_GAP_MINUTES`` (default 30): the owner
+    unloading/fiddling right after the cycle (door, power, cycle knob) stamps
+    events minutes after completion and must NOT re-arm the same episode.
+    ``switch``/``samsungce.switch`` must also read ``on``. A running machine
+    (``machineState == run``) never counts. Unparseable/absent -> []."""
+    try:
+        main = status.get("components", {}).get("main", {}) if isinstance(status, dict) else {}
+        ref = _rearm_reference_utc(appliance_id)
+        if ref is None or not isinstance(main, dict):
+            return []
+        cutoff = ref + timedelta(minutes=int(config.APPLIANCE_FRESH_ARM_MIN_GAP_MINUTES))
+        ms = main.get("washerOperatingState", {}).get("machineState", {})
+        if isinstance(ms, dict) and str(ms.get("value", "")).lower() == "run":
+            return []
+        out: list[dict[str, Any]] = []
+        for cap, attr, must_be_on in _FRESH_ARM_SIGNALS:
+            a = main.get(cap, {})
+            a = a.get(attr) if isinstance(a, dict) else None
+            if not isinstance(a, dict):
+                continue
+            if must_be_on and str(a.get("value", "")).lower() != "on":
+                continue
+            ts = _parse_iso_utc(a.get("timestamp"))
+            if ts is None or ts <= cutoff:
+                continue
+            out.append({
+                "capability": cap, "attribute": attr,
+                "value": a.get("value"), "timestamp": ts.isoformat(),
+            })
+        return out
+    except Exception:  # noqa: BLE001 — evidence is best-effort, default = blocked
+        return []
+
+
+def _check_fresh_arm(appliance: dict[str, Any], client: Any) -> list[dict[str, Any]]:
+    """Latch is set and Smart Control is on: look for fresh-arm evidence; if
+    found, release the latch (the caller then arms normally). One status read."""
+    appliance_id = int(appliance["id"])
+    try:
+        status = client.get_full_status(appliance["vendor_device_id"])
+    except Exception:  # noqa: BLE001
+        return []
+    ev = fresh_arm_evidence(appliance_id, status)
+    _last_fresh_evidence[appliance_id] = ev
+    if ev:
+        db.set_appliance_rearm_block(appliance_id, False)
+        try:
+            db.log_action(
+                device="appliance", action="appliance_rearm_fresh_arm",
+                params={"appliance_id": appliance_id, "evidence": ev},
+                result="success", trigger="appliance_dispatch",
+            )
+        except Exception:  # pragma: no cover
+            pass
+        logger.info("appliance #%d: fresh-arm evidence %s — latch released", appliance_id, ev)
+    return ev
+
+
+def _maybe_notify_rearm_blocked(appliance: dict[str, Any]) -> None:
+    """Latch blocking a remote-on device for > APPLIANCE_REARM_BLOCK_NOTIFY_MINUTES:
+    one notify_risk + action_log row per episode (dedupe by blocked-since)."""
+    appliance_id = int(appliance["id"])
+    since_s = db.get_appliance_rearm_blocked_since(appliance_id)
+    since = _parse_iso_utc(since_s)
+    if since is None:
+        return
+    mins = (_now_utc() - since).total_seconds() / 60.0
+    if mins < float(config.APPLIANCE_REARM_BLOCK_NOTIFY_MINUTES):
+        return
+    key = f"appliance_rearm_blocked_{appliance_id}_{since_s}"
+    if db.is_warning_acknowledged(key):
+        return
+    name = appliance.get("name") or f"#{appliance_id}"
+    notify_risk(
+        f"{name} com Smart Control ligado mas bloqueada: desligue/ligue o Smart "
+        "Control ou mande rodar.",
+        extra={"warning_key": key, "appliance_id": appliance_id, "blocked_minutes": round(mins)},
+    )
+    db.acknowledge_warning(key)
+    try:
+        db.log_action(
+            device="appliance", action="appliance_rearm_blocked",
+            params={"appliance_id": appliance_id, "since": since_s, "minutes": round(mins)},
+            result="blocked", trigger="appliance_dispatch",
+        )
+    except Exception:  # pragma: no cover
+        pass
+
+
+def blocked_remote_on_appliances() -> list[dict[str, Any]]:
+    """Appliances whose re-arm latch is set while Smart Control reads ON
+    (last heartbeat/reconcile observation) — the 'blocked' episode the brief
+    must report instead of telling the owner to load the machine."""
+    out: list[dict[str, Any]] = []
+    try:
+        for a in db.list_appliances(enabled_only=True):
+            aid = int(a["id"])
+            if _last_remote_mode.get(aid) and db.is_appliance_rearm_blocked(aid):
+                out.append(a)
+    except Exception:  # pragma: no cover
+        return []
+    return out
+
+
 def _reconcile_one(appliance: dict[str, Any]) -> None:
     appliance_id = int(appliance["id"])
     try:
@@ -1534,12 +1701,15 @@ def _reconcile_one(appliance: dict[str, Any]) -> None:
         # A cycle already ran (or failed) on this remote-on episode and Smart
         # Control was never toggled off. Do NOT re-arm — re-running the same
         # load would be a surprise. Wait for a fresh off→on manual arm.
-        logger.info(
-            "appliance #%d: re-arm blocked — toggle Smart Control off then on "
-            "to run again (cycle already ran this episode)",
-            appliance_id,
-        )
-        return
+        if not _check_fresh_arm(appliance, client):
+            logger.info(
+                "appliance #%d: re-arm blocked — toggle Smart Control off then on "
+                "to run again (cycle already ran this episode)",
+                appliance_id,
+            )
+            _maybe_notify_rearm_blocked(appliance)
+            return
+        # #849: fresh manual arm detected (latch released) — arm normally.
     _arm_or_replan(appliance, job)
 
 

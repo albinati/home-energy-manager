@@ -1197,6 +1197,10 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE appliances ADD COLUMN "
             "rearm_block_until_off INTEGER NOT NULL DEFAULT 0"
         )
+    # #849: when the latch was set (UTC ISO) — drives the "blocked > 30 min"
+    # notification and the API's rearm_blocked_since. NULL = not blocked / legacy.
+    if "rearm_blocked_since" not in ap_cols:
+        conn.execute("ALTER TABLE appliances ADD COLUMN rearm_blocked_since TEXT")
 
     # V11-A (#194): closed-loop replay needs cloud cover at solve-time.
     # Without this column, lp_replay._reconstruct_weather passes 0.0 to
@@ -9105,11 +9109,37 @@ def set_appliance_rearm_block(appliance_id: int, blocked: bool) -> None:
     with _lock:
         conn = get_connection()
         try:
-            conn.execute(
-                "UPDATE appliances SET rearm_block_until_off = ? WHERE id = ?",
-                (1 if blocked else 0, appliance_id),
-            )
+            if blocked:
+                # Keep the ORIGINAL since-stamp if already blocked (episode start).
+                conn.execute(
+                    "UPDATE appliances SET rearm_block_until_off = 1, "
+                    "rearm_blocked_since = COALESCE(rearm_blocked_since, ?) WHERE id = ?",
+                    (datetime.now(UTC).isoformat(), appliance_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE appliances SET rearm_block_until_off = 0, "
+                    "rearm_blocked_since = NULL WHERE id = ?",
+                    (appliance_id,),
+                )
             conn.commit()
+        finally:
+            conn.close()
+
+
+def get_appliance_rearm_blocked_since(appliance_id: int) -> str | None:
+    """UTC ISO of when the re-arm latch was set (None when not blocked / legacy row)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT rearm_block_until_off, rearm_blocked_since FROM appliances WHERE id = ?",
+                (appliance_id,),
+            )
+            r = cur.fetchone()
+            if not r or not r[0]:
+                return None
+            return r[1]
         finally:
             conn.close()
 
