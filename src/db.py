@@ -1201,6 +1201,20 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     # notification and the API's rearm_blocked_since. NULL = not blocked / legacy.
     if "rearm_blocked_since" not in ap_cols:
         conn.execute("ALTER TABLE appliances ADD COLUMN rearm_blocked_since TEXT")
+    # #849 review: HEM-observed arm-signal state (survives restarts).
+    for _col in (
+        "last_switch_value", "last_switch_ts", "switch_on_ts", "switch_on_observed_at",
+        "last_remote_ts", "remote_cand_ts", "remote_cand_observed_at", "last_remote_mode",
+    ):
+        if _col not in ap_cols:
+            conn.execute(f"ALTER TABLE appliances ADD COLUMN {_col} TEXT")
+    # Legacy latched rows (pre-#849) have no since-stamp: backfill so the
+    # blocked notification / evidence reference work for them too.
+    conn.execute(
+        "UPDATE appliances SET rearm_blocked_since = ? "
+        "WHERE rearm_block_until_off = 1 AND rearm_blocked_since IS NULL",
+        (datetime.now(UTC).isoformat(),),
+    )
 
     # V11-A (#194): closed-loop replay needs cloud cover at solve-time.
     # Without this column, lp_replay._reconstruct_weather passes 0.0 to
@@ -9119,9 +9133,48 @@ def set_appliance_rearm_block(appliance_id: int, blocked: bool) -> None:
             else:
                 conn.execute(
                     "UPDATE appliances SET rearm_block_until_off = 0, "
-                    "rearm_blocked_since = NULL WHERE id = ?",
+                    "rearm_blocked_since = NULL, switch_on_ts = NULL, "
+                    "switch_on_observed_at = NULL, remote_cand_ts = NULL, "
+                    "remote_cand_observed_at = NULL WHERE id = ?",
                     (appliance_id,),
                 )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+_ARM_OBS_COLS = (
+    "last_switch_value", "last_switch_ts", "switch_on_ts", "switch_on_observed_at",
+    "last_remote_ts", "remote_cand_ts", "remote_cand_observed_at", "last_remote_mode",
+)
+
+
+def get_appliance_arm_obs(appliance_id: int) -> dict[str, Any]:
+    """HEM-observed arm-signal state for an appliance (all keys, None if unset)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                f"SELECT {', '.join(_ARM_OBS_COLS)} FROM appliances WHERE id = ?",
+                (appliance_id,),
+            )
+            r = cur.fetchone()
+            return {c: (r[i] if r else None) for i, c in enumerate(_ARM_OBS_COLS)}
+        finally:
+            conn.close()
+
+
+def set_appliance_arm_obs(appliance_id: int, **fields: Any) -> None:
+    keys = [k for k in fields if k in _ARM_OBS_COLS]
+    if not keys:
+        return
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                f"UPDATE appliances SET {', '.join(k + ' = ?' for k in keys)} WHERE id = ?",
+                [fields[k] for k in keys] + [appliance_id],
+            )
             conn.commit()
         finally:
             conn.close()

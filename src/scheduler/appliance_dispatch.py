@@ -47,6 +47,9 @@ _pat_invalid_notified: bool = False
 _last_remote_mode: dict[int, bool] = {}
 # #849: last fresh-arm evidence seen per appliance (exposed by the API).
 _last_fresh_evidence: dict[int, list[dict[str, Any]]] = {}
+# #849: on-timestamp of the fresh-arm evidence that released the latch; consumed
+# by the next arm notification (distinct "nova carga detectada" wording).
+_fresh_arm_notice: dict[int, str] = {}
 
 
 def _record_reconcile_error(appliance_id: int, err: Exception) -> None:
@@ -1297,7 +1300,13 @@ def pending_arm_change() -> bool:
     can't auto-arm a leftover Smart-Control-on state (a completed cycle the
     user never switched off would otherwise re-run). Arms that happen during
     that first ~heartbeat window are still caught by the next regular solve's
-    ``reconcile()``.
+    ``reconcile()``. While the re-arm latch is set, the latch is released after
+    a restart ONLY through the persisted fresh-arm rule (HEM-observed switch
+    off->on or a newer ``remoteControlEnabled`` timestamp, debounced, machine
+    stopped - see :func:`fresh_arm_evidence`); the first post-restart
+    observation alone never releases it. Read budget: one extra
+    ``get_full_status`` per heartbeat per appliance, ONLY while latched with
+    Smart Control on.
 
     Best-effort: never records reconcile errors, never raises. Side effects
     are limited to the last-seen cache and releasing the re-arm latch when
@@ -1328,6 +1337,7 @@ def pending_arm_change() -> bool:
             continue
         prev = _last_remote_mode.get(appliance_id)
         _last_remote_mode[appliance_id] = remote_mode
+        _persist_remote_mode(appliance_id, remote_mode)
         if not remote_mode and db.is_appliance_rearm_blocked(appliance_id):
             # Smart Control off → release the re-arm latch promptly (within one
             # heartbeat) so the user's next off→on is honoured as a fresh arm,
@@ -1505,17 +1515,10 @@ def _poll_running_jobs() -> None:
 
 # --- #849 fresh-arm evidence while the re-arm latch is set --------------------
 
-# (capability, attribute, must_be_on) — SmartThings status events that mean the
-# owner physically did something NEW to the machine (powered on, picked a
-# cycle, re-stamped the completion time, closed the door on a load).
-_FRESH_ARM_SIGNALS: tuple[tuple[str, str, bool], ...] = (
-    ("switch", "switch", True),
-    ("samsungce.switch", "switch", True),
-    ("samsungce.washerCycle", "cycleType", False),
-    ("washerCycle", "washerCycle", False),
-    ("washerOperatingState", "completionTime", False),
-    ("samsungce.doorState", "doorState", False),
-)
+def _attr(main: Any, cap: str, attr: str) -> dict[str, Any] | None:
+    c = main.get(cap) if isinstance(main, dict) else None
+    a = c.get(attr) if isinstance(c, dict) else None
+    return a if isinstance(a, dict) else None
 
 
 def _parse_iso_utc(v: Any) -> datetime | None:
@@ -1526,6 +1529,42 @@ def _parse_iso_utc(v: Any) -> datetime | None:
     except ValueError:
         return None
     return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def _main_of(status: Any) -> dict[str, Any]:
+    try:
+        m = status.get("components", {}).get("main", {}) if isinstance(status, dict) else {}
+        return m if isinstance(m, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _switch_reading(main: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Combined power switch (``switch`` + ``samsungce.switch``): any ``off`` ->
+    off (latest ts); all present ``on`` -> on (latest ts); nothing -> (None, None)."""
+    reads: list[tuple[str, datetime, str]] = []
+    for cap in ("switch", "samsungce.switch"):
+        a = _attr(main, cap, "switch")
+        if not a:
+            continue
+        v = str(a.get("value", "")).lower()
+        ts = _parse_iso_utc(a.get("timestamp"))
+        if v in ("on", "off") and ts is not None:
+            reads.append((v, ts, str(a.get("timestamp"))))
+    if not reads:
+        return None, None
+    offs = [r for r in reads if r[0] == "off"]
+    pool = offs or reads
+    best = max(pool, key=lambda r: r[1])
+    return best[0], best[2]
+
+
+def _machine_state(main: dict[str, Any]) -> tuple[str | None, datetime | None]:
+    a = _attr(main, "washerOperatingState", "machineState")
+    if not a:
+        return None, None
+    v = a.get("value")
+    return (str(v).lower() if isinstance(v, str) and v else None), _parse_iso_utc(a.get("timestamp"))
 
 
 def _rearm_reference_utc(appliance_id: int) -> datetime | None:
@@ -1549,42 +1588,117 @@ def _rearm_reference_utc(appliance_id: int) -> datetime | None:
     return ref
 
 
-def fresh_arm_evidence(appliance_id: int, status: Any) -> list[dict[str, Any]]:
-    """Events in a SmartThings ``get_full_status`` payload proving a NEW manual
-    load after the completed cycle.
+def observe_arm_signals(appliance_id: int, status: Any, now: datetime | None = None) -> None:
+    """Record, persistently, what HEM itself OBSERVES of the arm signals.
 
-    An event counts only when its own timestamp is newer than the last job's
-    end by ``APPLIANCE_FRESH_ARM_MIN_GAP_MINUTES`` (default 30): the owner
-    unloading/fiddling right after the cycle (door, power, cycle knob) stamps
-    events minutes after completion and must NOT re-arm the same episode.
-    ``switch``/``samsungce.switch`` must also read ``on``. A running machine
-    (``machineState == run``) never counts. Unparseable/absent -> []."""
+    Two signals, each needing an observed transition (a re-report of an old
+    event never counts):
+    * power switch: observed ``off`` then ``on`` -> candidate on-timestamp;
+    * ``remoteControlEnabled`` == true whose timestamp is NEWER than the last
+      remote timestamp HEM had recorded -> candidate (covers an off->on shorter
+      than one heartbeat, where the switch never read off).
+    A candidate whose timestamp changes restarts its debounce clock."""
+    now = now or _now_utc()
+    now_s = now.isoformat()
+    main = _main_of(status)
+    obs = db.get_appliance_arm_obs(appliance_id)
+    upd: dict[str, Any] = {}
+
+    sv, sts = _switch_reading(main)
+    if sv is not None:
+        if sv == "off":
+            upd.update(last_switch_value="off", last_switch_ts=sts,
+                       switch_on_ts=None, switch_on_observed_at=None)
+        else:
+            prev_v, prev_ts = obs.get("last_switch_value"), obs.get("last_switch_ts")
+            if prev_v == "off":
+                upd.update(switch_on_ts=sts, switch_on_observed_at=now_s)
+            elif prev_v == "on" and prev_ts != sts and obs.get("switch_on_ts"):
+                upd.update(switch_on_ts=sts, switch_on_observed_at=now_s)  # restart debounce
+            upd.update(last_switch_value="on", last_switch_ts=sts)
+
+    ra = _attr(main, "remoteControlStatus", "remoteControlEnabled")
+    if ra:
+        rts_s = ra.get("timestamp")
+        rts = _parse_iso_utc(rts_s)
+        rv = ra.get("value")
+        remote_on = rv is True or (isinstance(rv, str) and rv.strip().lower() == "true")
+        if rts is not None:
+            stored = _parse_iso_utc(obs.get("last_remote_ts"))
+            if stored is None:
+                upd["last_remote_ts"] = rts_s  # baseline only, can't tell new from old
+            elif rts > stored:
+                upd["last_remote_ts"] = rts_s
+                if remote_on:
+                    upd.update(remote_cand_ts=rts_s, remote_cand_observed_at=now_s)
+                else:
+                    upd.update(remote_cand_ts=None, remote_cand_observed_at=None)
+    if upd:
+        db.set_appliance_arm_obs(appliance_id, **upd)
+
+
+def fresh_arm_evidence(
+    appliance_id: int, status: Any, now: datetime | None = None
+) -> list[dict[str, Any]]:
+    """Evidence of a NEW manual load after the completed cycle (see
+    :func:`observe_arm_signals`). Evaluated against the persisted observations.
+
+    REQUIRED (either signal, all conditions):
+    * observed trigger (switch off->on, or newer ``remoteControlEnabled``
+      timestamp) whose own timestamp is after reference + MIN_GAP (60 min);
+      the reference is the later of the last job's end and the latch time
+      for the remote signal;
+    * same timestamp still current in ``status`` on an observation at least
+      DEBOUNCE (10 min) after it was first observed;
+    * ``machineState`` parseable and == ``stop`` (run/pause/missing -> none).
+    Door, completionTime and cycleType are never sufficient; a cycle
+    selection stamped at/after the trigger is recorded as supporting only.
+    Absent/unparseable -> []."""
     try:
-        main = status.get("components", {}).get("main", {}) if isinstance(status, dict) else {}
+        now = now or _now_utc()
+        main = _main_of(status)
         ref = _rearm_reference_utc(appliance_id)
-        if ref is None or not isinstance(main, dict):
+        if ref is None or not main:
             return []
-        cutoff = ref + timedelta(minutes=int(config.APPLIANCE_FRESH_ARM_MIN_GAP_MINUTES))
-        ms = main.get("washerOperatingState", {}).get("machineState", {})
-        if isinstance(ms, dict) and str(ms.get("value", "")).lower() == "run":
+        gap = timedelta(minutes=int(config.APPLIANCE_FRESH_ARM_MIN_GAP_MINUTES))
+        deb = timedelta(minutes=int(config.APPLIANCE_FRESH_ARM_DEBOUNCE_MINUTES))
+        ms, ms_ts = _machine_state(main)
+        if ms != "stop":
             return []
+        obs = db.get_appliance_arm_obs(appliance_id)
+        since = _parse_iso_utc(db.get_appliance_rearm_blocked_since(appliance_id))
         out: list[dict[str, Any]] = []
-        for cap, attr, must_be_on in _FRESH_ARM_SIGNALS:
-            a = main.get(cap, {})
-            a = a.get(attr) if isinstance(a, dict) else None
-            if not isinstance(a, dict):
-                continue
-            if must_be_on and str(a.get("value", "")).lower() != "on":
-                continue
-            ts = _parse_iso_utc(a.get("timestamp"))
-            if ts is None or ts <= cutoff:
-                continue
-            out.append({
-                "capability": cap, "attribute": attr,
-                "value": a.get("value"), "timestamp": ts.isoformat(),
-            })
+
+        # Signal A: switch off->on observed by HEM.
+        sv, sts = _switch_reading(main)
+        on_ts = _parse_iso_utc(obs.get("switch_on_ts"))
+        seen = _parse_iso_utc(obs.get("switch_on_observed_at"))
+        if (sv == "on" and on_ts and seen and sts == obs.get("switch_on_ts")
+                and on_ts > ref + gap and now - seen >= deb):
+            out.append({"signal": "switch_off_on", "role": "required",
+                        "timestamp": on_ts.isoformat(), "observed_at": seen.isoformat(),
+                        "machine_state": ms})
+        # Signal B: remoteControlEnabled re-stamped (short off->on).
+        ra = _attr(main, "remoteControlStatus", "remoteControlEnabled")
+        cand = _parse_iso_utc(obs.get("remote_cand_ts"))
+        cseen = _parse_iso_utc(obs.get("remote_cand_observed_at"))
+        if ra and cand and cseen and ra.get("timestamp") == obs.get("remote_cand_ts"):
+            rv = ra.get("value")
+            remote_on = rv is True or (isinstance(rv, str) and rv.strip().lower() == "true")
+            floor = max(ref, since) if since else ref
+            if remote_on and cand > floor + gap and now - cseen >= deb:
+                out.append({"signal": "remote_restamp", "role": "required",
+                            "timestamp": cand.isoformat(), "observed_at": cseen.isoformat(),
+                            "machine_state": ms})
+        if out:
+            trig = min(_parse_iso_utc(e["timestamp"]) for e in out)  # type: ignore[type-var]
+            ct = _attr(main, "samsungce.washerCycle", "cycleType")
+            cts = _parse_iso_utc(ct.get("timestamp")) if ct else None
+            if ct and cts and cts >= trig:
+                out.append({"signal": "cycle_selection", "role": "supporting",
+                            "value": ct.get("value"), "timestamp": cts.isoformat()})
         return out
-    except Exception:  # noqa: BLE001 — evidence is best-effort, default = blocked
+    except Exception:  # noqa: BLE001 - evidence is best-effort, default = blocked
         return []
 
 
@@ -1596,9 +1710,16 @@ def _check_fresh_arm(appliance: dict[str, Any], client: Any) -> list[dict[str, A
         status = client.get_full_status(appliance["vendor_device_id"])
     except Exception:  # noqa: BLE001
         return []
+    try:
+        observe_arm_signals(appliance_id, status)
+    except Exception:  # noqa: BLE001
+        logger.exception("appliance #%d: observe_arm_signals failed", appliance_id)
     ev = fresh_arm_evidence(appliance_id, status)
     _last_fresh_evidence[appliance_id] = ev
-    if ev:
+    ev_req = [e for e in ev if e.get("role") == "required"]
+    if ev_req:
+        _fresh_arm_notice[appliance_id] = min(ev_req, key=lambda e: e["timestamp"])["timestamp"]
+    if ev_req:
         db.set_appliance_rearm_block(appliance_id, False)
         try:
             db.log_action(
@@ -1609,7 +1730,8 @@ def _check_fresh_arm(appliance: dict[str, Any], client: Any) -> list[dict[str, A
         except Exception:  # pragma: no cover
             pass
         logger.info("appliance #%d: fresh-arm evidence %s — latch released", appliance_id, ev)
-    return ev
+        return ev
+    return []
 
 
 def _maybe_notify_rearm_blocked(appliance: dict[str, Any]) -> None:
@@ -1627,11 +1749,14 @@ def _maybe_notify_rearm_blocked(appliance: dict[str, Any]) -> None:
     if db.is_warning_acknowledged(key):
         return
     name = appliance.get("name") or f"#{appliance_id}"
-    notify_risk(
-        f"{name} com Smart Control ligado mas bloqueada: desligue/ligue o Smart "
-        "Control ou mande rodar.",
-        extra={"warning_key": key, "appliance_id": appliance_id, "blocked_minutes": round(mins)},
-    )
+    try:
+        notify_risk(
+            f"{name} com Smart Control ligado mas bloqueada: desligue/ligue o Smart "
+            "Control ou mande rodar.",
+            extra={"warning_key": key, "appliance_id": appliance_id, "blocked_minutes": round(mins)},
+        )
+    except Exception:  # noqa: BLE001 - heartbeat must never die on a notifier
+        logger.exception("appliance #%d: rearm-blocked notify failed", appliance_id)
     db.acknowledge_warning(key)
     try:
         db.log_action(
@@ -1643,6 +1768,13 @@ def _maybe_notify_rearm_blocked(appliance: dict[str, Any]) -> None:
         pass
 
 
+def _persist_remote_mode(appliance_id: int, remote_mode: bool) -> None:
+    try:
+        db.set_appliance_arm_obs(appliance_id, last_remote_mode="1" if remote_mode else "0")
+    except Exception:  # pragma: no cover - telemetry only
+        logger.debug("persist last_remote_mode failed", exc_info=True)
+
+
 def blocked_remote_on_appliances() -> list[dict[str, Any]]:
     """Appliances whose re-arm latch is set while Smart Control reads ON
     (last heartbeat/reconcile observation) — the 'blocked' episode the brief
@@ -1651,7 +1783,12 @@ def blocked_remote_on_appliances() -> list[dict[str, Any]]:
     try:
         for a in db.list_appliances(enabled_only=True):
             aid = int(a["id"])
-            if _last_remote_mode.get(aid) and db.is_appliance_rearm_blocked(aid):
+            # Persisted last-seen remote mode (survives restarts and works with
+            # MPC_EVENT_DRIVEN_ENABLED=false); the in-process cache wins if fresher.
+            remote_on = _last_remote_mode.get(aid)
+            if remote_on is None:
+                remote_on = (db.get_appliance_arm_obs(aid).get("last_remote_mode") == "1")
+            if remote_on and db.is_appliance_rearm_blocked(aid):
                 out.append(a)
     except Exception:  # pragma: no cover
         return []
@@ -1680,6 +1817,7 @@ def _reconcile_one(appliance: dict[str, Any]) -> None:
         _record_reconcile_error(appliance_id, e)
         return
     _record_reconcile_success(appliance_id)
+    _persist_remote_mode(appliance_id, remote_mode)
 
     job = db.get_active_appliance_job(appliance_id)
     job_status = job.get("status") if job else None
@@ -1872,6 +2010,18 @@ def _notify_armed(
     try:
         from ..notifier import notify_appliance_armed
         tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        on_ts = _fresh_arm_notice.pop(int(appliance["id"]), None)
+        if on_ts and not replan:
+            # #849: armed from fresh-arm evidence, not a Smart Control toggle seen live.
+            on_dt = _parse_iso_utc(on_ts)
+            if on_dt is not None:
+                notify_risk(
+                    f"Nova carga detectada (ligada {on_dt.astimezone(tz).strftime('%H:%M')}) "
+                    f"-> lavo às {start_utc.astimezone(tz).strftime('%H:%M')}; "
+                    "desligue o Smart Control para cancelar",
+                    extra={"appliance_id": int(appliance["id"]), "fresh_arm": True,
+                           "evidence_ts": on_ts},
+                )
         notify_appliance_armed(
             appliance_name=str(appliance.get("name") or "appliance"),
             planned_start_local=start_utc.astimezone(tz).strftime("%a %H:%M"),
@@ -2052,6 +2202,47 @@ def _fire_cron(job_id: int) -> None:
             f"Wash didn't fire — couldn't verify remote-start state ({e.code}).",
             extra={"job_id": int(job_id), "code": e.code},
         )
+        return
+
+    # Fire-time guard (#849): never start onto a machine that is running, whose
+    # state changed since arming (a cycle ran/started), or that is powered off.
+    abort_reason: str | None = None
+    try:
+        fstatus = client.get_full_status(appliance["vendor_device_id"])
+        fmain = _main_of(fstatus)
+        ms, ms_ts = _machine_state(fmain)
+        armed_at = _parse_iso_utc(job.get("armed_at_utc"))
+        sw, _sw_ts = _switch_reading(fmain)
+        if ms in ("run", "pause"):
+            abort_reason = f"machine_state_{ms}_at_fire"
+        elif ms_ts is not None and armed_at is not None and ms_ts > armed_at:
+            abort_reason = "machine_state_changed_since_armed"
+        elif sw == "off":
+            abort_reason = "switch_off_at_fire"
+    except Exception as e:  # noqa: BLE001 - cannot verify the drum state -> do not wash
+        abort_reason = f"fire_guard_status_failed:{type(e).__name__}"
+    if abort_reason is not None:
+        db.update_appliance_job(
+            int(job_id), status="cancelled", error_msg=abort_reason,
+            actual_start_utc=actual_start,
+        )
+        try:
+            db.log_action(
+                device="appliance", action="appliance_fire_aborted",
+                params={"job_id": int(job_id), "appliance_id": int(job["appliance_id"]),
+                        "reason": abort_reason},
+                result="aborted", trigger="appliance_dispatch",
+            )
+        except Exception:  # pragma: no cover
+            pass
+        try:
+            notify_risk(
+                f"Lavagem NAO iniciada ({abort_reason}): a máquina mudou desde o agendamento.",
+                extra={"job_id": int(job_id), "reason": abort_reason},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("appliance fire-abort notify failed")
+        logger.warning("appliance fire: job %d aborted (%s)", job_id, abort_reason)
         return
 
     try:

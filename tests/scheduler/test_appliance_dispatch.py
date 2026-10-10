@@ -795,23 +795,27 @@ def _z(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def _washer_status(done: datetime, *, switch_ts, switch_on=True, sce_ts=None,
-                   cycle_ts=None, completion_ts=None, machine="stop") -> dict:
+def _washer_status(done: datetime, *, switch=("on", None), remote_ts=None, machine="stop",
+                   machine_ts=None, sce=None, cycle_ts=None, completion_ts=None,
+                   door_ts=None) -> dict:
     """Prod shape: components.main.<cap>.<attr>.{value,timestamp}."""
     def a(v, ts):
         return {"value": v, "timestamp": _z(ts)}
     main = {
-        "switch": {"switch": a("on" if switch_on else "off", switch_ts)},
-        "washerOperatingState": {"machineState": a(machine, done)},
-        "remoteControlStatus": {"remoteControlEnabled": a("true", done)},
+        "washerOperatingState": {"machineState": a(machine, machine_ts or done)},
+        "remoteControlStatus": {"remoteControlEnabled": a("true", remote_ts or done)},
     }
-    if sce_ts:
-        main["samsungce.switch"] = {"switch": a("on", sce_ts)}
+    if switch and switch[1] is not None:
+        main["switch"] = {"switch": a(switch[0], switch[1])}
+    if sce:
+        main["samsungce.switch"] = {"switch": a(*sce)}
     if cycle_ts:
         main["samsungce.washerCycle"] = {"cycleType": a("washingOnly", cycle_ts)}
     if completion_ts:
         main["washerOperatingState"]["completionTime"] = {
             "value": _z(done + timedelta(hours=1)), "timestamp": _z(completion_ts)}
+    if door_ts:
+        main["samsungce.doorState"] = {"doorState": a("open", door_ts)}
     return {"components": {"main": main}}
 
 
@@ -833,86 +837,268 @@ def latched_after_cycle(appliance_id):
 
 
 class TestFreshArmEvidence:
-    def _seed(self, monkeypatch):
+    @pytest.fixture(autouse=True)
+    def clock(self, monkeypatch):
+        monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+        self.now = datetime.now(UTC)
+        monkeypatch.setattr(appliance_dispatch, "_now_utc", lambda: self.now)
         monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
-        now = datetime.now(UTC)
-        start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        start = self.now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
         _seed_agile_rates(start, [10.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
 
-    def test_switch_on_after_completion_arms(
-        self, monkeypatch, appliance_id, fake_scheduler, patch_st, latched_after_cycle
-    ):
-        self._seed(monkeypatch)
-        done = latched_after_cycle
-        # prod: unloading noise right after the cycle + owner powers on 13 h later
-        patch_st.get_full_status = MagicMock(return_value=_washer_status(
-            done, switch_ts=done + timedelta(hours=13),
-            sce_ts=done + timedelta(minutes=9), cycle_ts=done + timedelta(minutes=10),
-            completion_ts=done + timedelta(hours=13)))
+    def _step(self, patch_st, status, minutes=0):
+        self.now += timedelta(minutes=minutes)
+        patch_st.get_full_status = MagicMock(return_value=status)
         appliance_dispatch.reconcile()
-        assert db.is_appliance_rearm_blocked(appliance_id) is False
+
+    def _blocked(self, appliance_id):
+        return db.is_appliance_rearm_blocked(appliance_id)
+
+    # --- never sufficient alone -------------------------------------------
+    def test_door_only_with_switch_off_blocked(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    ):
+        d = latched_after_cycle
+        for m in (0, 15):
+            self._step(patch_st, _washer_status(
+                d, switch=("off", d + timedelta(hours=1)), door_ts=d + timedelta(hours=12)), m)
+        assert self._blocked(appliance_id) and db.get_active_appliance_job(appliance_id) is None
+
+    def test_completion_time_only_blocked(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    ):
+        d = latched_after_cycle
+        for m in (0, 15):
+            self._step(patch_st, _washer_status(
+                d, switch=("on", d - timedelta(hours=1)), completion_ts=d + timedelta(hours=12)), m)
+        assert self._blocked(appliance_id)
+
+    def test_cycle_type_only_after_gap_blocked(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    ):
+        d = latched_after_cycle
+        for m in (0, 15):
+            self._step(patch_st, _washer_status(
+                d, switch=("on", d - timedelta(hours=1)), cycle_ts=d + timedelta(hours=12)), m)
+        assert self._blocked(appliance_id)
+
+    def test_switch_off_with_other_fresh_signals_blocked(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    ):
+        d = latched_after_cycle
+        st = _washer_status(d, switch=("off", d + timedelta(hours=12)),
+                            cycle_ts=d + timedelta(hours=12), completion_ts=d + timedelta(hours=12),
+                            door_ts=d + timedelta(hours=12))
+        for m in (0, 15):
+            self._step(patch_st, st, m)
+        assert self._blocked(appliance_id)
+
+    def test_pause_blocks_even_with_switch_transition(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    ):
+        d = latched_after_cycle
+        self._step(patch_st, _washer_status(d, switch=("off", d + timedelta(hours=1))))
+        on = d + timedelta(hours=12)
+        for m in (1, 15):
+            self._step(patch_st, _washer_status(d, switch=("on", on), machine="pause"), m)
+        assert self._blocked(appliance_id)
+
+    def test_switch_on_within_gap_blocked(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    ):
+        d = latched_after_cycle
+        self._step(patch_st, _washer_status(d, switch=("off", d + timedelta(minutes=10))))
+        on = d + timedelta(minutes=45)  # gap is 60
+        for m in (1, 15):
+            self._step(patch_st, _washer_status(d, switch=("on", on)), m)
+        assert self._blocked(appliance_id)
+
+    # --- positive ---------------------------------------------------------
+    def test_off_on_observed_debounced_stop_arms(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    ):
+        d = latched_after_cycle
+        self._step(patch_st, _washer_status(d, switch=("off", d + timedelta(hours=1))))
+        on = d + timedelta(hours=13)
+        self._step(patch_st, _washer_status(d, switch=("on", on)), 1)   # transition seen
+        assert self._blocked(appliance_id)                              # debounce not met
+        self._step(patch_st, _washer_status(
+            d, switch=("on", on), cycle_ts=on + timedelta(seconds=30)), 12)
+        assert not self._blocked(appliance_id)
+        assert db.get_active_appliance_job(appliance_id) is not None
+        ev = appliance_dispatch._last_fresh_evidence[appliance_id]
+        assert {e["signal"] for e in ev} == {"switch_off_on", "cycle_selection"}
+
+    def test_on_timestamp_change_restarts_debounce(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    ):
+        d = latched_after_cycle
+        self._step(patch_st, _washer_status(d, switch=("off", d + timedelta(hours=1))))
+        on1, on2 = d + timedelta(hours=12), d + timedelta(hours=12, minutes=8)
+        self._step(patch_st, _washer_status(d, switch=("on", on1)), 1)
+        self._step(patch_st, _washer_status(d, switch=("on", on2)), 9)   # restamped
+        self._step(patch_st, _washer_status(d, switch=("on", on2)), 5)   # only 5 min on on2
+        assert self._blocked(appliance_id)
+        self._step(patch_st, _washer_status(d, switch=("on", on2)), 6)   # 11 min
+        assert not self._blocked(appliance_id)
+
+    def test_prod_shape_short_remote_toggle_arms_after_debounce(
+        self, appliance_id, fake_scheduler, patch_st
+    ):
+        """2026-10-10: remote re-stamped 07:54:41Z, switch untouched since 21:14Z the day
+        before, machineState stop @07:14Z the day before, latch since 07:14Z."""
+        base = self.now.replace(hour=7, minute=54, second=41, microsecond=0)
+        self.now = base
+        prev = base - timedelta(days=1)
+        done = prev.replace(hour=7, minute=14, second=0)
+        jid = db.create_appliance_job(
+            appliance_id=appliance_id, status="completed", armed_at_utc=_z(done - timedelta(hours=3)),
+            deadline_utc=_z(done + timedelta(hours=1)), duration_minutes=120,
+            planned_start_utc=_z(done - timedelta(hours=2)), planned_end_utc=_z(done),
+            avg_price_pence=5.0, last_replan_at_utc=_z(done - timedelta(hours=3)))
+        db.update_appliance_job(jid, completed_at_utc=_z(done))
+        db.set_appliance_rearm_block(appliance_id, True)
+        with db._lock:
+            c = db.get_connection()
+            c.execute("UPDATE appliances SET rearm_blocked_since=? WHERE id=?", (_z(done), appliance_id))
+            c.commit(); c.close()
+        sw = ("on", prev.replace(hour=21, minute=14, second=0))
+        # earlier heartbeat recorded the old (17:29:56 re-stamp) remote timestamp
+        self.now = base - timedelta(hours=3)
+        self._step(patch_st, _washer_status(done, switch=sw, machine_ts=done,
+                                            remote_ts=prev.replace(hour=17, minute=29, second=56)))
+        self.now = base + timedelta(minutes=1)
+        self._step(patch_st, _washer_status(done, switch=sw, machine_ts=done, remote_ts=base))
+        assert self._blocked(appliance_id)          # seen once, debounce not met
+        self._step(patch_st, _washer_status(done, switch=sw, machine_ts=done, remote_ts=base), 11)
+        assert not self._blocked(appliance_id)
         assert db.get_active_appliance_job(appliance_id) is not None
 
-    def test_only_old_timestamps_stays_blocked(
-        self, monkeypatch, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    def test_old_remote_rereport_never_counts(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
     ):
-        self._seed(monkeypatch)
-        done = latched_after_cycle
-        # all events within the 30-min post-cycle gap (unloading) or before it
-        patch_st.get_full_status = MagicMock(return_value=_washer_status(
-            done, switch_ts=done - timedelta(hours=2),
-            sce_ts=done + timedelta(minutes=9), cycle_ts=done + timedelta(minutes=10),
-            completion_ts=done + timedelta(minutes=29)))
-        appliance_dispatch.reconcile()
-        assert db.is_appliance_rearm_blocked(appliance_id) is True
-        assert db.get_active_appliance_job(appliance_id) is None
+        d = latched_after_cycle
+        old = d + timedelta(hours=12)
+        for m in (0, 15, 15):
+            self._step(patch_st, _washer_status(d, switch=("on", d - timedelta(hours=1)),
+                                                remote_ts=old), m)
+        assert self._blocked(appliance_id)   # first sight is baseline only
 
-    def test_switch_off_or_running_does_not_count(self, appliance_id, latched_after_cycle):
-        done = latched_after_cycle
-        late = done + timedelta(hours=5)
-        assert appliance_dispatch.fresh_arm_evidence(
-            appliance_id, _washer_status(done, switch_ts=late, switch_on=False)) == []
-        assert appliance_dispatch.fresh_arm_evidence(
-            appliance_id, _washer_status(done, switch_ts=late, machine="run")) == []
-        assert appliance_dispatch.fresh_arm_evidence(appliance_id, MagicMock()) == []
+    def test_reference_from_failed_job_updated_at(self, appliance_id):
+        jid = db.create_appliance_job(
+            appliance_id=appliance_id, status="failed", armed_at_utc=_z(self.now - timedelta(hours=9)),
+            deadline_utc=_z(self.now), duration_minutes=120,
+            planned_start_utc=_z(self.now - timedelta(hours=5)),
+            planned_end_utc=_z(self.now - timedelta(hours=3)), avg_price_pence=5.0,
+            last_replan_at_utc=_z(self.now - timedelta(hours=9)))
+        with db._lock:
+            c = db.get_connection()
+            c.execute("UPDATE appliance_jobs SET updated_at=?, completed_at_utc=NULL WHERE id=?",
+                      (_z(self.now - timedelta(hours=4)), jid))
+            c.commit(); c.close()
+        ref = appliance_dispatch._rearm_reference_utc(appliance_id)
+        assert abs((ref - (self.now - timedelta(hours=4))).total_seconds()) < 2
+
+    # --- fire-time guard --------------------------------------------------
+    def _fire_job(self, appliance_id, patch_st, status):
+        armed = self.now - timedelta(hours=2)
+        jid = db.create_appliance_job(
+            appliance_id=appliance_id, status="scheduled", armed_at_utc=_z(armed),
+            deadline_utc=_z(self.now + timedelta(hours=5)), duration_minutes=120,
+            planned_start_utc=_z(self.now), planned_end_utc=_z(self.now + timedelta(hours=2)),
+            avg_price_pence=5.0, last_replan_at_utc=_z(armed))
+        patch_st.get_remote_control_enabled.return_value = True
+        patch_st.get_full_status = MagicMock(return_value=status)
+        with patch.object(appliance_dispatch, "notify_risk") as nr:
+            appliance_dispatch._fire_cron(jid)
+        return jid, nr
+
+    def test_fire_machine_state_after_armed_aborts(self, appliance_id, patch_st):
+        d = self.now - timedelta(hours=1)  # state stamped AFTER armed_at (-2h)
+        jid, nr = self._fire_job(appliance_id, patch_st, _washer_status(d, switch=("on", d)))
+        patch_st.start_cycle.assert_not_called()
+        job = db.get_appliance_job(jid)
+        assert job["status"] == "cancelled" and "since_armed" in job["error_msg"]
+        assert nr.call_count == 1
+        assert not db.is_appliance_rearm_blocked(appliance_id)
+
+    @pytest.mark.parametrize("machine,sw", [("run", "on"), ("pause", "on"), ("stop", "off")])
+    def test_fire_abort_run_pause_switch_off(self, appliance_id, patch_st, machine, sw):
+        old = self.now - timedelta(hours=10)
+        jid, nr = self._fire_job(appliance_id, patch_st, _washer_status(
+            old, switch=(sw, old), machine=machine))
+        patch_st.start_cycle.assert_not_called()
+        assert db.get_appliance_job(jid)["status"] == "cancelled"
+
+    def test_fire_clean_machine_starts(self, appliance_id, patch_st):
+        old = self.now - timedelta(hours=10)
+        jid, _ = self._fire_job(appliance_id, patch_st, _washer_status(old, switch=("on", old)))
+        patch_st.start_cycle.assert_called_once()
+
+    # --- latch backfill, notify, brief, api --------------------------------
+    def test_legacy_latched_row_backfilled_and_notifies(self, appliance_id):
+        with db._lock:
+            c = db.get_connection()
+            c.execute("UPDATE appliances SET rearm_block_until_off=1, rearm_blocked_since=NULL")
+            c.commit()
+            db._migrate_schema(c)
+            row = c.execute("SELECT rearm_blocked_since FROM appliances WHERE id=?",
+                            (appliance_id,)).fetchone()
+            c.close()
+        assert row[0]
+        with db._lock:
+            c = db.get_connection()
+            c.execute("UPDATE appliances SET rearm_blocked_since=? WHERE id=?",
+                      (_z(self.now - timedelta(minutes=45)), appliance_id))
+            c.commit(); c.close()
+        with patch.object(appliance_dispatch, "notify_risk") as nr:
+            appliance_dispatch._maybe_notify_rearm_blocked(db.get_appliance(appliance_id))
+            appliance_dispatch._maybe_notify_rearm_blocked(db.get_appliance(appliance_id))
+        assert nr.call_count == 1
+
+    def test_notify_failure_does_not_raise(self, appliance_id, latched_after_cycle):
+        with db._lock:
+            c = db.get_connection()
+            c.execute("UPDATE appliances SET rearm_blocked_since=? WHERE id=?",
+                      (_z(self.now - timedelta(minutes=45)), appliance_id))
+            c.commit(); c.close()
+        with patch.object(appliance_dispatch, "notify_risk", side_effect=RuntimeError("x")):
+            appliance_dispatch._maybe_notify_rearm_blocked(db.get_appliance(appliance_id))
+
+    def test_distinct_notify_on_fresh_arm(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    ):
+        d = latched_after_cycle
+        self._step(patch_st, _washer_status(d, switch=("off", d + timedelta(hours=1))))
+        on = d + timedelta(hours=13)
+        self._step(patch_st, _washer_status(d, switch=("on", on)), 1)
+        with patch.object(appliance_dispatch, "notify_risk") as nr:
+            self._step(patch_st, _washer_status(d, switch=("on", on)), 12)
+        assert any("Nova carga detectada" in str(c.args[0]) for c in nr.call_args_list)
 
     def test_heartbeat_fires_solve_on_evidence(
         self, appliance_id, patch_st, latched_after_cycle
     ):
-        done = latched_after_cycle
-        patch_st.get_full_status = MagicMock(return_value=_washer_status(
-            done, switch_ts=done + timedelta(hours=13)))
+        d = latched_after_cycle
         appliance_dispatch._last_remote_mode[appliance_id] = True
+        on = d + timedelta(hours=13)
+        for status, m in ((_washer_status(d, switch=("off", d + timedelta(hours=1))), 0),
+                          (_washer_status(d, switch=("on", on)), 1)):
+            self.now += timedelta(minutes=m)
+            patch_st.get_full_status = MagicMock(return_value=status)
+            assert appliance_dispatch.pending_arm_change() is False
+        self.now += timedelta(minutes=11)
+        patch_st.get_full_status = MagicMock(return_value=_washer_status(d, switch=("on", on)))
         assert appliance_dispatch.pending_arm_change() is True
-        assert db.is_appliance_rearm_blocked(appliance_id) is False
+        assert not self._blocked(appliance_id)
 
-    def test_notify_once_after_threshold(
-        self, appliance_id, patch_st, latched_after_cycle
-    ):
-        done = latched_after_cycle
-        patch_st.get_full_status = MagicMock(return_value=_washer_status(
-            done, switch_ts=done - timedelta(hours=1)))
-        appliance = db.get_appliance(appliance_id) if hasattr(db, "get_appliance") \
-            else db.list_appliances()[0]
-        with patch.object(appliance_dispatch, "notify_risk") as nr:
-            appliance_dispatch._maybe_notify_rearm_blocked(appliance)  # just latched
-            assert nr.call_count == 0
-            with db._lock:
-                conn = db.get_connection()
-                conn.execute(
-                    "UPDATE appliances SET rearm_blocked_since = ? WHERE id = ?",
-                    (_z(datetime.now(UTC) - timedelta(minutes=45)), appliance_id))
-                conn.commit()
-                conn.close()
-            appliance_dispatch._maybe_notify_rearm_blocked(appliance)
-            appliance_dispatch._maybe_notify_rearm_blocked(appliance)
-            assert nr.call_count == 1
-
-    def test_brief_says_blocked_not_load(self, appliance_id, latched_after_cycle):
+    def test_brief_blocked_after_restart(self, appliance_id, patch_st, latched_after_cycle):
         from zoneinfo import ZoneInfo
 
         from src.analytics import daily_brief
-        appliance_dispatch._last_remote_mode[appliance_id] = True
+        patch_st.get_remote_control_enabled.return_value = True
+        appliance_dispatch.pending_arm_change()          # persists remote mode
+        appliance_dispatch._last_remote_mode.clear()     # simulated restart
         line = daily_brief._appliance_window_suggestion_line(ZoneInfo("Europe/London"))
         assert line and "bloqueada" in line and "carregue" not in line
 

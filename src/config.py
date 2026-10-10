@@ -619,7 +619,11 @@ class Config:
     # end by at least this many minutes (post-cycle unloading noise must not
     # re-arm the same episode).
     APPLIANCE_FRESH_ARM_MIN_GAP_MINUTES: int = int(
-        os.getenv("APPLIANCE_FRESH_ARM_MIN_GAP_MINUTES", "30")
+        os.getenv("APPLIANCE_FRESH_ARM_MIN_GAP_MINUTES", "60")
+    )
+    # #849 - the arm signal must still read the same after this many minutes.
+    APPLIANCE_FRESH_ARM_DEBOUNCE_MINUTES: int = int(
+        os.getenv("APPLIANCE_FRESH_ARM_DEBOUNCE_MINUTES", "10")
     )
     # #849 — latch blocking a remote-on appliance for longer than this → one
     # notify_risk per episode.
