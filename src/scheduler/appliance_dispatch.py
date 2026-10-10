@@ -141,6 +141,31 @@ def _ceil_to_half_hour_utc(dt: datetime) -> datetime:
 # Cheapest-window picker
 # ---------------------------------------------------------------------------
 
+class MarginalCostMap(dict):
+    """``{slot_start_utc: pence_per_slot}`` plus ``peak_slots`` (#853): slot
+    starts priced in the PEAK band, where a grid-priced run is never allowed
+    (household policy #806)."""
+
+    peak_slots: frozenset = frozenset()
+
+
+def _peak_slot_set(import_by_start: dict[datetime, float]) -> frozenset:
+    try:
+        from ..energy import tariff_structure as _ts
+        st = _ts.detect(list(import_by_start.values()), dynamic_rule="lp")
+        if st.is_banded:
+            return frozenset(t for t, p in import_by_start.items() if st.band_of(p) == "peak")
+        if st.peak_thr and st.peak_thr > 0:
+            return frozenset(t for t, p in import_by_start.items() if p >= st.peak_thr)
+    except Exception as e:  # noqa: BLE001 - never break dispatch
+        logger.warning("appliance: peak-slot detection failed: %s", e)
+    return frozenset()
+
+
+def _overlaps_peak(peak_slots: frozenset, start: datetime, n_slots: int) -> bool:
+    return any((start + timedelta(minutes=30 * k)) in peak_slots for k in range(n_slots))
+
+
 def build_marginal_cost_per_slot(
     earliest_start_utc: datetime,
     deadline_utc: datetime,
@@ -232,7 +257,8 @@ def build_marginal_cost_per_slot(
 
     washer_kwh_per_slot = float(appliance_kw) * 0.5
 
-    out: dict[datetime, float] = {}
+    out = MarginalCostMap()
+    out.peak_slots = _peak_slot_set(import_by_start)
     tz_name = config.BULLETPROOF_TIMEZONE
     from zoneinfo import ZoneInfo
     tz = ZoneInfo(tz_name)
@@ -658,30 +684,38 @@ def find_battery_aware_window(
     candidates.sort(key=lambda c: (c[0], c[3], c[1]))
     cheapest = candidates[0]
     chosen_price, chosen_start, chosen_end, used_bat = cheapest
+    cycle_slots = duration / 30.0  # actual cycle length in slots (partial last slot pro-rated)
     if tol > 0 and cheapest[0] != float("inf"):
         # #853 — EARLIEST start whose total cycle cost is within tolerance of
         # the cheapest. Total = effective (pence per slot, see
-        # build_marginal_cost_per_slot) x slots.
-        min_total = cheapest[0] * n_slots
-        by_start = sorted(candidates, key=lambda c: c[1])
-        within = [c for c in by_start if c[0] * n_slots <= min_total + tol]
-        pick = within[0]
+        # build_marginal_cost_per_slot) x cycle length in slots.
+        peak_slots = getattr(marginal_cost_per_slot, "peak_slots", frozenset())
+
+        def _peak(c: tuple) -> bool:
+            return (not c[3]) and _overlaps_peak(peak_slots, c[1], n_slots)
+
+        # A grid-priced run never enters the PEAK band unless the cheapest does too.
+        allow_peak = _peak(cheapest)
+        pool = [c for c in sorted(candidates, key=lambda c: c[1]) if allow_peak or not _peak(c)]
+        min_total = cheapest[0] * cycle_slots
+        within = [c for c in pool if c[0] * cycle_slots <= min_total + tol]
+        pick = within[0] if within else cheapest
         max_delay_h = float(getattr(config, "APPLIANCE_MAX_DELAY_HOURS", 0.0) or 0.0)
         if max_delay_h > 0 and pick[1] > earliest_start_utc + timedelta(hours=max_delay_h):
             near = [
-                c for c in by_start
+                c for c in pool
                 if c[1] <= earliest_start_utc + timedelta(hours=max_delay_h)
-                and c[0] * n_slots <= min_total + 3 * tol
+                and c[0] * cycle_slots <= min_total + 3 * tol
             ]
             if near:
-                pick = near[0]
+                pick = min(near, key=lambda c: (c[0], c[1]))
         chosen_price, chosen_start, chosen_end, used_bat = pick
     _inf = float("inf")
     _choice = {
         "chosen_start": chosen_start.isoformat(),
-        "chosen_total_p": round(chosen_price * n_slots, 2) if chosen_price != _inf else None,
+        "chosen_total_p": round(chosen_price * cycle_slots, 2) if chosen_price != _inf else None,
         "cheapest_start": cheapest[1].isoformat(),
-        "cheapest_total_p": round(cheapest[0] * n_slots, 2) if cheapest[0] != _inf else None,
+        "cheapest_total_p": round(cheapest[0] * cycle_slots, 2) if cheapest[0] != _inf else None,
         "tolerance_p": tol,
         "battery": bool(used_bat),
     }
@@ -895,14 +929,20 @@ def _cheapest_from_marginal_cost(
 ) -> tuple[datetime, datetime, float] | None:
     """Sliding-window minimum on the marginal-cost map. Returns ``None`` when
     no contiguous window of ``duration_minutes`` fits before ``deadline_utc``."""
-    n_slots = max(1, duration_minutes // 30)
+    tol = max(0.0, float(getattr(config, "APPLIANCE_EARLY_START_TOLERANCE_PENCE", 0.0) or 0.0))
+    # Legacy (tol 0) keeps the floor slot count; the tolerance path prices the
+    # whole cycle (ceil slots, partial last slot pro-rated).
+    n_slots = max(1, (duration_minutes + 29) // 30) if tol > 0 else max(1, duration_minutes // 30)
+    frac_last = (duration_minutes / 30.0) - (n_slots - 1) if tol > 0 else 1.0
+    frac_last = min(1.0, max(0.0, frac_last))
     starts = sorted(s for s in marginal_cost_per_slot if s >= earliest_start_utc)
     if len(starts) < n_slots:
         return None
+    peak_slots = getattr(marginal_cost_per_slot, "peak_slots", frozenset())
 
     best_total: float | None = None
     best_start: datetime | None = None
-    wins: list[tuple[datetime, float]] = []
+    wins: list[tuple[datetime, float, bool]] = []
     for i in range(len(starts) - n_slots + 1):
         window = starts[i : i + n_slots]
         # Contiguity check
@@ -915,16 +955,20 @@ def _cheapest_from_marginal_cost(
         end_utc = window[-1] + timedelta(minutes=30)
         if end_utc > deadline_utc:
             continue
-        total = sum(marginal_cost_per_slot[s] for s in window)
-        wins.append((window[0], total))
+        total = sum(marginal_cost_per_slot[s] for s in window[:-1]) \
+            + frac_last * marginal_cost_per_slot[window[-1]]
+        wins.append((window[0], total, any(s in peak_slots for s in window)))
         if best_total is None or total < best_total:
             best_total = total
             best_start = window[0]
 
-    # #853 — earliest window within the cost tolerance of the cheapest.
-    tol = max(0.0, float(getattr(config, "APPLIANCE_EARLY_START_TOLERANCE_PENCE", 0.0) or 0.0))
+    # #853 — earliest window within the cost tolerance of the cheapest, never
+    # into the PEAK band unless the cheapest window is itself in it.
     if tol > 0 and best_total is not None:
-        for w_start, w_total in wins:  # `starts` is sorted -> earliest first
+        cheapest_peak = next(pk for st, t, pk in wins if st == best_start)
+        for w_start, w_total, w_peak in wins:  # `starts` sorted -> earliest first
+            if w_peak and not cheapest_peak:
+                continue
             if w_total <= best_total + tol:
                 best_start, best_total = w_start, w_total
                 break
@@ -1994,6 +2038,7 @@ def _arm_or_replan(
             min(marginal.values()), max(marginal.values()),
         )
 
+    _window_choice.pop(appliance_id, None)  # no stale trade-off from an earlier pick
     try:
         # PR K3 — battery-aware picker. Looks up the LP's predicted SoC
         # trajectory and picks the EARLIEST window the battery can safely
@@ -2079,7 +2124,8 @@ def _tradeoff_text(choice: dict[str, Any] | None, tz: Any) -> str | None:
     saving = max(0.0, float(c_tot) - float(k_tot))
     chosen = _parse_iso(choice["chosen_start"]).astimezone(tz).strftime("%H:%M")
     cheapest = _parse_iso(choice["cheapest_start"]).astimezone(tz).strftime("%H:%M")
-    return f"lavo às {chosen} — esperar até {cheapest} economizaria {saving:.0f}p"
+    amount = "≈0p" if saving < 0.5 else f"{saving:.0f}p"
+    return f"rodo às {chosen} — esperar até {cheapest} economizaria {amount}"
 
 
 def _notify_armed(

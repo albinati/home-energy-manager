@@ -53,14 +53,14 @@ def test_todays_case_picks_earliest_within_tolerance(monkeypatch):
     assert choice["cheapest_start"] != choice["chosen_start"]
     assert 0 < choice["chosen_total_p"] - choice["cheapest_total_p"] <= 10
     txt = ad._tradeoff_text(choice, ad.ZoneInfo("Europe/London"))
-    assert txt.startswith("lavo às 09:30") and "esperar até" in txt and "economizaria" in txt
+    assert txt.startswith("rodo às 09:30") and "esperar até" in txt and "economizaria" in txt
 
 
 def test_tolerance_zero_is_legacy_cheapest(monkeypatch):
     m = _today_marginal()
     (start, _e, _p), _ = _run(m, 0.0, monkeypatch)
-    assert start == min(m, key=lambda s: (m[s], s)) or m[start] == min(m.values())
-    assert start > BASE + timedelta(hours=8)
+    # 163 min -> 6 slots; cheapest 6-slot sum starts 22:00 local = 21:00Z
+    assert start == datetime(2026, 10, 10, 21, 0, tzinfo=UTC)  # 22:00 local, as in prod
 
 
 def test_waits_for_cheap_band_when_saving_exceeds_tolerance(monkeypatch):
@@ -90,7 +90,7 @@ def test_max_delay_hours_caps_wait(monkeypatch):
     import sqlite3
     c = sqlite3.connect(config.DB_PATH); c.execute("DELETE FROM lp_solution_snapshot"); c.commit(); c.close()
     (capped, _e, _p), _ = _run(dict(m), 2.0, monkeypatch, dur=180, hours=23, aid=aid)
-    assert capped == BASE  # within 3x tolerance (6p) -> capped wait
+    assert capped == BASE + timedelta(hours=2)  # cheapest window inside the cap
 
 
 def test_arm_notification_carries_tradeoff():
@@ -107,3 +107,52 @@ def test_arm_notification_carries_tradeoff():
     args, kwargs = d.call_args
     assert "esperar até 22:00 economizaria 2p" in args[1]
     assert kwargs["extra"]["tradeoff"]
+
+
+def _peak_map():
+    m = ad.MarginalCostMap()
+    base = datetime(2026, 10, 10, 13, 0, tzinfo=UTC)  # 14:00 local
+    peaks = set()
+    for i in range(0, 36):
+        s = base + timedelta(minutes=30 * i)
+        lh = ((s.hour + 1) % 24) + s.minute / 60
+        if 16 <= lh < 19:
+            m[s] = 0.1635 * 38.17
+            peaks.add(s)
+        elif lh >= 22 or lh < 7:
+            m[s] = 0.1635 * 12.49
+        else:
+            m[s] = 0.1635 * 25.45
+    m.peak_slots = frozenset(peaks)
+    return base, m
+
+
+def test_grid_run_never_enters_peak_within_tolerance(monkeypatch):
+    base, m = _peak_map()
+    monkeypatch.setattr(config, "APPLIANCE_EARLY_START_TOLERANCE_PENCE", 10.0, raising=False)
+    aid = _seed_appliance(typical_kw=0.327)
+    _seed_lp_trajectory(sorted(m), [0.5] * len(m))  # battery cannot cover
+    monkeypatch.setattr(ad, "_now_utc", lambda: base - timedelta(minutes=30))
+    start, _end, _p = ad.find_battery_aware_window(
+        earliest_start_utc=base, deadline_utc=base + timedelta(hours=17),
+        duration_minutes=163, appliance_id=aid, typical_kw=0.327,
+        marginal_cost_per_slot=m,
+    )
+    assert start != base
+    assert not any(s in m.peak_slots for s in (start + timedelta(minutes=30 * k) for k in range(6)))
+    s2, _e2, _p2 = ad._cheapest_from_marginal_cost(m, base, base + timedelta(hours=17), 163)
+    assert not any(s in m.peak_slots for s in (s2 + timedelta(minutes=30 * k) for k in range(6)))
+
+
+def test_battery_covered_run_may_overlap_peak(monkeypatch):
+    base, m = _peak_map()
+    monkeypatch.setattr(config, "APPLIANCE_EARLY_START_TOLERANCE_PENCE", 10.0, raising=False)
+    aid = _seed_appliance(typical_kw=0.327)
+    _seed_lp_trajectory(sorted(m), [9.0] * len(m))  # battery covers everything
+    monkeypatch.setattr(ad, "_now_utc", lambda: base - timedelta(minutes=30))
+    start, _e, _p = ad.find_battery_aware_window(
+        earliest_start_utc=base, deadline_utc=base + timedelta(hours=17),
+        duration_minutes=163, appliance_id=aid, typical_kw=0.327,
+        marginal_cost_per_slot=m,
+    )
+    assert start == base
