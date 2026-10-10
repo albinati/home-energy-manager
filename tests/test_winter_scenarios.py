@@ -364,6 +364,7 @@ def test_w8_appliance_picker_falls_back_in_low_soc_winter(monkeypatch):
     Battery-aware picker can't justify battery use → falls back to
     grid-cheapest. That picker picks overnight cheap slot. CORRECT."""
     from src.scheduler import appliance_dispatch as ad
+    monkeypatch.setattr(config, "APPLIANCE_EARLY_START_TOLERANCE_PENCE", 0.0, raising=False)  # legacy
 
     aid = _db.add_appliance(
         vendor="smartthings", vendor_device_id="washer-winter",

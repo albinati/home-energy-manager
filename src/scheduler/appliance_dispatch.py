@@ -50,6 +50,8 @@ _last_fresh_evidence: dict[int, list[dict[str, Any]]] = {}
 # #849: on-timestamp of the fresh-arm evidence that released the latch; consumed
 # by the next arm notification (distinct "nova carga detectada" wording).
 _fresh_arm_notice: dict[int, str] = {}
+# #853: last window-choice trade-off per appliance, consumed by the arm notification.
+_window_choice: dict[int, dict[str, Any]] = {}
 
 
 def _record_reconcile_error(appliance_id: int, err: Exception) -> None:
@@ -160,6 +162,15 @@ def build_marginal_cost_per_slot(
         else:
             cost = (washer_kwh - residual_pv) × import_rate
                  + residual_pv × export_rate
+
+    **Units (#853 review).** The values are PENCE PER 30-MIN SLOT of the
+    appliance's OWN energy (``appliance_kw x 0.5`` kWh x p/kWh), NOT p/kWh and
+    not the tariff. E.g. a 0.327 kW cycle -> 0.164 kWh/slot, so 12.49 p cheap
+    band -> 2.04, 25.45 -> 4.15, 38.17 -> 6.25. Downstream
+    (``_avg_marginal_cost_over_window``, the "avg_price" logged / notified) the
+    figure is therefore pence per slot; a whole cycle costs ~ that x slots.
+    Ranking is unaffected (all candidates share the scale); totals must multiply
+    by the slot count. It is not a battery shadow price.
 
     Returns ``None`` when forecasts are unavailable (caller falls back to the
     legacy import-only path). Forecast inputs:
@@ -500,6 +511,14 @@ def find_battery_aware_window(
     Lowest effective cost wins; tiebreak by EARLIEST start (user
     convenience — finish the wash earlier when it's cost-neutral).
 
+    **#853 earliest-within-tolerance.** With
+    ``APPLIANCE_EARLY_START_TOLERANCE_PENCE`` > 0 (default 10) the picker
+    instead chooses the EARLIEST candidate whose TOTAL cycle cost
+    (effective x slots, pence) is within the tolerance of the cheapest one
+    (optionally capped by ``APPLIANCE_MAX_DELAY_HOURS``). Tolerance 0 keeps
+    the legacy ordering bit-for-bit. The trade-off is logged as
+    ``appliance_window_choice`` and shown in the arm notification.
+
     Coordination with the LP is implicit: when this window is committed
     to ``appliance_jobs``, the next LP solve reads it back via
     :func:`appliance_load_profile_kw` and routes the load through
@@ -635,8 +654,46 @@ def find_battery_aware_window(
     # K3.1 — Tiebreak order: (1) lowest effective price, (2) prefer
     # GRID over battery when tied (avoids unnecessary round-trip loss),
     # (3) earliest start for user convenience.
+    tol = max(0.0, float(getattr(config, "APPLIANCE_EARLY_START_TOLERANCE_PENCE", 0.0) or 0.0))
     candidates.sort(key=lambda c: (c[0], c[3], c[1]))
-    chosen_price, chosen_start, chosen_end, used_bat = candidates[0]
+    cheapest = candidates[0]
+    chosen_price, chosen_start, chosen_end, used_bat = cheapest
+    if tol > 0 and cheapest[0] != float("inf"):
+        # #853 — EARLIEST start whose total cycle cost is within tolerance of
+        # the cheapest. Total = effective (pence per slot, see
+        # build_marginal_cost_per_slot) x slots.
+        min_total = cheapest[0] * n_slots
+        by_start = sorted(candidates, key=lambda c: c[1])
+        within = [c for c in by_start if c[0] * n_slots <= min_total + tol]
+        pick = within[0]
+        max_delay_h = float(getattr(config, "APPLIANCE_MAX_DELAY_HOURS", 0.0) or 0.0)
+        if max_delay_h > 0 and pick[1] > earliest_start_utc + timedelta(hours=max_delay_h):
+            near = [
+                c for c in by_start
+                if c[1] <= earliest_start_utc + timedelta(hours=max_delay_h)
+                and c[0] * n_slots <= min_total + 3 * tol
+            ]
+            if near:
+                pick = near[0]
+        chosen_price, chosen_start, chosen_end, used_bat = pick
+    _inf = float("inf")
+    _choice = {
+        "chosen_start": chosen_start.isoformat(),
+        "chosen_total_p": round(chosen_price * n_slots, 2) if chosen_price != _inf else None,
+        "cheapest_start": cheapest[1].isoformat(),
+        "cheapest_total_p": round(cheapest[0] * n_slots, 2) if cheapest[0] != _inf else None,
+        "tolerance_p": tol,
+        "battery": bool(used_bat),
+    }
+    _window_choice[int(appliance_id)] = _choice
+    try:
+        db.log_action(
+            device="appliance", action="appliance_window_choice",
+            params={"appliance_id": int(appliance_id), **_choice},
+            result="success", trigger="appliance_dispatch",
+        )
+    except Exception:  # pragma: no cover
+        pass
     logger.info(
         "appliance %s: chose window %s..%s (effective %.2fp/kWh, battery=%s, "
         "kwh=%.2f, margin=%.2f, σ=%.3f)",
@@ -845,6 +902,7 @@ def _cheapest_from_marginal_cost(
 
     best_total: float | None = None
     best_start: datetime | None = None
+    wins: list[tuple[datetime, float]] = []
     for i in range(len(starts) - n_slots + 1):
         window = starts[i : i + n_slots]
         # Contiguity check
@@ -858,9 +916,18 @@ def _cheapest_from_marginal_cost(
         if end_utc > deadline_utc:
             continue
         total = sum(marginal_cost_per_slot[s] for s in window)
+        wins.append((window[0], total))
         if best_total is None or total < best_total:
             best_total = total
             best_start = window[0]
+
+    # #853 — earliest window within the cost tolerance of the cheapest.
+    tol = max(0.0, float(getattr(config, "APPLIANCE_EARLY_START_TOLERANCE_PENCE", 0.0) or 0.0))
+    if tol > 0 and best_total is not None:
+        for w_start, w_total in wins:  # `starts` is sorted -> earliest first
+            if w_total <= best_total + tol:
+                best_start, best_total = w_start, w_total
+                break
 
     if best_start is None or best_total is None:
         return None
@@ -1970,7 +2037,8 @@ def _arm_or_replan(
             "appliance #%d armed: job=%d planned_start=%s avg_price=%.2fp",
             appliance_id, job_id, start_utc.isoformat(), avg_price,
         )
-        _notify_armed(appliance, start_utc, end_utc, deadline_utc, duration, avg_price, replan=False)
+        _notify_armed(appliance, start_utc, end_utc, deadline_utc, duration, avg_price, replan=False,
+                      choice=_window_choice.pop(appliance_id, None))
         return
 
     # Re-plan: only touch the cron if the slot actually shifted.
@@ -1997,7 +2065,21 @@ def _arm_or_replan(
     # the user only wants the first-arm confirmation + the finished summary.
     # Flip APPLIANCE_NOTIFY_REPLAN=true to observe window revisions again.
     if config.APPLIANCE_NOTIFY_REPLAN:
-        _notify_armed(appliance, start_utc, end_utc, deadline_utc, duration, avg_price, replan=True)
+        _notify_armed(appliance, start_utc, end_utc, deadline_utc, duration, avg_price, replan=True,
+                      choice=_window_choice.pop(appliance_id, None))
+
+
+def _tradeoff_text(choice: dict[str, Any] | None, tz: Any) -> str | None:
+    """#853: 'esperar até 22:00 economizaria 2p' when the chosen window is not the cheapest."""
+    if not choice or choice.get("cheapest_start") == choice.get("chosen_start"):
+        return None
+    c_tot, k_tot = choice.get("chosen_total_p"), choice.get("cheapest_total_p")
+    if c_tot is None or k_tot is None:
+        return None
+    saving = max(0.0, float(c_tot) - float(k_tot))
+    chosen = _parse_iso(choice["chosen_start"]).astimezone(tz).strftime("%H:%M")
+    cheapest = _parse_iso(choice["cheapest_start"]).astimezone(tz).strftime("%H:%M")
+    return f"lavo às {chosen} — esperar até {cheapest} economizaria {saving:.0f}p"
 
 
 def _notify_armed(
@@ -2009,6 +2091,7 @@ def _notify_armed(
     avg_price: float,
     *,
     replan: bool,
+    choice: dict[str, Any] | None = None,
 ) -> None:
     """Best-effort armed/re-armed ping. Failure must not break dispatch."""
     try:
@@ -2034,6 +2117,7 @@ def _notify_armed(
             duration_minutes=int(duration),
             avg_price_pence=float(avg_price),
             replan=replan,
+            tradeoff=_tradeoff_text(choice, tz),
         )
     except Exception:
         logger.exception("appliance armed-notify failed (non-fatal)")
