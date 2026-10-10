@@ -19,7 +19,7 @@ from .daikin_bulletproof import (
     user_gesture_still_in_effect,
 )
 from .foxess.client import FoxESSClient, FoxESSError, scheduler_groups_from_stored_json
-from .foxess.models import _group_fingerprint
+from .foxess.models import _group_fingerprint, fingerprints_match
 from .notifier import notify_critical, notify_risk, notify_user_override
 
 logger = logging.getLogger(__name__)
@@ -402,7 +402,40 @@ def _schedule_signature(groups: list[Any]) -> str:
                     ep.get("maxSoc"),
                 )
             )
+    # #850 -- the inverter returns groups sorted by start; a stored plan keeps
+    # upload order. Sort so order is never drift.
+    payload.sort(key=lambda t: json.dumps(t, default=str))
     return json.dumps(payload, sort_keys=True, default=str)
+
+
+def _fox_groups_fingerprints(groups: list[Any]) -> list[tuple]:
+    out: list[tuple] = []
+    for g in groups:
+        if hasattr(g, "start_hour"):
+            out.append(_group_fingerprint(
+                g.start_hour, g.start_minute, g.end_hour, g.end_minute,
+                g.work_mode, getattr(g, "min_soc_on_grid", None),
+                g.fd_soc, g.fd_pwr, getattr(g, "max_soc", None)))
+        elif isinstance(g, dict):
+            ep = g.get("extraParam") or g.get("extra_param") or {}
+            out.append(_group_fingerprint(
+                g.get("startHour"), g.get("startMinute"), g.get("endHour"),
+                g.get("endMinute"), g.get("workMode"), ep.get("minSocOnGrid"),
+                ep.get("fdSoc"), ep.get("fdPwr"), ep.get("maxSoc")))
+    return out
+
+
+def _fox_schedule_differs(live_groups: list[Any], stored_groups: list[Any]) -> bool:
+    """True when the device really differs from the stored plan (#850).
+
+    Order-insensitive; a maxSoc the stored plan left unspecified (None) is a
+    wildcard for whatever the vendor fills (100, or minSoc) -- same rule as the
+    ``set_scheduler_v3`` skip guard and ``/foxess/schedule_diff`` (#797). An
+    explicit stored maxSoc still must match. Directional: stored = desired.
+    """
+    return not fingerprints_match(
+        _fox_groups_fingerprints(stored_groups), _fox_groups_fingerprints(live_groups)
+    )
 
 
 def _scheduled_tank_state(
@@ -2466,9 +2499,7 @@ def heartbeat_repair_fox_scheduler(fox: FoxESSClient) -> None:
             latest = db.get_latest_fox_schedule_state()
             if latest and latest.get("groups"):
                 stored_groups = scheduler_groups_from_stored_json(latest["groups"])
-                if stored_groups and _schedule_signature(hw.groups) != _schedule_signature(
-                    stored_groups
-                ):
+                if stored_groups and _fox_schedule_differs(hw.groups, stored_groups):
                     logger.info("Fox V3 differs from SQLite plan — re-uploading (heartbeat)")
                     fox.set_scheduler_v3(stored_groups, is_default=False)
                     fox.warn_if_scheduler_v3_mismatch(stored_groups)
@@ -2567,7 +2598,7 @@ def recover_on_boot(
             latest = db.get_latest_fox_schedule_state()
             if latest and latest.get("groups") and not config.OPENCLAW_READ_ONLY:
                 stored_groups = scheduler_groups_from_stored_json(latest["groups"])
-                if stored_groups and _schedule_signature(hw.groups) != _schedule_signature(stored_groups):
+                if stored_groups and _fox_schedule_differs(hw.groups, stored_groups):
                     logger.info("Fox V3 differs from SQLite plan — re-uploading")
                     fox.set_scheduler_v3(stored_groups, is_default=False)
                     fox.warn_if_scheduler_v3_mismatch(stored_groups)
