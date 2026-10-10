@@ -62,6 +62,7 @@ def fake_client():
     cli = MagicMock()
     cli.get_remote_control_enabled = MagicMock(return_value=True)
     cli.start_cycle = MagicMock(return_value={"results": [{"status": "ACCEPTED"}]})
+    cli.get_full_status = MagicMock(side_effect=lambda *_a, **_k: _clean_fire_status())
     cli.list_devices = MagicMock(return_value=[])
     return cli
 
@@ -365,6 +366,14 @@ class TestReconcile:
 # ---------------------------------------------------------------------------
 # _fire_cron — the moment of truth
 # ---------------------------------------------------------------------------
+
+def _clean_fire_status() -> dict:
+    old = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return {"components": {"main": {
+        "switch": {"switch": {"value": "on", "timestamp": old}},
+        "washerOperatingState": {"machineState": {"value": "stop", "timestamp": old}},
+    }}}
+
 
 class TestFireCron:
     def _make_armed_job(self, appliance_id: int, planned_start_utc: datetime) -> int:
@@ -1020,7 +1029,7 @@ class TestFreshArmEvidence:
         job = db.get_appliance_job(jid)
         assert job["status"] == "cancelled" and "since_armed" in job["error_msg"]
         assert nr.call_count == 1
-        assert not db.is_appliance_rearm_blocked(appliance_id)
+        assert db.is_appliance_rearm_blocked(appliance_id)
 
     @pytest.mark.parametrize("machine,sw", [("run", "on"), ("pause", "on"), ("stop", "off")])
     def test_fire_abort_run_pause_switch_off(self, appliance_id, patch_st, machine, sw):
@@ -1029,6 +1038,48 @@ class TestFreshArmEvidence:
             old, switch=(sw, old), machine=machine))
         patch_st.start_cycle.assert_not_called()
         assert db.get_appliance_job(jid)["status"] == "cancelled"
+
+    def test_abort_latches_and_reconcile_does_not_rearm(
+        self, appliance_id, fake_scheduler, patch_st
+    ):
+        d = self.now - timedelta(hours=1)
+        jid, _ = self._fire_job(appliance_id, patch_st, _washer_status(d, switch=("on", d)))
+        assert db.is_appliance_rearm_blocked(appliance_id)
+        patch_st.get_full_status = MagicMock(return_value=_washer_status(d, switch=("on", d)))
+        appliance_dispatch.reconcile()
+        assert db.get_active_appliance_job(appliance_id) is None
+
+    def test_remote_restamp_with_switch_off_blocked(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    ):
+        d = latched_after_cycle
+        off = ("off", d + timedelta(hours=1))
+        self._step(patch_st, _washer_status(d, switch=off, remote_ts=d))
+        restamp = d + timedelta(hours=4)
+        for m in (1, 15, 15):
+            self._step(patch_st, _washer_status(d, switch=off, remote_ts=restamp), m)
+        assert self._blocked(appliance_id)
+
+    def test_prod_timeline_remote_restamp_while_off_then_switch_on(
+        self, appliance_id, fake_scheduler, patch_st, latched_after_cycle
+    ):
+        d = latched_after_cycle
+        off = ("off", d + timedelta(hours=1))
+        self._step(patch_st, _washer_status(d, switch=off, remote_ts=d))
+        restamp = d + timedelta(hours=4)          # ~17:29 while off
+        for m in (1, 15):
+            self._step(patch_st, _washer_status(d, switch=off, remote_ts=restamp), m)
+        assert self._blocked(appliance_id)
+        on = d + timedelta(hours=8)               # ~21:14 owner powers on
+        self._step(patch_st, _washer_status(d, switch=("on", on), remote_ts=restamp), 1)
+        assert self._blocked(appliance_id)
+        self._step(patch_st, _washer_status(d, switch=("on", on), remote_ts=restamp), 12)
+        assert not self._blocked(appliance_id)
+
+    def test_new_episode_clears_stale_switch_observation(self, appliance_id):
+        db.set_appliance_arm_obs(appliance_id, last_switch_value="off", last_switch_ts="x")
+        db.set_appliance_rearm_block(appliance_id, True)
+        assert db.get_appliance_arm_obs(appliance_id)["last_switch_value"] is None
 
     def test_fire_clean_machine_starts(self, appliance_id, patch_st):
         old = self.now - timedelta(hours=10)

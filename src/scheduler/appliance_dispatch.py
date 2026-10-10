@@ -1608,7 +1608,8 @@ def observe_arm_signals(appliance_id: int, status: Any, now: datetime | None = N
     if sv is not None:
         if sv == "off":
             upd.update(last_switch_value="off", last_switch_ts=sts,
-                       switch_on_ts=None, switch_on_observed_at=None)
+                       switch_on_ts=None, switch_on_observed_at=None,
+                       remote_cand_ts=None, remote_cand_observed_at=None)
         else:
             prev_v, prev_ts = obs.get("last_switch_value"), obs.get("last_switch_ts")
             if prev_v == "off":
@@ -1629,7 +1630,8 @@ def observe_arm_signals(appliance_id: int, status: Any, now: datetime | None = N
                 upd["last_remote_ts"] = rts_s  # baseline only, can't tell new from old
             elif rts > stored:
                 upd["last_remote_ts"] = rts_s
-                if remote_on:
+                # A re-stamp while the washer reads powered OFF is never a load.
+                if remote_on and sv != "off":
                     upd.update(remote_cand_ts=rts_s, remote_cand_observed_at=now_s)
                 else:
                     upd.update(remote_cand_ts=None, remote_cand_observed_at=None)
@@ -1686,7 +1688,9 @@ def fresh_arm_evidence(
             rv = ra.get("value")
             remote_on = rv is True or (isinstance(rv, str) and rv.strip().lower() == "true")
             floor = max(ref, since) if since else ref
-            if remote_on and cand > floor + gap and now - cseen >= deb:
+            sw_ts = _parse_iso_utc(sts)
+            if (remote_on and sv == "on" and sw_ts is not None and cand >= sw_ts
+                    and cand > floor + gap and now - cseen >= deb):
                 out.append({"signal": "remote_restamp", "role": "required",
                             "timestamp": cand.isoformat(), "observed_at": cseen.isoformat(),
                             "machine_state": ms})
@@ -2226,6 +2230,10 @@ def _fire_cron(job_id: int) -> None:
             int(job_id), status="cancelled", error_msg=abort_reason,
             actual_start_utc=actual_start,
         )
+        # Latch for EVERY abort reason: otherwise the next reconcile (remote on,
+        # no job, no latch) re-arms at once with armed_at=now and the guard
+        # would then pass and wash the same load.
+        db.set_appliance_rearm_block(int(job["appliance_id"]), True)
         try:
             db.log_action(
                 device="appliance", action="appliance_fire_aborted",

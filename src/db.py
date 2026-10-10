@@ -9124,6 +9124,15 @@ def set_appliance_rearm_block(appliance_id: int, blocked: bool) -> None:
         conn = get_connection()
         try:
             if blocked:
+                # NEW episode (no since-stamp yet): drop observations from any
+                # previous episode so a stale `off` can't count as the observed off.
+                conn.execute(
+                    "UPDATE appliances SET last_switch_value = NULL, last_switch_ts = NULL, "
+                    "switch_on_ts = NULL, switch_on_observed_at = NULL, remote_cand_ts = NULL, "
+                    "remote_cand_observed_at = NULL "
+                    "WHERE id = ? AND rearm_blocked_since IS NULL",
+                    (appliance_id,),
+                )
                 # Keep the ORIGINAL since-stamp if already blocked (episode start).
                 conn.execute(
                     "UPDATE appliances SET rearm_block_until_off = 1, "
