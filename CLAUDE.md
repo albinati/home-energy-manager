@@ -514,7 +514,19 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   rows before the regime's `clear_actions_in_range` and re-inserts them if the LWT writer
   skipped (quota headroom) or raised (`lwt_rows_preserved`). Status:
   `space_heating_gate_state()` has `demand_gate_hold_until`, `demand_gate_held`,
-  `excluded_buckets`; scorecard `lwt.demand_gate_skips`.
+  `excluded_buckets`, `demand_gate_reason`; scorecard `lwt.demand_gate_closed_dispatches`
+  + `lwt.demand_gate_windows_suppressed`. **Under the LP source the plan's own demand IS
+  the signal:** when `source_used == "lp"` and `sum(plan.space_electric_kwh) > 0` the
+  measured gate is BYPASSED (reason `lp_plan_demand`, `lwt_source_diff.guards.
+  demand_gate_bypassed_lp_plan`; the per-slot outdoor cutoff still applies) — with
+  `coast_mode=lp` the compressor is off outside boosts, so nearly all measured heating
+  lands in positive windows and the measured gate would close every other day. The tier
+  source keeps the measured gate. A closed gate with NO planned space heat writes no rows
+  at all (a summer setback is quota churn). Restored rows are re-stamped with the
+  CURRENT dispatch `plan_date` (the heartbeat reconciles `date == today` only), are
+  restored on an exception only when the writer wrote nothing, and never overwrite a new
+  pending row at the same `start_time`. The warm-outdoor hold override trusts live
+  telemetry only when <= 3 h old (else the plan's first-slot outdoor).
 - **Plausibility gate** (`w3_trajectory_plausible`): the LP source is
   unavailable (diff row `lp_available=false`, `lp_reason`) when the plan
   carries comfort SLACK (`plan.comfort_slack_c` = FLOOR shortfall only, >

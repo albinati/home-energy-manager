@@ -133,16 +133,20 @@ def test_hysteresis_holds_across_local_day_boundary(monkeypatch):
     measured = {"v": 2.0}
     monkeypatch.setattr(db, "measured_space_heating_kwh_excluding_offset_windows",
                         lambda *a, **k: measured["v"])
-    monkeypatch.setattr(db, "get_latest_daikin_telemetry", lambda source=None: {"outdoor_temp_c": 9.0})
+    monkeypatch.setattr(db, "get_latest_daikin_telemetry", lambda source=None: {"outdoor_temp_c": 9.0, "fetched_at": now["t"].timestamp()})
     assert lp_dispatch._space_heating_demand_present() is True  # measured open, hold armed
     measured["v"] = 0.0
     now["t"] = datetime(2026, 10, 9, 23, 5, tzinfo=UTC)  # 00:05 BST next local day
     assert lp_dispatch._space_heating_demand_present() is True  # held
     assert lp_dispatch.space_heating_gate_state()["demand_gate_hold_until"] == "2026-10-10T21:00:00Z"
     # warm outdoor overrides the hold
-    monkeypatch.setattr(db, "get_latest_daikin_telemetry", lambda source=None: {"outdoor_temp_c": 16.0})
+    monkeypatch.setattr(db, "get_latest_daikin_telemetry", lambda source=None: {"outdoor_temp_c": 16.0, "fetched_at": now["t"].timestamp()})
     assert lp_dispatch._space_heating_demand_present() is False
-    monkeypatch.setattr(db, "get_latest_daikin_telemetry", lambda source=None: {"outdoor_temp_c": 9.0})
+    # L2: a STALE (> 3 h) telemetry row is ignored; the plan's forecast decides
+    monkeypatch.setattr(db, "get_latest_daikin_telemetry", lambda source=None: {"outdoor_temp_c": 16.0, "fetched_at": now["t"].timestamp() - 4 * 3600})
+    assert lp_dispatch._space_heating_demand_present(plan_outdoor_c=5.0) is True
+    assert lp_dispatch._space_heating_demand_present(plan_outdoor_c=17.0) is False
+    monkeypatch.setattr(db, "get_latest_daikin_telemetry", lambda source=None: {"outdoor_temp_c": 9.0, "fetched_at": now["t"].timestamp()})
     now["t"] = datetime(2026, 10, 10, 21, 30, tzinfo=UTC)  # hold expired
     assert lp_dispatch._space_heating_demand_present() is False
 
@@ -186,3 +190,136 @@ def test_state_exposes_new_fields(monkeypatch):
     monkeypatch.setattr(db, "get_latest_daikin_telemetry", lambda source=None: {"outdoor_temp_c": 5.0})
     st = lp_dispatch.space_heating_gate_state()
     assert "demand_gate_hold_until" in st and "excluded_buckets" in st
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (PR #848)
+# ---------------------------------------------------------------------------
+
+def _set_source(monkeypatch, v):
+    monkeypatch.setitem(app_config._overrides, "DAIKIN_LWT_SOURCE", v)
+
+
+def test_h2_lp_source_plan_demand_bypasses_measured_gate(monkeypatch):
+    monkeypatch.setattr(db, "measured_space_heating_kwh_excluding_offset_windows", lambda *a, **k: 0.0)
+    _set_source(monkeypatch, "lp")
+    plan = _plan(_start())
+    plan.lwt_offset_c = [3.0] * 4 + [-2.0] * 4
+    plan.indoor_temp_c = [20.0] * 8
+    monkeypatch.setattr(lp_dispatch, "_lp_offsets", lambda p, i, guards=None: [3] * 4 + [-2] * 4)
+    lp_dispatch._write_lwt_preheat_actions(_start().date().isoformat(), plan, [])
+    assert 3 in _pending_offsets()  # boost written despite measured=0
+    assert not db.get_action_logs(device="daikin", action="lwt_demand_gate", limit=5)
+    assert lp_dispatch.space_heating_gate_state()["demand_gate_reason"] == "lp_plan_demand"
+    diff = db.get_action_logs(device="daikin", action="lwt_source_diff", limit=1)[0]["params"]
+    assert diff["guards"].get("demand_gate_bypassed_lp_plan") == 1
+
+
+def test_h2_tier_source_keeps_measured_gate(monkeypatch):
+    monkeypatch.setattr(db, "measured_space_heating_kwh_excluding_offset_windows", lambda *a, **k: 0.0)
+    lp_dispatch._write_lwt_preheat_actions(_start().date().isoformat(), _plan(_start()), [])
+    assert 3 not in _pending_offsets() and -2 in _pending_offsets()
+
+
+def test_m1_closed_gate_no_space_heat_writes_nothing(monkeypatch):
+    monkeypatch.setattr(db, "measured_space_heating_kwh_excluding_offset_windows", lambda *a, **k: 0.0)
+    plan = _plan(_start())
+    plan.space_electric_kwh = [0.0] * 8
+    n = lp_dispatch._write_lwt_preheat_actions(_start().date().isoformat(), plan, [])
+    assert n == 0 and _pending_offsets() == []
+    # and with space heat planned the setback IS written (covered above)
+
+
+def test_m2_exception_after_rows_written_does_not_restore(monkeypatch):
+    seen = {}
+
+    def _impl(plan_date, plan, forecast):
+        ws = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
+        we = (plan.slot_starts_utc[-1] + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+        db.clear_actions_in_range(ws, we, device="daikin")
+        lp_dispatch._write_lwt_preheat_actions(plan_date, plan, forecast)
+        if seen.get("boom"):
+            raise RuntimeError("later failure")
+        return 1
+
+    monkeypatch.setattr(lp_dispatch, "_write_daikin_from_lp_plan_impl", _impl)
+    monkeypatch.setattr(db, "measured_space_heating_kwh_excluding_offset_windows", lambda *a, **k: 2.0)
+    plan, pd = _plan(_start()), _start().date().isoformat()
+    lp_dispatch.write_daikin_from_lp_plan(pd, plan, [])
+    before = _pending_offsets()
+    seen["boom"] = True
+    with pytest.raises(RuntimeError):
+        lp_dispatch.write_daikin_from_lp_plan(pd, plan, [])
+    assert _pending_offsets() == before  # no duplicates / no stale overwrite
+    assert not db.get_action_logs(device="daikin", action="lwt_rows_preserved", limit=2)
+
+
+def test_m2_restore_skips_start_time_with_new_pending_row():
+    plan, pd = _plan(_start()), _start().date().isoformat()
+    st = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
+    en = plan.slot_starts_utc[2].isoformat().replace("+00:00", "Z")
+    db.upsert_action(plan_date=pd, start_time=st, end_time=en, device="daikin",
+                     action_type="lwt_preheat", params={"lwt_offset": -4}, status="pending")
+    old = {"date": "2000-01-01", "start_time": st, "end_time": en, "params": {"lwt_offset": 3}}
+    assert lp_dispatch._restore_lwt_rows([(None, old)], pd, plan) == 0
+    assert _pending_offsets() == [-4]
+
+
+def test_m3_no_windows_suppressed_no_log_and_key_uses_plan_date(monkeypatch):
+    plan = _plan(_start())
+    gate = {"measured_kwh": 0.0, "floor_kwh": 0.5}
+    lp_dispatch._log_demand_gate_closed(plan, gate, "lp", 0)
+    assert not db.get_action_logs(device="daikin", action="lwt_demand_gate", limit=5)
+    keys = []
+    monkeypatch.setattr("src.notifier.notify_risk", lambda *a, **k: keys.append(k["extra"]["warning_key"]))
+    lp_dispatch._log_demand_gate_closed(plan, gate, "lp", 2)
+    expect = plan.slot_starts_utc[0].astimezone(TZ).strftime("%Y-%m-%d")
+    assert keys == [f"lwt_demand_gate_{expect}"]
+
+
+def test_m3_scorecard_keys():
+    from src.analytics import cosy_scorecard as sc
+    db.log_action(device="daikin", action="lwt_demand_gate", params={"windows_suppressed": 2},
+                  result="boosts_suppressed", trigger="dispatch")
+    db.log_action(device="daikin", action="lwt_demand_gate", params={"windows_suppressed": 3},
+                  result="boosts_suppressed", trigger="dispatch")
+    day = datetime.now(TZ).date()
+    a = datetime.now(UTC) - timedelta(hours=1)
+    out = sc._lwt(day, TZ, a, datetime.now(UTC) + timedelta(hours=1), [])
+    assert out["demand_gate_closed_dispatches"] == 2
+    assert out["demand_gate_windows_suppressed"] == 5
+    assert "demand_gate_skips" not in out
+
+
+def test_h1_restored_rows_carry_current_plan_date_and_reconcile(monkeypatch):
+    from src import state_machine
+    plan = _plan(_start())
+    today = datetime.now(TZ).date().isoformat()
+    ws = plan.slot_starts_utc[0]
+    # a pending row that is "due now" so the reconciler fires it
+    st = (datetime.now(UTC) - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    en = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    snap = [(None, {"date": "2000-01-01", "start_time": st, "end_time": en,
+                    "params": {"lwt_offset": -2}, "action_type": "lwt_preheat"})]
+    assert lp_dispatch._restore_lwt_rows(snap, today, plan) == 1
+    rows = [r for r in db.get_actions_for_plan_date(today, "daikin") if r["action_type"] == "lwt_preheat"]
+    assert len(rows) == 1 and rows[0]["params"]["lwt_offset"] == -2
+    assert not [r for r in db.get_actions_for_plan_date("2000-01-01", "daikin")]
+    applied = []
+    monkeypatch.setattr(app_config, "PREFIRE_STATE_MATCH_ENABLED", False, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_VALVE_SETTLE_SECONDS", 0, raising=False)
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params",
+        lambda dev, client, params, trigger: applied.append(dict(params)) or True,
+    )
+    from unittest.mock import MagicMock
+
+    from src.daikin.models import DaikinDevice
+    state_machine._FIRST_APPLIED_SESSION.clear()
+    dev = DaikinDevice(id="gw", name="x", tank_on=True, tank_target=45.0)
+    now_utc = datetime.now(UTC)
+    rows = db.get_actions_for_plan_date(today, device="daikin")
+    state_machine._reconcile_daikin_actions(rows, MagicMock(), dev, now_utc, trigger="test")
+    rows = [r for r in db.get_actions_for_plan_date(today, "daikin") if r["action_type"] == "lwt_preheat"]
+    assert rows[0]["status"] == "active", rows
+    assert any(a.get("lwt_offset") == -2 for a in applied), applied

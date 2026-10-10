@@ -365,8 +365,8 @@ def test_gate_state_reports_outdoor_cutoff(monkeypatch):
 
 
 def test_gate_state_preheat_suppressed_when_demand_absent(monkeypatch):
-    """No measured demand → preheat_suppressed True (the demand gate shuts ALL
-    offset rows, setback included)."""
+    """No measured demand → preheat_suppressed True (the demand gate zeroes
+    POSITIVE offsets only; coasts/setbacks are still written, #847)."""
     from src import db
     from src.scheduler import lp_dispatch
     monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_ENABLED", True, raising=False)
