@@ -3918,6 +3918,33 @@ def clear_actions_in_range(
             conn.close()
 
 
+def get_pending_actions_in_range(
+    start_utc_iso: str,
+    end_utc_iso: str,
+    device: str,
+    action_types: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Pending actions of ``device`` whose ``start_time`` is in ``[start, end)``
+    (the exact set :func:`clear_actions_in_range` would delete). #847: lets the
+    LWT writer snapshot rows before a clear so it can put them back."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT * FROM action_schedule
+                   WHERE device = ? AND status = 'pending'
+                   AND start_time >= ? AND start_time < ?
+                   ORDER BY start_time, id""",
+                (device, start_utc_iso, end_utc_iso),
+            )
+            rows = [_row_action(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+    if action_types is not None:
+        rows = [r for r in rows if r.get("action_type") in action_types]
+    return rows
+
+
 def schedule_for_date(plan_date: str) -> list[dict[str, Any]]:
     with _lock:
         conn = get_connection()
@@ -4724,7 +4751,7 @@ def upsert_daikin_consumption_2hourly(
 
 
 def get_nonzero_lwt_offset_windows(
-    start_date: str, end_date: str
+    start_date: str, end_date: str, *, positive_only: bool = False,
 ) -> list[tuple[str, str]]:
     """``(start_time, end_time)`` UTC-ISO pairs of every ``lwt_preheat`` action
     with a non-zero offset whose plan ``date`` falls in the inclusive range.
@@ -4747,6 +4774,10 @@ def get_nonzero_lwt_offset_windows(
     windows invisible to a lookback starting the next day, re-counting their
     heating as natural demand (every-other-day gate oscillation). The pad
     only over-fetches — actual exclusion is keyed off start/end timestamps.
+
+    ``positive_only`` (#847): keep only windows with ``lwt_offset > 0`` (boosts).
+    A coast/setback cannot wake the compressor, so its buckets are clean
+    evidence of natural demand (an under-estimate — the conservative direction).
     """
     with _lock:
         conn = get_connection()
@@ -4764,7 +4795,14 @@ def get_nonzero_lwt_offset_windows(
                     off = json.loads(r["params"] or "{}").get("lwt_offset", 0)
                 except (json.JSONDecodeError, TypeError):
                     off = 1  # unparseable → treat as contaminated (conservative)
-                if off:
+                if positive_only:
+                    try:
+                        keep = float(off) > 0
+                    except (TypeError, ValueError):
+                        keep = True  # unparseable → contaminated (conservative)
+                else:
+                    keep = bool(off)
+                if keep:
                     out.append((str(r["start_time"]), str(r["end_time"])))
             return out
         finally:
@@ -4809,9 +4847,16 @@ def measured_space_heating_kwh_excluding_offset_windows(
     lookback_hours: int = 48,
     *,
     rows_filter: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
+    positive_only: bool = True,
+    diag: dict[str, Any] | None = None,
 ) -> float:
     """Trailing measured space-heating kWh from ``daikin_consumption_2hourly``,
-    EXCLUDING 2-hour buckets overlapped by a HEM ``lwt_preheat`` window.
+    EXCLUDING 2-hour buckets overlapped by a HEM ``lwt_preheat`` BOOST window.
+
+    #847: only POSITIVE-offset windows contaminate (``positive_only=True``);
+    coasts/setbacks cannot induce heating, and excluding them made a
+    ``DAIKIN_LWT_SOURCE=lp`` plan (offsets over most of the horizon) close the
+    gate on itself. ``diag`` (optional dict) receives ``excluded_buckets``.
 
     Powers the pre-heat demand gate (#540): without the exclusion the gate
     would feed on offset-induced heating and hold itself open forever. With
@@ -4833,7 +4878,7 @@ def measured_space_heating_kwh_excluding_offset_windows(
         # latch the gate open exactly when its primary signal is broken
         # (review M1 on #541) — return 0 (gate-closed direction) instead.
         # With no offsets in range, the daily totals are clean and usable.
-        if get_nonzero_lwt_offset_windows(start_date, end_date):
+        if get_nonzero_lwt_offset_windows(start_date, end_date, positive_only=positive_only):
             logger.warning(
                 "measured_space_heating: 2-hourly split missing %s..%s while "
                 "offset windows exist — cannot decontaminate daily totals; "
@@ -4861,7 +4906,7 @@ def measured_space_heating_kwh_excluding_offset_windows(
     # demand and latched the gate open). Exclude this many trailing buckets too.
     tail_buckets = max(0, int(getattr(config, "DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS", 1)))
     excluded: set[tuple[str, int]] = set()
-    for s_iso, e_iso in get_nonzero_lwt_offset_windows(start_date, end_date):
+    for s_iso, e_iso in get_nonzero_lwt_offset_windows(start_date, end_date, positive_only=positive_only):
         try:
             s = datetime.fromisoformat(s_iso.replace("Z", "+00:00")).astimezone(tz)
             e = datetime.fromisoformat(e_iso.replace("Z", "+00:00")).astimezone(tz)
@@ -4873,6 +4918,8 @@ def measured_space_heating_kwh_excluding_offset_windows(
         while cur < e_padded:
             excluded.add((cur.date().isoformat(), cur.hour // 2))
             cur += timedelta(hours=2)
+    if diag is not None:
+        diag["excluded_buckets"] = len(excluded)
 
     total = 0.0
     for r in rows:

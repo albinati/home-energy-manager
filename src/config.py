@@ -1804,6 +1804,12 @@ class Config:
     DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS: int = int(
         os.getenv("DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", "48")
     )
+    # #847 hysteresis: keep the demand gate open this long after it was last
+    # MEASURED open (kv_state lwt_demand_gate_open_until), unless outdoor >=
+    # DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C. 0 disables the hold.
+    DAIKIN_LWT_PREHEAT_DEMAND_HOLD_HOURS: float = float(
+        os.getenv("DAIKIN_LWT_PREHEAT_DEMAND_HOLD_HOURS", "24")
+    )
     # Outdoor-temperature cutoff for POSITIVE LWT offsets (Tracked by #540).
     # The demand gate above is endogenous (trailing measured heating) and can
     # be fooled by its own output: a positive offset (cheap +BOOST or

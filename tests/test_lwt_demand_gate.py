@@ -474,6 +474,9 @@ def test_real_curve_keeps_mild_autumn_bucket_and_zeroes_warm_one(monkeypatch):
     monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", True, raising=False)
     monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5, raising=False)
     monkeypatch.setattr(app_config, "DAIKIN_WEATHER_CURVE_HIGH_C", 18.0, raising=False)
+    # #847: this test flips the verdict open -> closed in one process; the
+    # hysteresis hold (tested separately) would keep it open.
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DEMAND_HOLD_HOURS", 0.0, raising=False)
     y = _yesterday_local()
     _seed_outdoor(14.0)
     _seed_2h_src(y.date().isoformat(), 11, 1.0, "onecta_cache")

@@ -498,6 +498,23 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   `_indoor_for_slot_fn` trajectory guard of the first #808 cut no longer exists.)
 - When `DAIKIN_LWT_SOURCE=lp` the LP's `e_space` ceiling is capped at the ±5
   clamp so the plan never assumes more lift than the device will get.
+- **Demand gate blocks boosts, never coasts (#847).** The gate
+  (`DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH` over the trailing
+  `DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS`) only excludes 2-h buckets overlapped by
+  POSITIVE-offset windows (`get_nonzero_lwt_offset_windows(positive_only=True)`); coasts
+  cannot wake the compressor, and excluding them made an `lp` plan close the gate on
+  itself (2026-10-09 22:55Z: no rows written, rows already cleared, device on the curve
+  off the battery for 4 h). Closed gate = `_write_lwt_preheat_actions` zeroes positive
+  offsets and still writes the negative/zero rows (`action_log` `lwt_demand_gate`:
+  `measured_kwh`, `excluded_buckets`, `windows_suppressed`; one `notify_risk` per local
+  day under `source=lp` with space heat planned). **Hysteresis:**
+  `DAIKIN_LWT_PREHEAT_DEMAND_HOLD_HOURS` (24; 0 = off) keeps the gate open after it was
+  last measured open (`kv_state` `lwt_demand_gate_open_until`) unless outdoor >= cutoff.
+  **Never empty:** `write_daikin_from_lp_plan` snapshots the pending `lwt_preheat`/`restore`
+  rows before the regime's `clear_actions_in_range` and re-inserts them if the LWT writer
+  skipped (quota headroom) or raised (`lwt_rows_preserved`). Status:
+  `space_heating_gate_state()` has `demand_gate_hold_until`, `demand_gate_held`,
+  `excluded_buckets`; scorecard `lwt.demand_gate_skips`.
 - **Plausibility gate** (`w3_trajectory_plausible`): the LP source is
   unavailable (diff row `lp_available=false`, `lp_reason`) when the plan
   carries comfort SLACK (`plan.comfort_slack_c` = FLOOR shortfall only, >
