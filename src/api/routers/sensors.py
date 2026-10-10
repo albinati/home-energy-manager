@@ -196,6 +196,12 @@ async def get_thermal_calibration() -> dict[str, Any]:
             "c_reason": c_res.get("c_reason"),
             "tau_hours": round(tl.get_building_tau_hours(), 2),
             "ua_w_per_k": round(tl.get_building_ua_w_per_k(), 1),
+            # #859 — learned vs pinned vs effective
+            "ua_learned_w_per_k": (lambda v: round(v, 1) if v is not None else None)(
+                tl.get_learned_ua_w_per_k()),
+            "ua_pinned_w_per_k": round(float(config.BUILDING_UA_W_PER_K), 1),
+            "ua_effective_source": tl.ua_effective_source(),
+            "ua_learned_auto_apply": bool(getattr(config, "BUILDING_UA_LEARNED_AUTO_APPLY", False)),
             "c_kwh_per_k": round(float(c_res["c_kwh_per_k"]), 2),
             "source": "learned" if (
                 learned_tau and bool(getattr(config, "THERMAL_LEARNED_VALUES_ENABLED", True))

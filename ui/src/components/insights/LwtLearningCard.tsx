@@ -113,7 +113,9 @@ export function LwtLearningCard() {
               coast blocks
               <span class="muted">
                 {" "}
-                (pinned UA {d ? n1(d.ua_pinned_w_per_k, 0) : "—"} W/K
+                (UA learned (HDD) {eff?.ua_learned_w_per_k != null ? n1(eff.ua_learned_w_per_k, 0) : "none"} · pinned{" "}
+                {eff?.ua_pinned_w_per_k != null ? n1(eff.ua_pinned_w_per_k, 0) : "—"} · effective{" "}
+                {eff ? n1(eff.ua_w_per_k, 0) : "—"} W/K ({eff?.ua_effective_source ?? "—"})
                 {eff ? `, C ${n1(eff.c_kwh_per_k, 1)} kWh/K, τ ${n1(eff.tau_hours, 0)} h` : ""}; SEs are optimistic —
                 quantised counter, COP and lag are model error)
               </span>

@@ -2142,6 +2142,13 @@ class Config:
     THERMAL_LEARNED_VALUES_ENABLED: bool = os.getenv(
         "THERMAL_LEARNED_VALUES_ENABLED", "true"
     ).lower() in ("true", "1", "yes")
+    # #859 — a learned UA (HDD regression, in bounds) REPLACES the
+    # BUILDING_UA_W_PER_K pin only when this is true. Default false: the learned
+    # value is stored and shown, never steers the LP (last winter's fit gave
+    # 520-730 W/K, which the LP pump model cannot hold -> LWT source falls back).
+    BUILDING_UA_LEARNED_AUTO_APPLY: bool = os.getenv(
+        "BUILDING_UA_LEARNED_AUTO_APPLY", "false"
+    ).lower() in ("true", "1", "yes")
     THERMAL_TAU_WINDOW_DAYS: int = int(os.getenv("THERMAL_TAU_WINDOW_DAYS", "21"))
     THERMAL_TAU_MIN_EPISODES: int = int(os.getenv("THERMAL_TAU_MIN_EPISODES", "5"))
     THERMAL_TAU_MIN_EPISODE_HOURS: float = float(

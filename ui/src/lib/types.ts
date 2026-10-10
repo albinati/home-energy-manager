@@ -1219,6 +1219,10 @@ export interface ThermalCalibration {
     c_kwh_per_k: number;
     c_basis_ua_w_per_k?: number | null;  // #841: UA the stored C was derived from
     c_recomputed?: boolean;              // #841: C recomputed as tau x effective UA
+    ua_learned_w_per_k?: number | null;  // #859: stored HDD-fit UA (in bounds), shown only unless auto-apply
+    ua_pinned_w_per_k?: number;
+    ua_effective_source?: "pin" | "learned";
+    ua_learned_auto_apply?: boolean;
     source: "env" | "learned";
   };
   progress: {

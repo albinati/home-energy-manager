@@ -357,8 +357,13 @@ def test_readers_fallback_and_learned(tmp_db, monkeypatch):
     # good row → learned
     _seed_calibration(tau=18.0, ua=650.0, c=11.7)
     assert tl.get_building_tau_hours() == pytest.approx(18.0)
+    # #859: learned UA is shown, not applied, unless auto-apply is on
+    assert tl.get_building_ua_w_per_k() == pytest.approx(600.0)
+    assert tl.get_learned_ua_w_per_k() == pytest.approx(650.0)
+    monkeypatch.setattr(config, "BUILDING_UA_LEARNED_AUTO_APPLY", True, raising=False)
     assert tl.get_building_ua_w_per_k() == pytest.approx(650.0)
     assert tl.get_building_thermal_mass_kwh_per_k() == pytest.approx(11.7)
+    monkeypatch.setattr(config, "BUILDING_UA_LEARNED_AUTO_APPLY", False, raising=False)
     # kill switch → env
     monkeypatch.setattr(config, "THERMAL_LEARNED_VALUES_ENABLED", False, raising=False)
     assert tl.get_building_tau_hours() == pytest.approx(20.0)

@@ -578,11 +578,17 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   outdoor it can hold the house only up to UA ≈ 200 W/K. The env default
   `BUILDING_UA_W_PER_K=600` (and C = τ·UA ≈ 50 kWh/K) makes the trajectory
   fall monotonically and the comfort slack dominate the objective. Prod pins
-  `BUILDING_UA_W_PER_K=200` (provisional; C = 82.7 h × 200 ≈ 16.5 kWh/K). NB
-  `get_building_ua_w_per_k()` PREFERS a learned value in (100, 1500): once
-  `fit_ua_hdd` converges (≥ 20 heating days; last winter's HDD regression gave
-  520–730 W/K, which the pump model cannot hold) it silently overrides the pin
-  — the slack gate is what keeps a non-holdable model off the hardware. Kill
+  `BUILDING_UA_W_PER_K=200` (provisional; C = 82.7 h × 200 ≈ 16.5 kWh/K). **#859:** the HDD-regression UA
+  (in (100, 1500); last winter 520-730 W/K, which the pump model cannot hold)
+  is stored and SHOWN only: `get_building_ua_w_per_k()` returns the pin unless
+  `BUILDING_UA_LEARNED_AUTO_APPLY=true` (code default false = kill switch back to the
+  old "learned wins" behaviour); `refresh_building_thermal_calibration` stamps
+  C = τ × pin accordingly. When a learned UA differs from the pin by > 25 %, one
+  `notify_risk` (dedupe per 10 W/K bucket, `ua_learned_pending_<bucket>`) +
+  `action_log` `ua_learned_pending`. `/sensors/thermal-calibration` `effective`
+  carries `ua_learned_w_per_k` / `ua_pinned_w_per_k` / `ua_effective_source`
+  (`pin|learned`), shown on the LWT learning card next to the #843 joint-fit UA
+  (the better estimator). Kill
   switches: `LP_W3_TIN_ENABLED=false` (the model), `DAIKIN_LWT_SOURCE=tier`
   (the hardware path).
 - Rollout: deploy with `tier` → read `lwt_source_diff` + `plan.indoor_temp_c`
