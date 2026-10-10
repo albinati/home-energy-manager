@@ -68,11 +68,29 @@ def fingerprint_matches(desired: tuple, live: tuple) -> bool:
     return True
 
 
+def _fp_sort_key(fp: tuple) -> tuple:
+    """Order key for a group fingerprint: clock window + mode (never a None-able slot)."""
+    return (fp[0], fp[1], fp[2], fp[3], str(fp[4]))
+
+
 def fingerprints_match(desired: list[tuple], live: list[tuple]) -> bool:
-    """Ordered, pairwise :func:`fingerprint_matches` over two group lists."""
+    """ORDER-INSENSITIVE pairwise :func:`fingerprint_matches` over two group lists.
+
+    The inverter returns groups sorted by start time, while a stored plan keeps
+    upload order (a horizon that wraps midnight lists the 04:00 group last), so
+    both sides are sorted by clock window before pairing (#850). This is the
+    one comparator behind the upload skip guard, the heartbeat repair and the
+    boot recovery.
+    """
     if len(desired) != len(live):
         return False
-    return all(fingerprint_matches(d, lv) for d, lv in zip(desired, live, strict=True))
+    return all(
+        fingerprint_matches(d, lv)
+        for d, lv in zip(
+            sorted(desired, key=_fp_sort_key), sorted(live, key=_fp_sort_key),
+            strict=True,
+        )
+    )
 
 
 @dataclass
