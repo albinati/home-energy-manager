@@ -348,20 +348,15 @@ def in_legionella_standoff(now_utc: datetime) -> bool:
     thermal-shock window, during which the Onecta firmware owns the DHW tank
     and HEM must not write to it (see ``DHW_LEGIONELLA_STANDOFF_*``).
 
-    The window is defined in UTC on one weekday and must not cross midnight
-    (the default Sunday 11:00 + 120 min does not).
+    Thin wrapper over :mod:`src.legionella_window` (UTC knobs, or the local
+    wall-clock ``DHW_LEGIONELLA_STANDOFF_START_LOCAL``). The window must not
+    cross midnight (UTC, or local in local mode).
     """
     if not getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", False):
         return False
-    if now_utc.weekday() != int(config.DHW_LEGIONELLA_STANDOFF_DOW):
-        return False
-    start = now_utc.replace(
-        hour=int(config.DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC),
-        minute=int(config.DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC),
-        second=0, microsecond=0,
-    )
-    end = start + timedelta(minutes=int(config.DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES))
-    return start <= now_utc < end
+    from .legionella_window import in_standoff_window
+
+    return in_standoff_window(now_utc)
 
 
 def _parse_utc(s: str) -> datetime:

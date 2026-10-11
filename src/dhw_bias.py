@@ -108,16 +108,10 @@ def _contaminated_day_buckets(start_day: date, end_day: date) -> set[tuple[str, 
         logger.debug("dhw_bucket_bias: boost-window read failed", exc_info=True)
 
     if bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)):
-        dow = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6))
-        h = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11))
-        m = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0))
-        dur = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120))
-        d = start_day
-        while d <= end_day:
-            if d.weekday() == dow:
-                ws = datetime.combine(d, time(h, m), tzinfo=UTC)
-                _mark(ws, ws + timedelta(minutes=dur))
-            d += timedelta(days=1)
+        from .legionella_window import standoff_windows
+
+        for ws, we in standoff_windows(start_day, end_day):
+            _mark(ws, we)
     return out
 
 

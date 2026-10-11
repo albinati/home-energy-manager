@@ -154,7 +154,9 @@ DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC=0
 DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES=120     # ramp + ~1 h hold; tune from `legionella_tank_standoff` telemetry
 ```
 
-Helper: `src/state_machine.py:in_legionella_standoff(now_utc)`. The guard sits in `_reconcile_daikin_actions` before the pending→active transition. If a `shutdown`/`max_heat` action overlaps the cycle window outside the guard, Onecta firmware still arbitrates.
+**Local-time window (preferred).** The unit runs the cycle on the LOCAL clock (Europe/London): past Sundays set to "11:00" started heating ~10:00 UTC in BST, so a fixed UTC window is wrong by 1 h for half the year. `DHW_LEGIONELLA_STANDOFF_START_LOCAL=HH:MM` (default empty) starts the window at that wall-clock time in `BULLETPROOF_TIMEZONE` on the LOCAL weekday `..._DOW`, lasting `..._DURATION_MINUTES` (must not cross local midnight). Recommended prod: `START_LOCAL=12:30` + `DURATION_MINUTES=150` (cycle at ~12:30-12:45 local, start of the Cosy 13-16 cheap band); then drop any oversized UTC bridge (e.g. 11:30 UTC + 240 min) — it also smeared the LP's `DHW_LEGIONELLA_BUDGET_KWH` over too many slots. Empty = the UTC knobs above, bit-for-bit (kill switch); an invalid value logs one warning and falls back to them. ONE helper, `src/legionella_window.py` (`standoff_window_for_date`, `standoff_windows`, `in_standoff_window`), serves the reconciler guard, the LP budget (`forecast_dhw_load_per_slot`, `legionella_budget_by_slot`), the bucket-bias exclusion (`dhw_bias`) and the schedule views.
+
+Helper: `src/state_machine.py:in_legionella_standoff(now_utc)` (thin wrapper over `src/legionella_window.py`). The guard sits in `_reconcile_daikin_actions` before the pending→active transition. If a `shutdown`/`max_heat` action overlaps the cycle window outside the guard, Onecta firmware still arbitrates.
 
 ### Tank model — the ambient is the HOUSE (#819, 2026-10-07)
 

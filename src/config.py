@@ -1639,6 +1639,13 @@ class Config:
     DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES: int = int(
         os.getenv("DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", "120")
     )
+    # "HH:MM" wall-clock start in BULLETPROOF_TIMEZONE on the LOCAL weekday
+    # DHW_LEGIONELLA_STANDOFF_DOW. The Onecta unit runs the cycle on the LOCAL
+    # clock, so this tracks BST/GMT. Empty (default) = the UTC knobs above,
+    # unchanged. Invalid -> warning + UTC knobs. See src/legionella_window.py.
+    DHW_LEGIONELLA_STANDOFF_START_LOCAL: str = (
+        os.getenv("DHW_LEGIONELLA_STANDOFF_START_LOCAL") or ""
+    ).strip()
     # NOTE: the leading-warmup defer (a boost SUPERSEDES the warmup that would
     # otherwise pre-heat at a positive price right before it) is driven by
     # LP_PRE_NEGATIVE_PRECOOL_HOURS below — the SAME window the LP's energy

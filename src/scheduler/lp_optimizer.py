@@ -777,12 +777,6 @@ def solve_lp(
         _dhw_legionella = (
             legionella_budget_by_slot(
                 list(slot_starts_utc),
-                dow=int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6)),
-                start_hour_utc=int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11)),
-                start_minute_utc=int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0)),
-                duration_minutes=int(
-                    getattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120)
-                ),
                 budget_kwh=float(getattr(config, "DHW_LEGIONELLA_BUDGET_KWH", 3.5)),
             )
             if bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True))

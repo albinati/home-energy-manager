@@ -180,24 +180,37 @@ def simulate_fixed_schedule(
 def legionella_budget_by_slot(
     slot_starts_utc: list[datetime],
     *,
-    dow: int = 6,
-    start_hour_utc: int = 11,
-    start_minute_utc: int = 0,
-    duration_minutes: int = 120,
+    dow: int | None = None,
+    start_hour_utc: int | None = None,
+    start_minute_utc: int | None = None,
+    duration_minutes: int | None = None,
     budget_kwh: float = 3.5,
 ) -> list[float]:
-    """Spread the firmware's Sunday-cycle electricity across its stand-off window.
+    """Spread the firmware's weekly-cycle electricity across its stand-off window.
 
-    UTC-anchored — the firmware clock is UTC (see CLAUDE.md). Shared by the LP block's
-    wiring and the baseline simulator so both arms budget the identical cycle and it
-    cancels out of the comparison.
+    With no window arguments (the production path) the window comes from
+    ``src.legionella_window`` -- the SAME helper the reconciler guard uses, so
+    it follows ``DHW_LEGIONELLA_STANDOFF_START_LOCAL`` (local wall clock) or the
+    UTC knobs. Passing any explicit window argument selects the legacy fixed-UTC
+    formula (defaults 6/11/0/120), kept for callers/tests that pin a window.
+    Shared by the LP block's wiring and the baseline simulator so both arms
+    budget the identical cycle and it cancels out of the comparison.
     """
-    start_min = start_hour_utc * 60 + start_minute_utc
-    members = [
-        i for i, st in enumerate(slot_starts_utc)
-        if st.weekday() == dow
-        and start_min <= (st.hour * 60 + st.minute) < start_min + duration_minutes
-    ]
+    if (dow, start_hour_utc, start_minute_utc, duration_minutes) == (None,) * 4:
+        from ..legionella_window import in_standoff_window
+
+        members = [i for i, st in enumerate(slot_starts_utc) if in_standoff_window(st)]
+    else:
+        dow = 6 if dow is None else dow
+        start_min = (11 if start_hour_utc is None else start_hour_utc) * 60 + (
+            0 if start_minute_utc is None else start_minute_utc
+        )
+        dur = 120 if duration_minutes is None else duration_minutes
+        members = [
+            i for i, st in enumerate(slot_starts_utc)
+            if st.weekday() == dow
+            and start_min <= (st.hour * 60 + st.minute) < start_min + dur
+        ]
     out = [0.0] * len(slot_starts_utc)
     if members and budget_kwh > 0:
         per = budget_kwh / len(members)
