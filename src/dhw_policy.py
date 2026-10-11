@@ -705,26 +705,19 @@ def _legionella_standoff_window_utc(
     target_date_local: date,
 ) -> tuple[datetime, datetime] | None:
     """The firmware legionella stand-off window overlapping ``target_date_local``
-    (UTC bounds), or None. Defined in UTC on a fixed weekday (see the
-    ``DHW_LEGIONELLA_STANDOFF_*`` knobs; the window never crosses midnight).
-    Local in the UK is UTC or UTC+1, so the local date's own UTC day is the
-    only candidate that can overlap the local afternoon."""
+    (UTC bounds), or None. Delegates to :mod:`src.legionella_window`: UTC knobs
+    by default (``target_date_local`` read as the UTC day; local in the UK is
+    UTC or UTC+1, so it is the only candidate overlapping the local afternoon),
+    or the local wall-clock ``DHW_LEGIONELLA_STANDOFF_START_LOCAL``. Never
+    crosses midnight."""
     if not getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", False):
         return None
+    from .legionella_window import standoff_window_for_date
+
     try:
-        dow = int(config.DHW_LEGIONELLA_STANDOFF_DOW)
-        start_h = int(config.DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC)
-        start_m = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0))
-        dur_min = int(config.DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES)
+        return standoff_window_for_date(target_date_local)
     except (AttributeError, TypeError, ValueError):
         return None
-    if target_date_local.weekday() != dow:
-        return None
-    start = datetime(
-        target_date_local.year, target_date_local.month, target_date_local.day,
-        start_h, start_m, tzinfo=UTC,
-    )
-    return start, start + timedelta(minutes=max(1, dur_min))
 
 
 def _dynamic_window_enabled() -> bool:
@@ -2029,21 +2022,12 @@ def forecast_dhw_load_per_slot(
     if bool(getattr(config, "DHW_LEGIONELLA_BUDGET_ENABLED", True)):
         _budget = float(getattr(config, "DHW_LEGIONELLA_BUDGET_KWH", 3.5))
         if _budget > 0 and bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)):
-            _dow = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6))
-            _h0 = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11))
-            _m0 = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0))
-            _dur = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120))
+            from .legionella_window import in_standoff_window
+
             _cap = max(0.05, float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * 0.5)
-            _idxs: list[int] = []
-            for _i, _slot in enumerate(slot_starts_utc):
-                _su = _slot.astimezone(UTC)
-                if _su.weekday() != _dow:
-                    continue
-                _ws = _su.replace(hour=_h0, minute=_m0, second=0, microsecond=0)
-                # Window is defined not to cross midnight (config contract),
-                # so slot and window share the UTC date.
-                if _ws <= _su < _ws + timedelta(minutes=_dur):
-                    _idxs.append(_i)
+            _idxs: list[int] = [
+                _i for _i, _slot in enumerate(slot_starts_utc) if in_standoff_window(_slot)
+            ]
             if _idxs:
                 _per_slot = min(_cap, _budget / len(_idxs))
                 for _i in _idxs:
