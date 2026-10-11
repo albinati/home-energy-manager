@@ -1590,7 +1590,8 @@ async def optimization_inputs(horizon_hours: int | None = None):
     # Same builder + lookup the LP uses (measured-split-calibrated, away-day
     # excluded, day-of-week aware) so this debug view matches the plan.
     try:
-        load_prof = db.residual_load_profile_v2()
+        # Off the event loop; stale-while-revalidate (cold rebuild ~16 s).
+        load_prof = await asyncio.to_thread(db.residual_load_profile_v2, allow_stale=True)
     except Exception:
         load_prof = None
     # Operator load scale — mirrors the multiplier the optimizer applies to the

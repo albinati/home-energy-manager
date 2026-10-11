@@ -147,7 +147,10 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
 
     load_prof: dict[str, Any] | None = None
     try:
-        load_prof = db.residual_load_profile_v2()
+        # Off the event loop (cold rebuild is ~16 s) and stale-while-revalidate:
+        # the cockpit polls every 5 min > the 4-min cache TTL, so serve the
+        # expired profile and let a background thread refresh it.
+        load_prof = await asyncio.to_thread(db.residual_load_profile_v2, allow_stale=True)
     except Exception as e:
         logger.warning("pv/today: load profile failed (%s)", e)
 
