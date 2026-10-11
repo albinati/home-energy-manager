@@ -2478,12 +2478,36 @@ def clear_residual_profile_cache() -> None:
     _RESIDUAL_V2_CACHE.clear()
 
 
+_RESIDUAL_V2_REFRESHING: set[Any] = set()
+_RESIDUAL_V2_REFRESH_LOCK = threading.Lock()
+
+
+def _kick_residual_refresh(cache_key: Any, kwargs: dict[str, Any]) -> None:
+    """Start ONE background rebuild of ``cache_key`` (no-op if one is running)."""
+    with _RESIDUAL_V2_REFRESH_LOCK:
+        if cache_key in _RESIDUAL_V2_REFRESHING:
+            return
+        _RESIDUAL_V2_REFRESHING.add(cache_key)
+
+    def _run() -> None:
+        try:
+            residual_load_profile_v2(**kwargs)  # fresh path re-populates the cache
+        except Exception:
+            logger.warning("residual_load_profile_v2 background refresh failed", exc_info=True)
+        finally:
+            with _RESIDUAL_V2_REFRESH_LOCK:
+                _RESIDUAL_V2_REFRESHING.discard(cache_key)
+
+    threading.Thread(target=_run, name="residual-v2-refresh", daemon=True).start()
+
+
 def residual_load_profile_v2(
     *,
     window_days: int | None = None,
     end_date: str | None = None,
     min_samples_per_bucket: int = 4,
     use_cache: bool = True,
+    allow_stale: bool = False,
 ) -> dict[str, Any]:
     """Day-of-week-aware residual (non-Daikin) household load profile with
     robust stats and a measured-split-calibrated Daikin subtraction (#477).
@@ -2547,6 +2571,19 @@ def residual_load_profile_v2(
     if use_cache:
         ent = _RESIDUAL_V2_CACHE.get(cache_key)
         if ent is not None and ent[0] > time.monotonic():
+            return ent[1]
+        if allow_stale and ent is not None:
+            # Stale-while-revalidate for read-only views: serve the expired
+            # profile now and rebuild in the background (single-flight per key).
+            _kick_residual_refresh(
+                cache_key,
+                dict(
+                    window_days=window_days,
+                    end_date=end_date,
+                    min_samples_per_bucket=min_samples_per_bucket,
+                    use_cache=True,
+                ),
+            )
             return ent[1]
 
     def _finish(res: dict[str, Any]) -> dict[str, Any]:
