@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _backstop_ticks: int = 0
 _warm_ticks: int = 0
+_emergency_ticks: int = 0
 
 
 def effective_w3_ceiling_c() -> float:
@@ -165,7 +166,10 @@ def record_planned(
                     pred = float(traj[i])
             out_c = float(plan.temp_outdoor_c[i]) if i < len(plan.temp_outdoor_c) else None
             cop = None
-            if out_c is not None and math.isfinite(out_c):
+            eff = getattr(plan, "cop_space_effective", None) or []
+            if i < len(eff) and getattr(plan, "cop_lwt_offset_penalty_per_k", 0.0):
+                cop = round(float(eff[i]), 3)  # #863: thermal / electric incl. lift segments
+            elif out_c is not None and math.isfinite(out_c):
                 try:
                     cop = round(max(1.0, cop_at_temperature(curve, out_c)), 3)
                 except Exception:
@@ -281,9 +285,10 @@ def _active_negative_row(plan_date: str, now_utc: datetime) -> dict[str, Any] | 
 
 
 def reset_backstop() -> None:
-    global _backstop_ticks, _warm_ticks
+    global _backstop_ticks, _warm_ticks, _emergency_ticks
     _backstop_ticks = 0
     _warm_ticks = 0
+    _emergency_ticks = 0
 
 
 def backstop_tick(
@@ -553,4 +558,171 @@ def warm_backstop_tick(
         out["replanned"] = replanned
     except Exception as e:
         logger.warning("lwt warm backstop error: %s", e, exc_info=True)
+    return out
+
+
+# ------------------------------------------------------------ emergency (#863)
+# The plan should PREDICT cold; this is the exceptional live net: the fresh aggregate
+# indoor reading under LP_W3_EMERGENCY_FLOOR_C for N ticks forces a strong positive
+# offset (unless one is already active), holds it, and re-solves.
+_EMERGENCY_HOLD_KEY = "lwt_emergency_hold_until"
+
+
+def get_emergency_hold_until() -> datetime | None:
+    try:
+        raw = db.get_kv(_EMERGENCY_HOLD_KEY)
+        if not raw:
+            return None
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except Exception:
+        return None
+
+
+def active_emergency_hold_until(now_utc: datetime | None = None) -> datetime | None:
+    h = get_emergency_hold_until()
+    if h is None:
+        return None
+    return h if h > (now_utc or datetime.now(UTC)) else None
+
+
+def _set_emergency_hold(until: datetime) -> None:
+    try:
+        db.set_kv(_EMERGENCY_HOLD_KEY, until.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        logger.warning("lwt emergency: could not persist hold", exc_info=True)
+
+
+def emergency_offset_c() -> int:
+    return int(round(float(getattr(config, "LWT_EMERGENCY_OFFSET_C", 5))))
+
+
+def _strong_positive_row(plan_date: str, now_utc: datetime, min_offset: float) -> dict[str, Any] | None:
+    """An ACTIVE, not user-overridden ``lwt_preheat`` row with offset >= ``min_offset``."""
+    row = _active_positive_row(plan_date, now_utc)
+    if row is not None and float((row.get("params") or {}).get("lwt_offset")) >= min_offset:
+        return row
+    # _active_positive_row returns the newest active positive row; look at all of them
+    try:
+        d0 = datetime.fromisoformat(plan_date).date()
+    except ValueError:
+        d0 = now_utc.astimezone(_tz()).date()
+    for d in (d0, d0 - timedelta(days=1), d0 + timedelta(days=1)):
+        for act in db.get_actions_for_plan_date(d.isoformat(), device="daikin"):
+            if act.get("action_type") != "lwt_preheat" or act.get("status") != "active":
+                continue
+            if act.get("overridden_by_user_at"):
+                continue
+            try:
+                s = datetime.fromisoformat(str(act["start_time"]).replace("Z", "+00:00"))
+                e = datetime.fromisoformat(str(act["end_time"]).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if not (s <= now_utc < e):
+                continue
+            off = (act.get("params") or {}).get("lwt_offset")
+            if off is not None and float(off) >= min_offset:
+                return act
+    return None
+
+
+def emergency_tick(
+    *,
+    now_utc: datetime,
+    plan_date: str,
+    dev: Any,
+    client: Any,
+    replan_fn: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """One heartbeat evaluation of the emergency floor (#863). Never raises."""
+    global _emergency_ticks
+    out: dict[str, Any] = {"ticks": 0, "fired": False}
+    try:
+        if not bool(getattr(config, "LWT_EMERGENCY_ENABLED", True)):
+            return out
+        if str(getattr(config, "DAIKIN_CONTROL_MODE", "passive")) != "active" or bool(
+            getattr(config, "OPENCLAW_READ_ONLY", False)
+        ):
+            _emergency_ticks = 0
+            return out
+        reading = db.get_latest_indoor_reading(
+            max_age_minutes=int(getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30))
+        )
+        if reading is None or reading.get("temp_c") is None:
+            return out  # stale/absent sensor: HOLD the counter
+        indoor = float(reading["temp_c"])
+        floor = float(getattr(config, "LP_W3_EMERGENCY_FLOOR_C", 20.0))
+        offset = emergency_offset_c()
+        out.update(indoor=indoor, floor=floor)
+        if indoor >= floor:
+            _emergency_ticks = 0
+            return out
+        if _strong_positive_row(plan_date, now_utc, float(offset)) is not None:
+            # the device is already being driven hard: nothing to add (counter reset)
+            _emergency_ticks = 0
+            out["already_boosting"] = True
+            return out
+        _emergency_ticks += 1
+        out["ticks"] = _emergency_ticks
+        if _emergency_ticks < max(1, int(getattr(config, "LWT_EMERGENCY_TICKS", 2))):
+            return out
+
+        from ..daikin.client import DaikinError
+        from ..daikin_bulletproof import apply_scheduled_daikin_params
+
+        log_params = {"indoor": indoor, "floor": floor, "offset": offset}
+        try:
+            wrote = apply_scheduled_daikin_params(
+                dev, client, {"lwt_offset": offset}, trigger="lwt_emergency", skip_if_matches=False,
+            )
+        except (DaikinError, ValueError) as e:
+            logger.warning("lwt emergency write failed: %s", e)
+            db.log_action(
+                device="daikin", action="lwt_emergency", params=log_params,
+                result="failure", trigger="heartbeat", error_msg=str(e),
+            )
+            return out
+        if not wrote:
+            db.log_action(
+                device="daikin", action="lwt_emergency", params=log_params,
+                result="skipped", trigger="heartbeat",
+                error_msg="apply_scheduled_daikin_params did not write (passive/read_only/unchanged)",
+            )
+            return out
+        _emergency_ticks = 0
+        out["fired"] = True
+        hold_minutes = max(0, int(getattr(config, "LWT_EMERGENCY_HOLD_MINUTES", 60)))
+        hold_until = now_utc + timedelta(minutes=hold_minutes)
+        _set_emergency_hold(hold_until)
+        out["hold_until"] = hold_until.isoformat().replace("+00:00", "Z")
+        db.log_action(
+            device="daikin", action="lwt_emergency",
+            params={**log_params, "hold_until": out["hold_until"]},
+            result="ok", trigger="heartbeat",
+        )
+        try:
+            key = f"lwt_emergency_{now_utc.astimezone(_tz()):%Y-%m-%d}"
+            if not db.is_warning_acknowledged(key):
+                from ..notifier import notify_risk
+
+                notify_risk(
+                    f"House at {indoor:.1f} C, under the {floor:.1f} C EMERGENCY floor: "
+                    f"LWT forced to {offset:+d} and plan re-solved.",
+                    extra={"warning_key": key},
+                )
+                db.acknowledge_warning(key)
+        except Exception as e:
+            logger.debug("lwt emergency notify failed: %s", e)
+        replanned: bool | None = None
+        if replan_fn is not None:
+            try:
+                replanned = bool(replan_fn(
+                    force_write_devices=True, trigger_reason="lwt_emergency", bypass_cooldown=True,
+                ))
+            except Exception as e:
+                logger.warning("lwt emergency replan failed: %s", e)
+                replanned = False
+        out["replanned"] = replanned
+    except Exception as e:
+        logger.warning("lwt emergency error: %s", e, exc_info=True)
     return out

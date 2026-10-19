@@ -1014,6 +1014,14 @@ class Config:
     LWT_COMFORT_BACKSTOP_HOLD_MINUTES: int = int(os.getenv("LWT_COMFORT_BACKSTOP_HOLD_MINUTES", "90"))
     # #855 warm-side backstop: cancel an active positive LWT boost once the
     # measured house reaches ceiling - DAIKIN_LWT_PREHEAT_COMFORT_BAND_C.
+    # #863 — K lift segments of the space-heat COP (env-only, 1..4), the emergency
+    # floor's slack penalty (env-only) and the live emergency forcing.
+    LP_COP_LWT_LIFT_SEGMENTS: int = max(1, min(4, int(os.getenv("LP_COP_LWT_LIFT_SEGMENTS", "2"))))
+    LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT: float = float(os.getenv("LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT", "1000"))
+    LWT_EMERGENCY_ENABLED: bool = os.getenv("LWT_EMERGENCY_ENABLED", "true").lower() in ("true", "1", "yes")
+    LWT_EMERGENCY_TICKS: int = int(os.getenv("LWT_EMERGENCY_TICKS", "2"))
+    LWT_EMERGENCY_OFFSET_C: float = float(os.getenv("LWT_EMERGENCY_OFFSET_C", "5"))
+    LWT_EMERGENCY_HOLD_MINUTES: int = int(os.getenv("LWT_EMERGENCY_HOLD_MINUTES", "60"))
     LWT_WARM_BACKSTOP_ENABLED: bool = os.getenv("LWT_WARM_BACKSTOP_ENABLED", "true").lower() in ("true", "1", "yes")
     LWT_WARM_BACKSTOP_TICKS: int = int(os.getenv("LWT_WARM_BACKSTOP_TICKS", "2"))
     LWT_WARM_BACKSTOP_HOLD_MINUTES: int = int(os.getenv("LWT_WARM_BACKSTOP_HOLD_MINUTES", "60"))
@@ -2608,6 +2616,22 @@ class Config:
     @LP_W3_SOLAR_GAIN_KW_PER_PV_KW.setter
     def LP_W3_SOLAR_GAIN_KW_PER_PV_KW(self, value: float) -> None:
         self._rt_set("LP_W3_SOLAR_GAIN_KW_PER_PV_KW", float(value))
+
+    @property
+    def LP_COP_LWT_OFFSET_PENALTY_PER_K(self) -> float:
+        return float(self._rt_get("LP_COP_LWT_OFFSET_PENALTY_PER_K"))
+
+    @LP_COP_LWT_OFFSET_PENALTY_PER_K.setter
+    def LP_COP_LWT_OFFSET_PENALTY_PER_K(self, value: float) -> None:
+        self._rt_set("LP_COP_LWT_OFFSET_PENALTY_PER_K", float(value))
+
+    @property
+    def LP_W3_EMERGENCY_FLOOR_C(self) -> float:
+        return float(self._rt_get("LP_W3_EMERGENCY_FLOOR_C"))
+
+    @LP_W3_EMERGENCY_FLOOR_C.setter
+    def LP_W3_EMERGENCY_FLOOR_C(self, value: float) -> None:
+        self._rt_set("LP_W3_EMERGENCY_FLOOR_C", float(value))
 
     @property
     def LP_W3_CEILING_C(self) -> float:
