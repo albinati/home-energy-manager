@@ -2086,6 +2086,78 @@ def bulletproof_plan_push_job() -> None:
             optimizer_dispatch_lock.release()
 
 
+_IMPORT_OVERSHOOT_KV_KEY = "import_overshoot_last_fired_slot"
+_import_overshoot_last_slot: str | None = None  # in-memory fallback if kv fails
+
+
+def _import_overshoot_last_fired() -> str | None:
+    try:
+        raw = db.get_kv(_IMPORT_OVERSHOOT_KV_KEY)
+        if raw:
+            return str(raw)
+    except Exception:
+        logger.debug("import_overshoot: kv read failed", exc_info=True)
+    return _import_overshoot_last_slot
+
+
+def _record_import_overshoot_fired(slot_iso: str) -> None:
+    global _import_overshoot_last_slot
+    _import_overshoot_last_slot = slot_iso
+    try:
+        db.set_kv(_IMPORT_OVERSHOOT_KV_KEY, slot_iso)
+    except Exception:
+        logger.warning("import_overshoot: could not persist last fired slot", exc_info=True)
+
+
+def _maybe_fire_import_overshoot(now_utc: datetime) -> None:
+    """Event-driven MPC: import_overshoot trigger.
+
+    Compare actual grid import in the LAST COMPLETED half-hour slot vs the LP
+    plan active at that slot's start. If actual exceeds plan by >= threshold,
+    re-plan. The plan is read at slot START, so a re-plan never "absorbs" the
+    overshoot and the condition stays true until the slot rolls over; we
+    therefore fire at most ONCE per completed ``slot_start`` (last fired slot
+    persisted in ``kv_state`` so a restart does not re-fire; in-memory
+    fallback if the kv write fails). Catches Fox V3 ForceCharge over-pulling
+    vs the LP's tapered schedule (2026-05-08 incident). Issue #865.
+    """
+    threshold_kwh = float(config.MPC_IMPORT_OVERSHOOT_KWH_THRESHOLD)
+    if not (config.MPC_EVENT_DRIVEN_ENABLED and threshold_kwh > 0):
+        return
+    try:
+        # Last fully completed slot ends at the most recent :00 or :30 boundary.
+        now_floor = now_utc.replace(second=0, microsecond=0)
+        slot_end = now_floor.replace(minute=0 if now_floor.minute < 30 else 30)
+        slot_start = slot_end - timedelta(minutes=30)
+        slot_iso = slot_start.isoformat()
+        if _import_overshoot_last_fired() == slot_iso:
+            logger.debug("import_overshoot: slot=%s already fired, skipping", slot_iso)
+            return
+        actual_kwh = _actual_import_kwh_for_slot(slot_start)
+        planned_kwh = _lp_planned_import_kwh_at(slot_start)
+        if actual_kwh is None or planned_kwh is None:
+            return
+        overshoot_kwh = actual_kwh - planned_kwh
+        if overshoot_kwh >= threshold_kwh:
+            logger.info(
+                "MPC import_overshoot trigger: slot=%s actual=%.2f kWh "
+                "planned=%.2f kWh delta=+%.2f kWh (>=%.2f) — re-planning",
+                slot_iso, actual_kwh, planned_kwh, overshoot_kwh, threshold_kwh,
+            )
+            _record_import_overshoot_fired(slot_iso)
+            bulletproof_mpc_job(
+                force_write_devices=True,
+                trigger_reason="import_overshoot",
+            )
+        else:
+            logger.debug(
+                "MPC import_overshoot check: slot=%s delta=+%.2f kWh < %.2f, no fire",
+                slot_iso, overshoot_kwh, threshold_kwh,
+            )
+    except Exception as e:
+        logger.debug("import_overshoot check failed (non-fatal): %s", e)
+
+
 def bulletproof_heartbeat_tick() -> None:
     """Heartbeat monitor (every HEARTBEAT_INTERVAL_SECONDS, default 5 min): Daikin schedule execution, telemetry, Fox flag check."""
     global _last_exec_halfhour_key, _last_fox_verify_monotonic, _last_room_temp, _last_room_wall_utc, _last_notified_slot_kind, _last_notified_slot_kind_loaded
@@ -2231,46 +2303,9 @@ def bulletproof_heartbeat_tick() -> None:
         except Exception as e:
             logger.debug("drift-trigger check failed (non-fatal): %s", e)
 
-    # Event-driven MPC: import_overshoot trigger.
-    # Compare actual grid import in the LAST COMPLETED half-hour slot vs the
-    # LP plan for that same slot. If actual exceeds plan by >= threshold and
-    # we're inside the cooldown-clear window, re-plan immediately. Catches
-    # the failure mode where Fox V3 ForceCharge over-pulls vs the LP's
-    # tapered schedule (2026-05-08 incident: planned 7.49 kWh / 4 h, actual
-    # 10.18 kWh = +36 %). Single-shot — by the time we know a slot
-    # overshot, it's already over and we want to revise the remaining
-    # ForceCharge window NOW.
-    threshold_kwh = float(config.MPC_IMPORT_OVERSHOOT_KWH_THRESHOLD)
-    if config.MPC_EVENT_DRIVEN_ENABLED and threshold_kwh > 0:
-        try:
-            # Last fully completed slot ends at the most recent :00 or :30
-            # boundary <= now. Subtract 30 minutes to get its start.
-            now_floor = now_utc.replace(second=0, microsecond=0)
-            slot_end_minute = 0 if now_floor.minute < 30 else 30
-            slot_end = now_floor.replace(minute=slot_end_minute)
-            slot_start = slot_end - timedelta(minutes=30)
-            actual_kwh = _actual_import_kwh_for_slot(slot_start)
-            planned_kwh = _lp_planned_import_kwh_at(slot_start)
-            if actual_kwh is not None and planned_kwh is not None:
-                overshoot_kwh = actual_kwh - planned_kwh
-                if overshoot_kwh >= threshold_kwh:
-                    logger.info(
-                        "MPC import_overshoot trigger: slot=%s actual=%.2f kWh "
-                        "planned=%.2f kWh delta=+%.2f kWh (>=%.2f) — re-planning",
-                        slot_start.isoformat(), actual_kwh, planned_kwh,
-                        overshoot_kwh, threshold_kwh,
-                    )
-                    bulletproof_mpc_job(
-                        force_write_devices=True,
-                        trigger_reason="import_overshoot",
-                    )
-                else:
-                    logger.debug(
-                        "MPC import_overshoot check: slot=%s delta=+%.2f kWh < %.2f, no fire",
-                        slot_start.isoformat(), overshoot_kwh, threshold_kwh,
-                    )
-        except Exception as e:
-            logger.debug("import_overshoot check failed (non-fatal): %s", e)
+    # Event-driven MPC: import_overshoot trigger (at most once per completed
+    # slot, see _maybe_fire_import_overshoot).
+    _maybe_fire_import_overshoot(now_utc)
 
     # Event-driven MPC: live PV/load deviation trigger.
     # Complements forecast_revision (forecast-vs-forecast) with real-vs-expected checks.
