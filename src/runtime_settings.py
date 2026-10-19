@@ -249,6 +249,20 @@ SCHEMA: dict[str, SettingSpec] = {
             "learned solar_gain_kw_per_pv_kw on the LWT learning card."
         ),
     ),
+    "LP_W3_EMITTER_TAU_MIN": SettingSpec(
+        key="LP_W3_EMITTER_TAU_MIN",
+        type_name="float",
+        env_default=_float_env("LP_W3_EMITTER_TAU_MIN", "0.0"),
+        min_value=0.0,
+        max_value=120.0,
+        description=(
+            "W3 RC model (#866): first-order emitter/water-loop lag in minutes between "
+            "heat PRODUCED by the pump and heat DELIVERED to the room (prod step tests: "
+            "~30-40 min on a boost, and heat keeps arriving ~35-40 min after a setback). "
+            "0 = off (heat enters the room in the same slot, the pre-#866 equation, "
+            "bit-for-bit)."
+        ),
+    ),
     "LP_COP_LWT_OFFSET_PENALTY_PER_K": SettingSpec(
         key="LP_COP_LWT_OFFSET_PENALTY_PER_K",
         type_name="float",

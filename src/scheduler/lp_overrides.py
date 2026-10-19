@@ -102,6 +102,12 @@ WHITELIST: dict[str, OverrideSpec] = {
         description="W3 night comfort floor (22-07 local, deg C).",
         group="comfort", promotable=True,
     ),
+    "LP_W3_EMITTER_TAU_MIN": OverrideSpec(
+        key="LP_W3_EMITTER_TAU_MIN", config_attr="LP_W3_EMITTER_TAU_MIN",
+        type_name="float", min_value=0.0, max_value=120.0,
+        description="W3 emitter/water-loop lag (minutes, 0 = off).",
+        group="comfort", promotable=True,
+    ),
     "LP_W3_PEAK_COAST_DELTA_C": OverrideSpec(
         key="LP_W3_PEAK_COAST_DELTA_C", config_attr="LP_W3_PEAK_COAST_DELTA_C",
         type_name="float", min_value=0.0, max_value=4.0,

@@ -46,6 +46,7 @@ export const SETTINGS_GROUPS: GroupSpec[] = [
       "LP_W3_CEILING_C",
       "LP_W3_INTERNAL_GAIN_KW",
       "LP_W3_SOLAR_GAIN_KW_PER_PV_KW",
+      "LP_W3_EMITTER_TAU_MIN",
     ],
   },
   {
@@ -127,6 +128,7 @@ export const KEY_LABELS: Record<string, string> = {
   LP_W3_CEILING_C: "Comfort ceiling (°C)",
   LP_W3_INTERNAL_GAIN_KW: "Internal heat gain (kW thermal)",
   LP_W3_SOLAR_GAIN_KW_PER_PV_KW: "Solar gain (kW thermal per PV kW)",
+  LP_W3_EMITTER_TAU_MIN: "Emitter lag (minutes)",
   OPTIMIZATION_PRESET: "Household mode",
   DHW_TEMP_NORMAL_C: "Normal tank target",
   DHW_TEMP_COMFORT_C: "Comfort tank target (plunge fill)",

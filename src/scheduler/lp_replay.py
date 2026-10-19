@@ -315,6 +315,7 @@ def replay_run(
                 float(inputs["indoor_initial_c"])
                 if inputs.get("indoor_initial_c") is not None else None
             ),
+            **_snapshot_emitter_kwargs(inputs),
         )
 
     # Weather: prefer the exact forecast fetch referenced by the LP snapshot;
@@ -1125,6 +1126,38 @@ def _state_at(plan: LpPlan, when_utc: datetime) -> LpInitialState:
         soc_source="replay_chain",
         tank_source="replay_chain",
         indoor_temp_c=float(indoor) if indoor is not None else None,
+        emitter_h0_kwh=(
+            float(hs[idx] if idx < len(hs) else hs[-1])
+            if (hs := list(getattr(plan, "w3_emitter_heat_kwh", []) or [])) else None
+        ),
+        emitter_h0_tau_min=float(getattr(plan, "w3_emitter_tau_min", 0.0) or 0.0) or None,
+    )
+
+
+def _snapshot_emitter(inputs: dict) -> dict:
+    """#866 — the emitter inputs recorded on the snapshot (any may be missing): ``lwt_actual_c``,
+    ``lwt_offset_c``, ``h0_kwh`` + ``tau_min`` (only when the lag was solved). Pre-#866 snapshots
+    carry nothing -> the LP's steady-state-at-the-curve fallback."""
+    try:
+        em = json.loads(inputs.get("exogenous_snapshot_json") or "{}").get("emitter") or {}
+        return em if isinstance(em, dict) else {}
+    except Exception:
+        return {}
+
+
+def _snapshot_emitter_kwargs(inputs: dict) -> dict:
+    """LpInitialState kwargs from the snapshot. The persisted h0 is passed WITH the tau it was
+    solved at; the LP honours it only if that equals the replay's tau, otherwise it recomputes h0
+    from the persisted LWT (then the curve fallback)."""
+    em = _snapshot_emitter(inputs)
+
+    def f(k: str) -> float | None:
+        v = em.get(k)
+        return float(v) if v is not None else None
+
+    return dict(
+        lwt_actual_c=f("lwt_actual_c"), lwt_offset_c=f("lwt_offset_c"),
+        emitter_h0_kwh=f("h0_kwh"), emitter_h0_tau_min=f("tau_min"),
     )
 
 

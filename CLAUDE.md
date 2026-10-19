@@ -960,6 +960,57 @@ bands did not heat less) because the LP priced +10 K of LWT at the curve COP.
   the two emergency env knobs. The comfort-band retune (setpoint 21 / ceiling 21.5, lower
   `DAIKIN_LWT_PREHEAT_COMFORT_BAND_C`) is a settings change, not code.
 
+### Emitter lag (#866)
+
+Prod step tests (2026-10-18/19): a +10 offset reaches LWT target ~25 min later and the room starts
+rising 30-40 min after the write; after a setback the room keeps receiving heat ~35-40 min. The W3 RC
+equation used to put `e_space*COP` into `t_in` in the SAME slot.
+
+- **`LP_W3_EMITTER_TAU_MIN`** (runtime, comfort group, 0..120, **code default 0 = no variables, bit-for-bit**;
+  also in the `lp_overrides` WHITELIST and the `lp_inputs_snapshot` config snapshot). tau > 0, W3 on, not
+  passive: loop heat `h[0..n]` (kWh_th above room) and delivered `d[i]`, `d = a*h + b*q`, `h' = h + q - d`
+  (a = 1-exp(-dt/tau), b = 1-(tau/dt)*a, `q` = `_thermal_space(i)` incl. #863 lift segments). The RC equation
+  uses `d`; the radiator cap and gentle-recovery cap stay on PRODUCTION `q`; comfort/ceiling/emergency
+  constraints are on the room as before. Heat still in the loop at the horizon end is not credited (slight
+  bias against late heating). `space_electric_kwh` / `lwt_offset_c` stay PRODUCTION, so dispatch, the
+  `lwt_learning_log` planned fields and `plan/fronts` keep their meaning. Plan fields: `w3_emitter_tau_min`,
+  `w3_emitter_h0_kwh`, `w3_delivered_kwh` (per slot).
+- **`h[0]`** (`lp_optimizer._emitter_h0_kwh`): steady state `P * tau` of the supply temperature the pump is
+  on, `P = k*(lwt-18)*COP` (kWh_th per h). `lwt` = `LpInitialState.lwt_actual_c` (freshest live
+  `daikin_telemetry` <= 30 min) ONLY if plausible: `lwt <= min(50, curve(outdoor) + OPTIMIZATION_LWT_OFFSET_MAX
+  + 5)`. A tank reheat reads 45-50 C on the same sensor (3-way valve: no heat to the radiators), so an
+  implausible, stale or absent reading falls back to the weather CURVE at the current outdoor temperature
+  PLUS the offset the device is on now (`db.get_active_lwt_offset`: the active `lwt_preheat`/`restore` row,
+  else the latest `execution_log.daikin_lwt_offset` <= 2 h old, else 0), so a coast at -10 seeds ~0 through
+  the ramp and a +5 boost seeds the steady state at curve+5 (0 above `DAIKIN_WEATHER_CURVE_HIGH_C`). When the
+  offset is known the plausibility cap tightens to `min(50, curve + max(0, offset) + 5)`. COP is lift-derated
+  like the #863 segments (`max(LP_COP_LIFT_MIN_MULTIPLIER, 1 - p*(lwt-curve))`) when the reading implies lift.
+  Continuity: scaled by `clip((lwt - indoor - 1)/3, 0, 1)` (0 at <= 1 K above the room, full at >= 4 K) so
+  there is no cliff. `LpInitialState.emitter_h0_kwh` (explicit) wins over all of that: chained replays carry
+  the predicted end-of-segment `plan.w3_emitter_heat_kwh[idx]`. EVERY run (also at tau 0) persists
+  `exogenous_snapshot_json.emitter = {lwt_actual_c, lwt_offset_c, indoor_c}`; `h0_kwh` + `tau_min` only when
+  tau > 0. A replay honours the persisted `h0_kwh` only if the snapshot's `tau_min` equals the replay's tau,
+  otherwise it recomputes h0 from the persisted LWT/offset (then the curve fallback), so a 7-day tau > 0 replay
+  of runs recorded at tau 0 is seeded. Pre-#866 snapshots have no `emitter` key and replay with the
+  steady-state-at-curve fallback.
+- **Plausibility gate**: with tau > 0, `w3_trajectory_plausible` ignores floor and emergency slack in the first
+  `ceil(tau/30)+1` slots (heat produced now only reaches the room later, so slack there after a cold start
+  is unavoidable); slack later in the plan still vetoes.
+- **Min-block smoother**: `DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS` (4) erases more short peak coasts at tau > 0
+  (lag-shaped plans have shorter distinct runs). Existing behaviour, not changed here.
+- **Report-only fit** (`fit_emitter_tau`, nightly `lwt_learning_daily.payload.emitter_tau_fit`): over 14 days,
+  windows of 4 constant-offset slots + a >= 3 K device-offset step + 6 slots. The room is simulated per minute
+  with the LP draw model x COP and compared with the logged slot MEAN (`indoor_real_c`), with the start
+  temperature and a constant gain solved per event; tau in 0..90 step 10, least SSE. Windows with a DHW reheat
+  are dropped (tank temperature rise in `daikin_telemetry`, or `lwt_actual` > curve + max(offset over this and
+  the previous 2 slots) + 5 K or > 50 C). Reports `best_tau_min`, `sse_by_tau_min`, `n_events` (after
+  filtering), `n_events_dropped_dhw`, `n_events_tank_blind`, `sse_gap_vs_zero`, `sse_spread` and `confidence` (`ok`
+  needs >= 6 events, spread >= 0.25, dropped-DHW <= kept and no kept window with a > 40 min hole in the tank
+  telemetry (the DHW filter is blind there); else `low`; `none` below 3 events). Known biases: the write moment inside a slot is not
+  modelled. NEVER applied.
+- Rollout: deploy at 0, read the fit + the ~30-40 min table, replay 7 days at 0 vs tau, then
+  `PUT /api/v1/settings` `LP_W3_EMITTER_TAU_MIN`. Kill switch: set it back to 0.
+
 ## Key `.env` settings to know
 
 ```

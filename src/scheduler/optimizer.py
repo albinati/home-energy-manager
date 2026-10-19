@@ -1388,6 +1388,7 @@ def _persist_lp_snapshots(
         "LP_W3_CEILING_C": float(getattr(config, "LP_W3_CEILING_C", 23.0)),
         "LP_W3_INTERNAL_GAIN_KW": float(getattr(config, "LP_W3_INTERNAL_GAIN_KW", 0.0)),
         "LP_W3_SOLAR_GAIN_KW_PER_PV_KW": float(getattr(config, "LP_W3_SOLAR_GAIN_KW_PER_PV_KW", 0.0)),
+        "LP_W3_EMITTER_TAU_MIN": float(getattr(config, "LP_W3_EMITTER_TAU_MIN", 0.0)),
         "LP_COP_LWT_OFFSET_PENALTY_PER_K": float(getattr(config, "LP_COP_LWT_OFFSET_PENALTY_PER_K", 0.0)),
         "LP_W3_EMERGENCY_FLOOR_C": float(getattr(config, "LP_W3_EMERGENCY_FLOOR_C", 20.0)),
         "LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT": float(getattr(config, "LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT", 0.0)),
@@ -1440,6 +1441,21 @@ def _persist_lp_snapshots(
             }
     except Exception:  # pragma: no cover — must never break a solve
         _w1_indoor_initial_c = None
+
+    # #866: ALWAYS record the emitter inputs (also at tau 0) so a later tau > 0 replay of these
+    # runs can seed h[0]; h0_kwh / tau_min only when the lag was actually solved.
+    _em = {
+        "lwt_actual_c": (float(initial.lwt_actual_c)
+                         if getattr(initial, "lwt_actual_c", None) is not None else None),
+        "lwt_offset_c": (float(initial.lwt_offset_c)
+                         if getattr(initial, "lwt_offset_c", None) is not None else None),
+        "indoor_c": (float(initial.indoor_temp_c)
+                     if getattr(initial, "indoor_temp_c", None) is not None else None),
+    }
+    if float(getattr(plan, "w3_emitter_tau_min", 0.0) or 0.0) > 0:
+        _em["h0_kwh"] = float(plan.w3_emitter_h0_kwh)
+        _em["tau_min"] = float(plan.w3_emitter_tau_min)
+    exogenous_snapshot["emitter"] = _em
 
     inputs_row = {
         "run_at_utc": run_at_iso,
