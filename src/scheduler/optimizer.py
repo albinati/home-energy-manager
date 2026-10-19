@@ -1442,9 +1442,14 @@ def _persist_lp_snapshots(
     except Exception:  # pragma: no cover — must never break a solve
         _w1_indoor_initial_c = None
 
-    if getattr(initial, "lwt_actual_c", None) is not None:
-        # #866: recorded so a replay can reproduce the emitter-lag seed h[0].
-        exogenous_snapshot["emitter"] = {"lwt_actual_c": float(initial.lwt_actual_c)}
+    if float(getattr(plan, "w3_emitter_tau_min", 0.0) or 0.0) > 0:
+        # #866: recorded so a replay reproduces the emitter-lag seed h[0] exactly.
+        exogenous_snapshot["emitter"] = {
+            "lwt_actual_c": (float(initial.lwt_actual_c)
+                             if getattr(initial, "lwt_actual_c", None) is not None else None),
+            "h0_kwh": float(plan.w3_emitter_h0_kwh),
+            "tau_min": float(plan.w3_emitter_tau_min),
+        }
 
     inputs_row = {
         "run_at_utc": run_at_iso,

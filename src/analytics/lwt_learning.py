@@ -944,6 +944,11 @@ EMITTER_STEP_MIN_K = 3.0       # device-offset change that counts as a step even
 EMITTER_PRE_SLOTS = 4          # slots before the step (offset must be constant there)
 EMITTER_POST_SLOTS = 6         # slots after the step slot
 EMITTER_WINDOW_DAYS = 14
+EMITTER_DHW_MARGIN_K = 5.0     # lwt_actual above curve + offset + this = a tank reheat
+EMITTER_SUBSTEPS = 30          # 1-minute integration inside a 30-min slot
+EMITTER_MIN_EVENTS = 3
+EMITTER_CONFIDENT_EVENTS = 6
+EMITTER_CONFIDENT_SPREAD = 0.25
 
 
 def _emitter_heat_kwh_th(r: dict[str, Any], cop_fn: Any) -> float | None:
@@ -957,15 +962,38 @@ def _emitter_heat_kwh_th(r: dict[str, Any], cop_fn: Any) -> float | None:
     return draw_kw * (SLOT_MIN / 60.0) * _cop(cop_fn, r)
 
 
-def _emitter_events(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+def _emitter_is_dhw(rows: list[dict[str, Any]], j: int, dhw_slots: set[str] | None) -> bool:
+    """A slot is DHW-contaminated when the tank was being reheated (tank rise seen in
+    ``daikin_telemetry``, ``dhw_slots``) or the leaving water is far above what the curve
+    plus the (recent) written offset can produce: a tank reheat reads 45-50 C on the same
+    sensor while the 3-way valve sends NO heat to the radiators. The offset used is the max
+    over this and the previous two slots, since after a setback the water cools slowly."""
+    r = rows[j]
+    if dhw_slots and r.get("slot_time_utc") in dhw_slots:
+        return True
+    if r.get("lwt_actual_c") is None or r.get("outdoor_real_c") is None:
+        return False
+    from ..physics import get_lwt_base_c
+    offs = [float(x["device_offset"]) for x in rows[max(0, j - 2): j + 1]
+            if x.get("device_offset") is not None]
+    cap = float(get_lwt_base_c(float(r["outdoor_real_c"]))) + (max(offs) if offs else 0.0) + EMITTER_DHW_MARGIN_K
+    return float(r["lwt_actual_c"]) > min(cap, 50.0)
+
+
+def _emitter_events(
+    rows: list[dict[str, Any]], dhw_slots: set[str] | None = None,
+) -> tuple[list[list[dict[str, Any]]], int]:
     """Windows (pre + step + post slots) around offset steps >= EMITTER_STEP_MIN_K whose
-    pre-step offset is constant and whose slots are contiguous with indoor/outdoor/offset."""
+    pre-step offset is constant and whose slots are contiguous with indoor/outdoor/offset.
+    Returns (usable windows, number dropped as DHW-contaminated)."""
     rs = sorted((r for r in rows if _ts(r) is not None), key=lambda r: r["slot_time_utc"])
-    need = EMITTER_PRE_SLOTS + EMITTER_POST_SLOTS + 1          # rows s-pre .. s+post (T needs +1)
+    need = EMITTER_PRE_SLOTS + EMITTER_POST_SLOTS + 1
     out: list[list[dict[str, Any]]] = []
+    dropped = 0
     last_end = -1
     for s in range(EMITTER_PRE_SLOTS, len(rs) - EMITTER_POST_SLOTS):
-        w = rs[s - EMITTER_PRE_SLOTS: s + EMITTER_POST_SLOTS + 1]
+        lo = s - EMITTER_PRE_SLOTS
+        w = rs[lo: s + EMITTER_POST_SLOTS + 1]
         if len(w) != need:
             continue
         ts = [_ts(r) for r in w]
@@ -979,10 +1007,43 @@ def _emitter_events(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
             continue
         if abs(float(w[EMITTER_PRE_SLOTS]["device_offset"]) - pre[-1]) < EMITTER_STEP_MIN_K:
             continue
-        if s - EMITTER_PRE_SLOTS <= last_end:          # windows must not overlap
+        if lo <= last_end:          # windows must not overlap
             continue
         last_end = s + EMITTER_POST_SLOTS
+        if any(_emitter_is_dhw(rs, lo + j, dhw_slots) for j in range(need)):
+            dropped += 1
+            continue
         out.append(w)
+    return out, dropped
+
+
+def _emitter_slot_means(
+    q: list[float], to: list[float], tau_min: float, ua: float, c: float,
+    *, t0: float, gain_kw: float,
+) -> list[float]:
+    """Slot MEANS of the room temperature (what ``indoor_real_c`` stores) for a piecewise-
+    constant production ``q`` (thermal kWh per slot), integrated per minute: loop heat h with
+    dh/dt = P - h/tau, delivery h/tau (tau 0: delivery = P), C dT/dt = delivery + gain -
+    UA (T - To). ``h`` starts at the steady state of the first slot's production."""
+    dt_h = SLOT_MIN / 60.0 / EMITTER_SUBSTEPS
+    t = t0
+    tau_h = tau_min / 60.0
+    h = q[0] / (SLOT_MIN / 60.0) * tau_h if tau_min > 0 else 0.0
+    ex = math.exp(-dt_h / tau_h) if tau_min > 0 else 0.0
+    out = []
+    for qj, toj in zip(q, to):
+        p = qj / (SLOT_MIN / 60.0)
+        acc = 0.0
+        for _ in range(EMITTER_SUBSTEPS):
+            if tau_min > 0:
+                h_new = h * ex + p * tau_h * (1.0 - ex)
+                deliv = 0.5 * (h + h_new) / tau_h
+                h = h_new
+            else:
+                deliv = p
+            t += (deliv + gain_kw - ua / 1000.0 * (t - toj)) * dt_h / c
+            acc += t
+        out.append(acc / EMITTER_SUBSTEPS)
     return out
 
 
@@ -990,39 +1051,48 @@ def _emitter_event_sse(
     w: list[dict[str, Any]], tau_min: float, ua_w_per_k: float, c_kwh_per_k: float,
     heat_fn: Any,
 ) -> float:
-    """One-step-ahead SSE of room deltas (per-event mean residual removed, so a constant
-    gain/UA bias does not pick the lag). State h starts at the steady state of the pre-step
-    production."""
-    dt_h = SLOT_MIN / 60.0
-    q = [float(heat_fn(r)) for r in w[:-1]]
-    t = [float(r["indoor_real_c"]) for r in w]
+    """SSE of the logged slot-mean room temperature vs the minute-level model, with the two
+    nuisance parameters of every event (start temperature T0 and a constant gain, kW)
+    solved in closed form: the affine model is linear in both, so one least-squares per
+    event, no bias from slot-END vs slot-MEAN, a wrong UA/gain or the unknown start state."""
+    q = [float(heat_fn(r)) for r in w]
     to = [float(r["outdoor_real_c"]) for r in w]
-    if tau_min > 0:
-        tau_h = tau_min / 60.0
-        a = 1.0 - math.exp(-dt_h / tau_h)
-        b = 1.0 - (tau_h / dt_h) * a
-        h = q[0] * tau_h / dt_h
-    res: list[float] = []
-    for j, qj in enumerate(q):
-        if tau_min > 0:
-            d = a * h + b * qj
-            h = h + qj - d
-        else:
-            d = qj
-        pred = (d - ua_w_per_k / 1000.0 * (t[j] - to[j]) * dt_h) / c_kwh_per_k
-        res.append(pred - (t[j + 1] - t[j]))
-    m = sum(res) / len(res)
-    return sum((x - m) ** 2 for x in res)
+    m = [float(r["indoor_real_c"]) for r in w]
+    a0 = _emitter_slot_means(q, to, tau_min, ua_w_per_k, c_kwh_per_k, t0=0.0, gain_kw=0.0)
+    b0 = _emitter_slot_means(q, to, tau_min, ua_w_per_k, c_kwh_per_k, t0=1.0, gain_kw=0.0)
+    g0 = _emitter_slot_means(q, to, tau_min, ua_w_per_k, c_kwh_per_k, t0=0.0, gain_kw=1.0)
+    bb = [x - y for x, y in zip(b0, a0)]
+    gg = [x - y for x, y in zip(g0, a0)]
+    y = [mi - ai for mi, ai in zip(m, a0)]
+    sbb = sum(v * v for v in bb)
+    sgg = sum(v * v for v in gg)
+    sbg = sum(u * v for u, v in zip(bb, gg))
+    sby = sum(u * v for u, v in zip(bb, y))
+    sgy = sum(u * v for u, v in zip(gg, y))
+    det = sbb * sgg - sbg * sbg
+    if abs(det) < 1e-12:
+        t0 = sby / sbb if sbb > 0 else 0.0
+        g = 0.0
+    else:
+        t0 = (sby * sgg - sgy * sbg) / det
+        g = (sgy * sbb - sby * sbg) / det
+    return sum((yi - t0 * u - g * v) ** 2 for yi, u, v in zip(y, bb, gg))
 
 
 def fit_emitter_tau(
     rows: list[dict[str, Any]], *, ua_w_per_k: float | None = None,
     c_kwh_per_k: float | None = None, cop_fn: Any = None, heat_fn: Any = None,
+    dhw_slots: set[str] | None = None,
 ) -> dict[str, Any]:
     """REPORT-ONLY emitter-lag estimate (#866): around every offset step >= 3 K, simulate
-    the room with the LP's RC model for tau in 0..90 min and report the tau with the least
-    SSE of room deltas. ``heat_fn(row) -> thermal kWh`` is injectable (tests); the default is
-    the LP draw model. Nothing is applied; ``LP_W3_EMITTER_TAU_MIN`` is set by hand."""
+    the room (minute-level RC model, slot-MEAN comparison) for tau in 0..90 min and report
+    the tau with the least SSE. Windows touching a DHW reheat are dropped (see
+    ``_emitter_is_dhw``). ``heat_fn(row) -> thermal kWh`` is injectable (tests); the default
+    is the LP draw model. Honesty fields: ``n_events`` (after filtering),
+    ``n_events_dropped_dhw``, ``sse_gap_vs_zero`` (1 - SSE_best/SSE_tau0), ``sse_spread``
+    ((max-min)/min over the grid) and ``confidence`` (``ok`` needs >= 6 events AND spread >=
+    0.25, else ``low``; ``none`` when not identifiable). Nothing is applied;
+    ``LP_W3_EMITTER_TAU_MIN`` is set by hand."""
     if ua_w_per_k is None or c_kwh_per_k is None:
         from .thermal_learning import get_building_thermal_mass_kwh_per_k, get_building_ua_w_per_k
         ua_w_per_k = float(get_building_ua_w_per_k()) if ua_w_per_k is None else ua_w_per_k
@@ -1033,10 +1103,11 @@ def fit_emitter_tau(
         def heat_fn(r: dict[str, Any]) -> float:  # noqa: E306
             v = _emitter_heat_kwh_th(r, cf)
             return 0.0 if v is None else v
-    events = _emitter_events(rows)
+    events, dropped = _emitter_events(rows, dhw_slots)
     res: dict[str, Any] = {
-        "n_events": len(events), "best_tau_min": None, "sse_by_tau_min": {},
-        "sse_ratio_best_vs_zero": None, "identifiable": False,
+        "n_events": len(events), "n_events_dropped_dhw": dropped, "best_tau_min": None,
+        "sse_by_tau_min": {}, "sse_ratio_best_vs_zero": None, "sse_gap_vs_zero": None,
+        "sse_spread": None, "identifiable": False, "confidence": "none",
         "ua_w_per_k": ua_w_per_k, "c_kwh_per_k": c_kwh_per_k,
         "step_min_k": EMITTER_STEP_MIN_K, "window_days": EMITTER_WINDOW_DAYS,
         "applied": False,
@@ -1051,10 +1122,38 @@ def fit_emitter_tau(
     res["best_tau_min"] = best
     if curve[0] > 0:
         res["sse_ratio_best_vs_zero"] = round(curve[best] / curve[0], 4)
-    res["identifiable"] = len(events) >= 3
+        res["sse_gap_vs_zero"] = round(1.0 - curve[best] / curve[0], 4)
+    lo = min(curve.values())
+    if lo > 0:
+        res["sse_spread"] = round((max(curve.values()) - lo) / lo, 4)
+    res["identifiable"] = len(events) >= EMITTER_MIN_EVENTS
     if not res["identifiable"]:
         res["reason"] = "too_few_step_events"
+        return res
+    res["confidence"] = (
+        "ok" if len(events) >= EMITTER_CONFIDENT_EVENTS
+        and (res["sse_spread"] or 0.0) >= EMITTER_CONFIDENT_SPREAD else "low"
+    )
     return res
+
+
+def _emitter_dhw_slots(start: datetime, end: datetime) -> set[str]:
+    """Slots (``slot_time_utc`` strings) overlapping a tank reheat: consecutive live telemetry
+    samples <= 40 min apart whose ``tank_temp_c`` rose by >= 1 C."""
+    out: set[str] = set()
+    tel = [r for r in db.get_daikin_telemetry_range(start.timestamp(), end.timestamp())
+           if r.get("tank_temp_c") is not None]
+    tel.sort(key=lambda r: float(r["fetched_at"]))
+    for a, b in zip(tel, tel[1:]):
+        ta, tb = float(a["fetched_at"]), float(b["fetched_at"])
+        if tb - ta > 40 * 60 or float(b["tank_temp_c"]) - float(a["tank_temp_c"]) < 1.0:
+            continue
+        t = datetime.fromtimestamp(ta, tz=UTC)
+        t = t.replace(minute=(t.minute // SLOT_MIN) * SLOT_MIN, second=0, microsecond=0)
+        while t.timestamp() <= tb:
+            out.add(_z(t))
+            t += timedelta(minutes=SLOT_MIN)
+    return out
 
 
 def _emitter_fit_for_day(day: date, tz: ZoneInfo) -> dict[str, Any]:
@@ -1063,7 +1162,12 @@ def _emitter_fit_for_day(day: date, tz: ZoneInfo) -> dict[str, Any]:
         start = day_slots_utc(day - timedelta(days=EMITTER_WINDOW_DAYS - 1), tz)[0]
         end = day_slots_utc(day, tz)[-1] + timedelta(minutes=SLOT_MIN)
         rows = db.get_lwt_learning_rows(_z(start), _z(end))
-        return {"emitter_tau_fit": fit_emitter_tau(rows)}
+        try:
+            dhw = _emitter_dhw_slots(start, end)
+        except Exception:
+            logger.debug("emitter fit: dhw slots unavailable", exc_info=True)
+            dhw = None
+        return {"emitter_tau_fit": fit_emitter_tau(rows, dhw_slots=dhw)}
     except Exception:
         logger.warning("lwt_learning emitter tau fit failed", exc_info=True)
         return {"emitter_tau_fit": None}

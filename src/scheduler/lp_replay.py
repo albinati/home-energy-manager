@@ -315,7 +315,8 @@ def replay_run(
                 float(inputs["indoor_initial_c"])
                 if inputs.get("indoor_initial_c") is not None else None
             ),
-            lwt_actual_c=_snapshot_lwt_actual_c(inputs),
+            lwt_actual_c=_snapshot_emitter(inputs)[0],
+            emitter_h0_kwh=_snapshot_emitter(inputs)[1],
         )
 
     # Weather: prefer the exact forecast fetch referenced by the LP snapshot;
@@ -1126,18 +1127,22 @@ def _state_at(plan: LpPlan, when_utc: datetime) -> LpInitialState:
         soc_source="replay_chain",
         tank_source="replay_chain",
         indoor_temp_c=float(indoor) if indoor is not None else None,
+        emitter_h0_kwh=(
+            float(hs[idx] if idx < len(hs) else hs[-1])
+            if (hs := list(getattr(plan, "w3_emitter_heat_kwh", []) or [])) else None
+        ),
     )
 
 
-def _snapshot_lwt_actual_c(inputs: dict) -> float | None:
-    """#866 — the live LWT recorded on the snapshot (emitter-lag seed), if any."""
+def _snapshot_emitter(inputs: dict) -> tuple[float | None, float | None]:
+    """#866 — (live LWT, initial loop heat h0 kWh_th) recorded on the snapshot. Pre-#866
+    snapshots carry neither -> the LP's steady-state-at-the-curve fallback."""
     try:
-        v = (json.loads(inputs.get("exogenous_snapshot_json") or "{}").get("emitter") or {}).get(
-            "lwt_actual_c"
-        )
-        return float(v) if v is not None else None
+        em = json.loads(inputs.get("exogenous_snapshot_json") or "{}").get("emitter") or {}
+        lwt, h0 = em.get("lwt_actual_c"), em.get("h0_kwh")
+        return (float(lwt) if lwt is not None else None, float(h0) if h0 is not None else None)
     except Exception:
-        return None
+        return (None, None)
 
 
 def _apply_cadence_filter(

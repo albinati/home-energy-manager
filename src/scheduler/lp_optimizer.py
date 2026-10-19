@@ -73,6 +73,9 @@ class LpInitialState:
     # #866: freshest LIVE leaving-water temperature (deg C), or None. Only used to seed
     # the emitter-lag state h[0] when LP_W3_EMITTER_TAU_MIN > 0.
     lwt_actual_c: float | None = None
+    # #866: explicit initial emitter-loop heat (kWh_th); takes precedence over the LWT rule.
+    # Set by chained replays (predicted end-of-segment state) and persisted snapshots.
+    emitter_h0_kwh: float | None = None
     # Provenance strings ("fox_realtime_cache", "db_realtime_snapshot",
     # "daikin_live", "daikin_cache", "daikin_estimate", "execution_log",
     # "default"). Persisted to lp_inputs_snapshot so the History view can show
@@ -118,6 +121,9 @@ class LpPlan:
     w3_emitter_tau_min: float = 0.0
     w3_emitter_h0_kwh: float = 0.0
     w3_delivered_kwh: list[float] = field(default_factory=list)
+    w3_emitter_heat_kwh: list[float] = field(default_factory=list)
+    """#866 — stored loop heat h[i] (kWh_th) at the START of each slot, len N+1 (chained replays
+    carry h[idx] into the next segment)."""
     """#866 — emitter lag (minutes) the plan was SOLVED with, the initial loop heat h[0]
     (kWh_th) and the per-slot heat DELIVERED to the room (len N; empty when lag off).
     ``space_electric_kwh`` / ``lwt_offset_c`` stay PRODUCTION (what the pump is told)."""
@@ -351,6 +357,54 @@ def _piecewise_stress_breakpoints(max_power: float, n_seg: int) -> list[tuple[fl
 # ---------------------------------------------------------------------------
 # Main solver
 # ---------------------------------------------------------------------------
+
+def _emitter_h0_kwh(*, initial: Any, t_out0: float, cop0: float, tau_h: float) -> float:
+    """Initial emitter-loop heat h[0] (kWh_th) for the #866 lag model.
+
+    * ``initial.emitter_h0_kwh`` (explicit: a chained replay's predicted end-of-segment
+      state, or the value persisted on the snapshot) wins.
+    * Else the loop is taken at its steady state ``P * tau`` for the supply temperature
+      the pump is on: the live ``lwt_actual_c`` when it is plausible, otherwise (absent,
+      stale, or DHW-contaminated: a tank reheat reads 45-50 C on the same sensor) the
+      weather CURVE at the current outdoor temperature (the pump runs on its curve; no
+      curve heat above the warm cutoff -> 0). A live reading is plausible only when
+      ``lwt <= min(50, curve + max lift + 5 K)``.
+    * ``P = k * (lwt - 18) * COP`` with the COP derated for lift above the curve exactly
+      like the #863 segments (``max(LP_COP_LIFT_MIN_MULTIPLIER, 1 - p * lift)``).
+    * Continuity: the loop only holds heat while the water is above the room, so
+      h0 is scaled by ``clip((lwt - indoor - 1) / 3, 0, 1)`` (0 at <= 1 K above the
+      room, full at >= 4 K), not a 3 K cliff.
+    """
+    explicit = getattr(initial, "emitter_h0_kwh", None)
+    if explicit is not None:
+        return max(0.0, float(explicit))
+    from ..physics import get_kw_per_degc_lwt, get_lwt_base_c
+
+    if t_out0 >= float(config.DAIKIN_WEATHER_CURVE_HIGH_C):
+        curve = None
+    else:
+        curve = float(get_lwt_base_c(t_out0))
+    lwt = getattr(initial, "lwt_actual_c", None)
+    if lwt is not None:
+        lwt = float(lwt)
+        cap = 50.0 if curve is None else min(
+            50.0, curve + max(0.0, float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0))) + 5.0
+        )
+        if lwt > cap:
+            lwt = None
+    if lwt is None:
+        lwt = curve
+    if lwt is None:
+        return 0.0
+    ramp = min(1.0, max(0.0, (lwt - float(initial.indoor_temp_c) - 1.0) / 3.0))
+    if ramp <= 0.0:
+        return 0.0
+    cop = cop0
+    pen = max(0.0, float(getattr(config, "LP_COP_LWT_OFFSET_PENALTY_PER_K", 0.0) or 0.0))
+    if pen > 0.0 and curve is not None and lwt > curve:
+        cop *= max(float(getattr(config, "LP_COP_LIFT_MIN_MULTIPLIER", 0.5)), 1.0 - pen * (lwt - curve))
+    return get_kw_per_degc_lwt() * max(0.0, lwt - 18.0) * cop * tau_h * ramp
+
 
 def solve_lp(
     *,
@@ -644,15 +698,9 @@ def solve_lp(
             _tau_h = w3_emit_tau_min / 60.0
             w3_emit_a = 1.0 - math.exp(-slot_h / _tau_h)
             w3_emit_b = 1.0 - (_tau_h / slot_h) * w3_emit_a
-            # h[0]: if the pump is demonstrably delivering (fresh live LWT well above the
-            # room) the loop holds the steady-state heat of that LWT: P * tau, with
-            # P = k * (LWT - 18) * COP. Otherwise the loop is taken as empty.
-            _lwt0 = getattr(initial, "lwt_actual_c", None)
-            if _lwt0 is not None and float(_lwt0) - float(initial.indoor_temp_c) >= 3.0:
-                from ..physics import get_kw_per_degc_lwt
-
-                _p_kw = get_kw_per_degc_lwt() * max(0.0, float(_lwt0) - 18.0) * float(cop_space[0])
-                w3_emit_h0 = _p_kw * _tau_h
+            w3_emit_h0 = _emitter_h0_kwh(
+                initial=initial, t_out0=float(t_out[0]), cop0=float(cop_space[0]), tau_h=_tau_h,
+            )
 
         def _w3_floor(i: int) -> float:
             """Three-level comfort floor (#808): night floor 22–07, setpoint
@@ -2013,6 +2061,7 @@ def solve_lp(
             if w3_emit:
                 plan.w3_emitter_tau_min = w3_emit_tau_min
                 plan.w3_emitter_h0_kwh = w3_emit_h0
+                plan.w3_emitter_heat_kwh.append(_v(w3_h[i]))
                 if i < n:
                     plan.w3_delivered_kwh.append(_v(w3_d[i]))
             if (w3_g_int > 0 or w3_g_sol > 0) and not plan.w3_gain_kw:

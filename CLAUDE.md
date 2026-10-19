@@ -975,13 +975,32 @@ equation used to put `e_space*COP` into `t_in` in the SAME slot.
   bias against late heating). `space_electric_kwh` / `lwt_offset_c` stay PRODUCTION, so dispatch, the
   `lwt_learning_log` planned fields and `plan/fronts` keep their meaning. Plan fields: `w3_emitter_tau_min`,
   `w3_emitter_h0_kwh`, `w3_delivered_kwh` (per slot).
-- **`h[0]`**: `LpInitialState.lwt_actual_c` = freshest `daikin_telemetry` `source='live'` row <= 30 min old
-  (`read_lp_initial_state`; recorded in `exogenous_snapshot_json.emitter` so replays reproduce it). If
-  `lwt_actual - indoor >= 3`: `k*(lwt_actual-18)*cop_space[0]*tau_h`, else 0.
-- **Report-only fit**: nightly `lwt_learning_daily.payload.emitter_tau_fit` (`fit_emitter_tau`): over 14 days,
-  windows of 4 constant-offset slots + a >= 3 K device-offset step + 6 slots, RC one-step room deltas with the
-  LP draw model x COP, tau in 0..90 step 10, least SSE (per-event mean residual removed). Reports
-  `best_tau_min`, `sse_by_tau_min`, `n_events`, `sse_ratio_best_vs_zero`; needs >= 3 events; NEVER applied.
+- **`h[0]`** (`lp_optimizer._emitter_h0_kwh`): steady state `P * tau` of the supply temperature the pump is
+  on, `P = k*(lwt-18)*COP` (kWh_th per h). `lwt` = `LpInitialState.lwt_actual_c` (freshest live
+  `daikin_telemetry` <= 30 min) ONLY if plausible: `lwt <= min(50, curve(outdoor) + OPTIMIZATION_LWT_OFFSET_MAX
+  + 5)`. A tank reheat reads 45-50 C on the same sensor (3-way valve: no heat to the radiators), so an
+  implausible, stale or absent reading falls back to the weather CURVE at the current outdoor temperature
+  (0 above `DAIKIN_WEATHER_CURVE_HIGH_C`): the house is assumed to be heating on its curve. COP is lift-derated
+  like the #863 segments (`max(LP_COP_LIFT_MIN_MULTIPLIER, 1 - p*(lwt-curve))`) when the reading implies lift.
+  Continuity: scaled by `clip((lwt - indoor - 1)/3, 0, 1)` (0 at <= 1 K above the room, full at >= 4 K) so
+  there is no cliff. `LpInitialState.emitter_h0_kwh` (explicit) wins over all of that: chained replays carry
+  the predicted end-of-segment `plan.w3_emitter_heat_kwh[idx]`, and the snapshot persists
+  `exogenous_snapshot_json.emitter = {lwt_actual_c, h0_kwh, tau_min}` so a replay reproduces the seed.
+  Pre-#866 snapshots have no `emitter` key and replay with the steady-state-at-curve fallback.
+- **Plausibility gate**: with tau > 0, `w3_trajectory_plausible` ignores floor and emergency slack in the first
+  `ceil(tau/30)+1` slots (heat produced now only reaches the room later, so slack there after a cold start
+  is unavoidable); slack later in the plan still vetoes.
+- **Min-block smoother**: `DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS` (4) erases more short peak coasts at tau > 0
+  (lag-shaped plans have shorter distinct runs). Existing behaviour, not changed here.
+- **Report-only fit** (`fit_emitter_tau`, nightly `lwt_learning_daily.payload.emitter_tau_fit`): over 14 days,
+  windows of 4 constant-offset slots + a >= 3 K device-offset step + 6 slots. The room is simulated per minute
+  with the LP draw model x COP and compared with the logged slot MEAN (`indoor_real_c`), with the start
+  temperature and a constant gain solved per event; tau in 0..90 step 10, least SSE. Windows with a DHW reheat
+  are dropped (tank temperature rise in `daikin_telemetry`, or `lwt_actual` > curve + max(offset over this and
+  the previous 2 slots) + 5 K or > 50 C). Reports `best_tau_min`, `sse_by_tau_min`, `n_events` (after
+  filtering), `n_events_dropped_dhw`, `sse_gap_vs_zero`, `sse_spread` and `confidence` (`ok` needs >= 6 events
+  and spread >= 0.25; `low`; `none` below 3 events). Known biases: the write moment inside a slot is not
+  modelled. NEVER applied.
 - Rollout: deploy at 0, read the fit + the ~30-40 min table, replay 7 days at 0 vs tau, then
   `PUT /api/v1/settings` `LP_W3_EMITTER_TAU_MIN`. Kill switch: set it back to 0.
 

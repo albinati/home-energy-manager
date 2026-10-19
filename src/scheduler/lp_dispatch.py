@@ -640,9 +640,14 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     heat = getattr(plan, "space_electric_kwh", None) or []
     s_tol = float(getattr(config, "LP_W3_SLACK_TOL_C", 0.1))
     max_slack_slots = int(getattr(config, "LP_W3_MAX_SLACK_SLOTS", 4))
+    # #866: with an emitter lag a heat deficit in the first ceil(tau/30)+1 slots cannot be
+    # undone (heat produced now only reaches the room later), so floor/emergency slack there
+    # is unavoidable after a cold start and says nothing about an unfitted model.
+    tau_min = float(getattr(plan, "w3_emitter_tau_min", 0.0) or 0.0)
+    lag_skip = (math.ceil(tau_min / 30.0) + 1) if tau_min > 0 else 0
     n_slack = 0
     for i in range(max(len(slack), len(slack_hi))):
-        lo_bad = i < len(slack) and float(slack[i]) > s_tol
+        lo_bad = i >= lag_skip and i < len(slack) and float(slack[i]) > s_tol
         # #841: ceiling overshoot only vetoes when the plan is HEATING in that
         # slot (overheating on purpose); a house that merely starts above the
         # ceiling has unavoidable overshoot and must not disable the LP source.
@@ -659,7 +664,7 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     slack_em = getattr(plan, "comfort_slack_emergency_c", None) or []
     em_floor = getattr(plan, "w3_emergency_floor_c", None)
     if slack_em and em_floor is not None and float(traj[0]) >= float(em_floor):
-        if any(float(x) > s_tol for x in slack_em):
+        if any(float(x) > s_tol for x in slack_em[lag_skip:]):
             return False, "emergency_slack"
     # Judge the trajectory against the floor/setpoint the plan was SOLVED with;
     # live config only for older plans that did not record them.
