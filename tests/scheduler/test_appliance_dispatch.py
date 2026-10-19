@@ -958,6 +958,21 @@ class TestFreshArmEvidence:
         before, machineState stop @07:14Z the day before, latch since 07:14Z."""
         base = self.now.replace(hour=7, minute=54, second=41, microsecond=0)
         self.now = base
+        # The ``appliance_id`` fixture derives the deadline (real now + 12 h) and the
+        # ``clock`` fixture seeds rates from the REAL wall clock, but this test pins the
+        # simulated clock to 07:54Z. Re-anchor both to the simulated clock, otherwise at
+        # some real times of day (e.g. ~22:20Z) the deadline lands < 120 min after the
+        # earliest start and the cheapest-window search is (correctly) infeasible.
+        from zoneinfo import ZoneInfo
+        with db._lock:
+            c = db.get_connection()
+            c.execute(
+                "UPDATE appliances SET deadline_local_time=? WHERE id=?",
+                ((base + timedelta(hours=12)).astimezone(ZoneInfo("Europe/London")).strftime("%H:%M"),
+                 appliance_id))
+            c.commit(); c.close()
+        _seed_agile_rates(base.replace(minute=0) + timedelta(hours=1),
+                          [10.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
         prev = base - timedelta(days=1)
         done = prev.replace(hour=7, minute=14, second=0)
         jid = db.create_appliance_job(

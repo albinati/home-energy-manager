@@ -76,16 +76,23 @@ def _win(key, label, h0, h1, price):
 def test_endpoint_shape_and_bad_date():
     from src.api.main import app
 
-    _seed_cosy_rates(DAY)
+    # The endpoint accepts only [today-7, today+1] in BULLETPROOF_TIMEZONE, so the
+    # date must be relative to the real "today" (a hard-coded day ages out of the window).
+    today = datetime.now(ZoneInfo(str(config.BULLETPROOF_TIMEZONE))).date()
+    iso = today.isoformat()
+    _seed_cosy_rates(today)
     c = TestClient(app)
-    r = c.get("/api/v1/plan/fronts?date=2026-10-07")
+    r = c.get(f"/api/v1/plan/fronts?date={iso}")
     assert r.status_code == 200
     body = r.json()
     for k in ("date", "now_utc", "tariff", "battery", "tank", "heating", "consumption", "spend", "compare"):
         assert k in body
-    assert body["date"] == "2026-10-07"
+    assert body["date"] == iso
     assert body["tariff"]["structure"] == "banded"
     assert c.get("/api/v1/plan/fronts?date=nope").status_code == 400
+    # outside the window -> 400
+    assert c.get(f"/api/v1/plan/fronts?date={(today - timedelta(days=8)).isoformat()}").status_code == 400
+    assert c.get(f"/api/v1/plan/fronts?date={(today + timedelta(days=2)).isoformat()}").status_code == 400
 
 
 # ------------------------------------------------------------------- battery
