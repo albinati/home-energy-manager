@@ -694,17 +694,9 @@ def _tier_offsets(
     bands = plan.price_band or []
     n = len(plan.slot_starts_utc)
     offsets: list[int | None] = []
-    from .lwt_coast import (
-        active_emergency_hold_until,
-        active_hold_until,
-        active_warm_hold_until,
-        emergency_offset_c,
-        slot_in_hold,
-    )
+    from .lwt_coast import active_hold_until, active_warm_hold_until, slot_in_hold
     hold = active_hold_until()
     warm_hold = active_warm_hold_until()
-    em_hold = active_emergency_hold_until()
-    em_off = emergency_offset_c()
     for i in range(n):
         mid = plan.slot_starts_utc[i] + timedelta(minutes=15)
         fc = get_forecast_for_slot(mid, forecast)
@@ -729,9 +721,6 @@ def _tier_offsets(
         # #855: same for the warm backstop — no positive offset inside its hold.
         if t_off is not None and t_off > 0 and slot_in_hold(plan.slot_starts_utc[i], warm_hold):
             t_off = 0
-        # #863: inside the emergency hold nothing below the emergency offset is written.
-        if t_off is not None and slot_in_hold(plan.slot_starts_utc[i], em_hold):
-            t_off = max(t_off, em_off)
         offsets.append(t_off)
     return offsets
 
@@ -739,12 +728,6 @@ def _tier_offsets(
 def _hold_iso() -> str | None:
     from .lwt_coast import active_hold_until
     h = active_hold_until()
-    return h.astimezone(UTC).isoformat().replace("+00:00", "Z") if h else None
-
-
-def _emergency_hold_iso() -> str | None:
-    from .lwt_coast import active_emergency_hold_until
-    h = active_emergency_hold_until()
     return h.astimezone(UTC).isoformat().replace("+00:00", "Z") if h else None
 
 
@@ -806,14 +789,7 @@ def _lp_offsets(
     if not ok:
         return None
     from ..physics import get_lwt_base_c
-    from .lwt_coast import (
-        active_emergency_hold_until,
-        active_hold_until,
-        active_warm_hold_until,
-        comfort_floor_c,
-        emergency_offset_c,
-        slot_in_hold,
-    )
+    from .lwt_coast import active_hold_until, active_warm_hold_until, comfort_floor_c, slot_in_hold
 
     lo = int(max(float(config.OPTIMIZATION_LWT_OFFSET_MIN), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
     hi = int(min(float(config.OPTIMIZATION_LWT_OFFSET_MAX), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5))))
@@ -828,8 +804,6 @@ def _lp_offsets(
     cold_margin = float(getattr(config, "LWT_COMFORT_BACKSTOP_MARGIN_C", 0.5))
     hold = active_hold_until(now_utc)
     warm_hold = active_warm_hold_until(now_utc)
-    em_hold = active_emergency_hold_until(now_utc)
-    em_off = emergency_offset_c()
     bands = plan.price_band or []
     n = len(plan.slot_starts_utc)
     out: list[int | None] = []
@@ -884,11 +858,6 @@ def _lp_offsets(
                     off = 0
                     if guards is not None:
                         guards["live_cold_guard"] = guards.get("live_cold_guard", 0) + 1
-        # #863: inside the emergency hold nothing below the emergency offset is written.
-        if off < em_off and slot_in_hold(plan.slot_starts_utc[i], em_hold):
-            off = em_off
-            if guards is not None:
-                guards["emergency_hold"] = guards.get("emergency_hold", 0) + 1
         out.append(off)
     return out
 
@@ -1790,7 +1759,6 @@ def space_heating_gate_state() -> dict[str, Any]:
         "coast_mode": _coast_mode(),
         "backstop_hold_until": _hold_iso(),
         "warm_backstop_hold_until": _warm_hold_iso(),
-        "emergency_hold_until": _emergency_hold_iso(),
         "lwt_source_last_diff": lwt_source_last_diff,
         "gate_enabled": floor > 0,
         "demand_present": demand_present,

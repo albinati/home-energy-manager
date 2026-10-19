@@ -256,10 +256,11 @@ SCHEMA: dict[str, SettingSpec] = {
         min_value=0.0,
         max_value=0.1,
         description=(
-            "LP (#863): space-heat COP loss per K of LWT lift above the weather "
-            "curve (fraction/K, e.g. 0.025 = -2.5 %/K). Lift segments of the boost "
-            "are priced at their real, lower COP. 0 = single COP per slot (off, "
-            "bit-for-bit)."
+            "LP (#863): heat-output (COP) loss per K of LWT lift above the weather "
+            "curve (fraction/K): thermal output at offset x = draw(x) * cop * "
+            "max(LP_COP_LIFT_MIN_MULTIPLIER, 1 - p*x), so +5 K at 0.025 costs ~12 % of "
+            "the whole heat output. The LP prices each 1 K lift segment at its exact "
+            "marginal COP. 0 = single COP per slot (off, bit-for-bit)."
         ),
     ),
     "LP_W3_EMERGENCY_FLOOR_C": SettingSpec(
@@ -270,9 +271,11 @@ SCHEMA: dict[str, SettingSpec] = {
         max_value=22.0,
         description=(
             "W3 EMERGENCY floor (#863, deg C): a very expensive second soft floor on "
-            "every slot (capped at the slot's own comfort floor), and the live "
-            "indoor reading below which the heartbeat forces a positive LWT. "
-            "Must be <= LP_W3_NIGHT_FLOOR_C and <= INDOOR_SETPOINT_C - LP_W3_PEAK_COAST_DELTA_C."
+            "every slot, and the live reading below which the heartbeat alerts and "
+            "replans. The effective floor is always min(this, that slot's own comfort "
+            "floor): night floor at night, setpoint - peak delta in the peak band, "
+            "else the setpoint. Inert unless "
+            "LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT > 0 (LP) / LWT_EMERGENCY_ENABLED (tick)."
         ),
     ),
     "INDOOR_COMFORT_AGGREGATE": SettingSpec(
@@ -1170,33 +1173,6 @@ def set_setting(key: str, value: Any, *, actor: str = "api") -> Any:
             raise SettingValidationError(
                 f"INDOOR_SETPOINT_C ({canonical}) must be <= LP_W3_CEILING_C - 0.5 ({ce - 0.5})"
             )
-    if key in ("LP_W3_EMERGENCY_FLOOR_C", "LP_W3_NIGHT_FLOOR_C", "INDOOR_SETPOINT_C", "LP_W3_PEAK_COAST_DELTA_C"):
-        _vals: dict[str, float] = {}
-        try:
-            # Writes to the OTHER three keys are checked only once the emergency floor
-            # was set explicitly (a never-touched default must not block a setpoint change).
-            if key != "LP_W3_EMERGENCY_FLOOR_C" and db.get_runtime_setting("LP_W3_EMERGENCY_FLOOR_C") is None:
-                raise LookupError("emergency floor not explicitly set")
-            for _k in ("LP_W3_EMERGENCY_FLOOR_C", "LP_W3_NIGHT_FLOOR_C", "INDOOR_SETPOINT_C", "LP_W3_PEAK_COAST_DELTA_C"):
-                _vals[_k] = float(canonical) if _k == key else float(get_setting(_k))
-        except Exception:  # noqa: BLE001
-            _vals = {}
-        if len(_vals) == 4:
-            em = _vals["LP_W3_EMERGENCY_FLOOR_C"]
-            peak_floor = _vals["INDOOR_SETPOINT_C"] - _vals["LP_W3_PEAK_COAST_DELTA_C"]
-            # Each write is checked only against the relations it can break, so an
-            # unrelated legacy mismatch never blocks it.
-            if key in ("LP_W3_EMERGENCY_FLOOR_C", "LP_W3_NIGHT_FLOOR_C"):
-                if em > _vals["LP_W3_NIGHT_FLOOR_C"] + 1e-9:
-                    raise SettingValidationError(
-                        f"LP_W3_EMERGENCY_FLOOR_C ({em}) must be <= LP_W3_NIGHT_FLOOR_C ({_vals['LP_W3_NIGHT_FLOOR_C']})"
-                    )
-            if key in ("LP_W3_EMERGENCY_FLOOR_C", "INDOOR_SETPOINT_C", "LP_W3_PEAK_COAST_DELTA_C"):
-                if em > peak_floor + 1e-9:
-                    raise SettingValidationError(
-                        f"LP_W3_EMERGENCY_FLOOR_C ({em}) must be <= INDOOR_SETPOINT_C - "
-                        f"LP_W3_PEAK_COAST_DELTA_C ({peak_floor})"
-                    )
     serialized = _serialize(spec, canonical)
     db.set_runtime_setting(key, serialized)
     # V11: append-only audit trail so a past LP run can be explained even

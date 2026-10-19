@@ -115,6 +115,11 @@ class LpPlan:
     cop_lwt_offset_penalty_per_k: float = 0.0
     """#863 — the per-K lift COP penalty this plan was SOLVED with (0 = single COP)."""
     cop_space_effective: list[float] = field(default_factory=list)
+    space_floor_kwh: list[float] = field(default_factory=list)
+    """#863 — per-slot curve draw (offset 0) kWh the segments were built on (len N)."""
+    space_lift_widths_kwh: list[list[float]] = field(default_factory=list)
+    space_lift_cops: list[list[float]] = field(default_factory=list)
+    """#863 — per-slot lift segment widths (kWh) and marginal COPs; empty lists when off."""
     """#863 — per-slot effective space COP = thermal / electric (cop_space when e_space ~ 0), len N."""
     w3_emergency_floor_c: float | None = None
     comfort_slack_emergency_c: list[float] = field(default_factory=list)
@@ -419,6 +424,7 @@ def solve_lp(
     t_out: list[float] = []
     cop_space: list[float] = []
     cop_dhw: list[float] = []
+    cop_space_raw: list[float] = []  # #863: curve COP WITHOUT the old lift derate
     for i, raw_temp in enumerate(weather.temperature_outdoor_c):
         slot_hour = slot_starts_utc[i].hour if i < len(slot_starts_utc) else i % 24
         offset = float(offset_by_hour.get(slot_hour, offset_default))
@@ -451,6 +457,7 @@ def solve_lp(
             cop_s = base_cop
             cop_d = max(1.0, cop_s - dhw_pen)
         cop_space.append(cop_s)
+        cop_space_raw.append(base_cop)
         cop_dhw.append(cop_d)
 
     slot_h = 0.5  # 30-minute slots
@@ -610,7 +617,9 @@ def solve_lp(
         # (capped at the slot's own comfort floor so a low night floor is never
         # overridden by the emergency number). penalty 0 disables it.
         w3_em_floor = float(getattr(config, "LP_W3_EMERGENCY_FLOOR_C", 20.0))
-        w3_em_pen = float(getattr(config, "LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT", 1000.0))
+        from .lwt_coast import effective_emergency_floor_c
+
+        w3_em_pen = float(getattr(config, "LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT", 0.0))
         w3_g_int = max(0.0, float(getattr(config, "LP_W3_INTERNAL_GAIN_KW", 0.0) or 0.0))
         w3_g_sol = max(0.0, float(getattr(config, "LP_W3_SOLAR_GAIN_KW_PER_PV_KW", 0.0) or 0.0))
         w3_gain_kw = [w3_g_int + w3_g_sol * (max(0.0, float(pv_avail[_i])) / slot_h) for _i in range(n)]
@@ -665,37 +674,55 @@ def solve_lp(
     e_dhw = pulp.LpVariable.dicts("dhw_kwh", range(n), lowBound=0, upBound=max_hp_kwh)
     e_space = pulp.LpVariable.dicts("space_kwh", range(n), lowBound=0, upBound=max_hp_kwh)
 
-    # #863 — two-(or K-)segment space-heat COP. e_space = e_base + sum(e_lift_k); the
-    # base (curve draw) runs at cop_space, each lift segment at a COP that falls with the
-    # mid offset of the segment. COP is decreasing in k, so the LP fills segments in
-    # order WITHOUT binaries. penalty == 0 (or passive) creates nothing: bit-for-bit.
+    # #863 — lift-segment space-heat COP, EXACT MARGINAL. With E(x) = compressor draw at
+    # offset x above the curve and m(x) = max(LP_COP_LIFT_MIN_MULTIPLIER, 1 - p*x), thermal
+    # output is Th(x) = E(x) * cop_space * m(x). One segment per whole K of lift
+    # (ceil(L), the last partial), so the COP at a physical offset never depends on the
+    # clamp L. Segment COP = (Th(x1) - Th(x0)) / (E(x1) - E(x0)), clipped non-increasing
+    # (concave) so the LP fills segments in order WITHOUT binaries. The base (draw at
+    # offset 0) runs at cop_space (m(0) = 1). p == 0 (or passive) creates nothing:
+    # bit-for-bit. Double derate guard: when the older LP_COP_LIFT_PENALTY_PER_KELVIN is
+    # also > 0 the segments use the curve COP WITHOUT that derate (warned once) - the new
+    # penalty replaces it for the lift range.
     cop_lift_pen = max(0.0, float(getattr(config, "LP_COP_LWT_OFFSET_PENALTY_PER_K", 0.0) or 0.0))
-    cop_lift_k = max(1, min(4, int(getattr(config, "LP_COP_LWT_LIFT_SEGMENTS", 2) or 2)))
     cop_segments_on = cop_lift_pen > 0.0 and not passive_daikin
     e_base: dict[int, Any] = {}
     e_lift: dict[int, list[tuple[Any, float, float]]] = {}  # i -> [(var, width_kwh, cop_k)]
     if cop_segments_on:
+        if lift_pen > 0.0:
+            logger.warning(
+                "LP_COP_LIFT_PENALTY_PER_KELVIN (%.3f) and LP_COP_LWT_OFFSET_PENALTY_PER_K "
+                "(%.3f) are both set: lift segments use the curve COP without the old derate.",
+                lift_pen, cop_lift_pen,
+            )
+            cop_space = list(cop_space_raw)
         _min_m = float(getattr(config, "LP_COP_LIFT_MIN_MULTIPLIER", 0.5))
         for i in range(n):
             t = t_out[i]
             lift = float(_slot_lift(t))
             fl = float(space_floor_kwh[i])
+            n_seg = int(math.ceil(lift - 1e-9)) if lift > 0 else 0
+            xs = [min(float(j), lift) for j in range(n_seg + 1)]
+            if n_seg and xs[-1] < lift:
+                xs.append(lift)
             levels = [fl]
-            for k in range(1, cop_lift_k + 1):
-                off_hi = lift * k / cop_lift_k
-                raw = get_daikin_heating_kw(t, lwt_offset_delta=off_hi) * slot_h
+            for x in xs[1:]:
+                raw = get_daikin_heating_kw(t, lwt_offset_delta=x) * slot_h
                 levels.append(max(levels[-1], min(raw, max_hp_kwh_per_slot)))
-            # Σ widths + floor == the last level == space_ceil_kwh[i] (same formula).
             e_base[i] = pulp.LpVariable(f"space_base_{i}", lowBound=0, upBound=fl)
             segs = []
-            for k in range(cop_lift_k):
+            prev_cop = cop_space[i]
+            for k in range(len(xs) - 1):
                 width = levels[k + 1] - levels[k]
                 if width <= 1e-9:
                     continue
-                mid = lift * (k + 0.5) / cop_lift_k
-                mult = max(_min_m, 1.0 - cop_lift_pen * mid)
+                m0 = max(_min_m, 1.0 - cop_lift_pen * xs[k])
+                m1 = max(_min_m, 1.0 - cop_lift_pen * xs[k + 1])
+                th = cop_space[i] * (levels[k + 1] * m1 - levels[k] * m0)
+                c_k = min(prev_cop, max(1.0, th / width))
+                prev_cop = c_k
                 v = pulp.LpVariable(f"space_lift_{i}_{k}", lowBound=0, upBound=width)
-                segs.append((v, width, max(1.0, cop_space[i] * mult)))
+                segs.append((v, width, c_k))
             e_lift[i] = segs
             prob += e_space[i] == e_base[i] + pulp.lpSum(v for v, _w, _c in segs)
 
@@ -1175,7 +1202,7 @@ def solve_lp(
             # Soft comfort floor — slack-penalised, so the LP is NEVER Infeasible.
             prob += t_in[i + 1] + s_lo[i] >= _w3_floor(i)
             if w3_em_pen > 0:
-                prob += t_in[i + 1] + s_em[i] >= min(w3_em_floor, _w3_floor(i))
+                prob += t_in[i + 1] + s_em[i] >= effective_emergency_floor_c(_w3_floor(i))
             # #841 — soft ceiling (same penalty as the floor slack).
             prob += t_in[i + 1] - s_hi[i] <= w3_ceiling
             # Gentle-recovery cap — bound the HEATING-driven rise (the pump's own
@@ -1956,6 +1983,10 @@ def solve_lp(
 
     plan.dhw_lp_owned = _lp_owned
     plan.cop_lwt_offset_penalty_per_k = cop_lift_pen if cop_segments_on else 0.0
+    if cop_segments_on:
+        plan.space_floor_kwh = [float(x) for x in space_floor_kwh]
+        plan.space_lift_widths_kwh = [[w for _v, w, _c in e_lift[i]] for i in range(n)]
+        plan.space_lift_cops = [[c for _v, _w, c in e_lift[i]] for i in range(n)]
     if peak_import_idx:
         plan.peak_import_penalty_applied = True
         plan.peak_import_kwh = float(sum(plan.import_kwh[i] for i in peak_import_idx))

@@ -872,7 +872,7 @@ own constants/guards used to stop it reaching the device:
   `weather.cop_space`). "Coast through 07–13" needs a lower fitted UA or a bigger
   pump; the ceiling only starts to bind for a small-C / leaky / strong-pump house.
   With `LP_COP_LWT_OFFSET_PENALTY_PER_K` > 0 (#863) the cheap-band boost is priced at its
-  lower lift COP, so the +10 cap is no longer the default there (fixture: +5 at 0.025).
+  lower lift COP, so the +10 cap is no longer the default there (fixture: +3 at 0.025).
 - `thermal_mass_resolution` recomputes C only for `tau_x_env_ua` / `tau_x_learned_ua`
   rows (a measured C is kept); an out-of-bounds stored C is replaced by τ×UA_eff and
   reported (`c_recomputed`, `c_reason`); the refresh stamps C from the BOUNDED UA
@@ -921,46 +921,44 @@ so the optimistic/pessimistic scenario PV factors scale the gain automatically).
 Prod 2026-10-17/18: afternoon +4/+8 boosts banked nothing (13-16 heating 2.0-2.5 kWh, later
 bands did not heat less) because the LP priced +10 K of LWT at the curve COP.
 
-- **Lift-segment COP** (`LP_COP_LWT_OFFSET_PENALTY_PER_K`, runtime, code default **0** =
-  bit-for-bit, range 0..0.1; proposed prod 0.025; `LP_COP_LWT_LIFT_SEGMENTS` env-only,
-  default 2, 1..4). Penalty > 0 and not passive: `e_space = e_base + sum(e_lift_k)`; `e_base`
-  (<= curve draw, offset 0) runs at `cop_space`, segment k covers offsets
-  `[k, k+1]*L/K` (`L = _slot_lift`) with width = `get_daikin_heating_kw` difference (the
-  `max_hp` clamp trims the top segments, so floor + widths == `space_ceil_kwh`) at COP
-  `cop_space * max(LP_COP_LIFT_MIN_MULTIPLIER, 1 - pen * mid_offset_k)`. COP falls with k so
-  the LP fills in order with NO binaries. The RC equation, the radiator cap and the
-  gentle-recovery cap all read `thermal = e_base*cop + sum(e_lift_k*cop_k)`. Inverse
-  physics (`lwt_offset_from_space_kw`) is unchanged (maps total `e_space`). Plan:
-  `cop_lwt_offset_penalty_per_k`, `cop_space_effective[i]` (thermal/electric; also written
-  to `lwt_learning_log.cop_space` when the penalty is on); the knobs are in the
-  `lp_inputs_snapshot` config snapshot. Fixture (UA 200, C 16.5, Cosy, 12 C, start 21):
-  13-16 lift 1.00 kWh at penalty 0 -> 0.41 at 0.025 (max offset +10 -> +5), plan cost
-  336.5 -> 342.3 p (see PR).
-- **Emergency floor** (`LP_W3_EMERGENCY_FLOOR_C` runtime, default 20, 15..22; env-only
-  `LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT` 1000, 0 = off/no variables): a second soft floor
-  `t_in[i+1] + s_em[i] >= min(emergency, that slot's own comfort floor)` on EVERY slot (a low
-  night floor is never overridden). Plan: `comfort_slack_emergency_c`, `w3_emergency_floor_c`.
-  Validated `<= LP_W3_NIGHT_FLOOR_C` and `<= INDOOR_SETPOINT_C - LP_W3_PEAK_COAST_DELTA_C`
-  (checked on writes to any of the four, but only once the emergency floor was explicitly
-  set, so an untouched default never blocks a setpoint change). **Plausibility gate:**
-  emergency slack > `LP_W3_SLACK_TOL_C` in a plan that STARTED at/above the floor ->
-  `emergency_slack` (LP source unavailable, tier rule used).
-- **Live emergency** (`lwt_coast.emergency_tick`, heartbeat right after the warm backstop;
-  `LWT_EMERGENCY_ENABLED` true, `_TICKS` 2, `_OFFSET_C` 5, `_HOLD_MINUTES` 60): fresh
-  aggregate indoor < `LP_W3_EMERGENCY_FLOOR_C` for N ticks AND no ACTIVE `lwt_preheat`
-  row with offset >= the emergency offset -> `apply_scheduled_daikin_params({"lwt_offset": 5},
-  skip_if_matches=False)`; only when it returns True: `action_log` `lwt_emergency`, one
-  `notify_risk` per local day (`lwt_emergency_<date>`), hold in `kv_state`
-  `lwt_emergency_hold_until` (`_lp_offsets`/`_tier_offsets` raise any offset below the
-  emergency one to it on slots starting before the hold end; `guards.emergency_hold`), then
-  `bulletproof_mpc_job(bypass_cooldown=True, trigger_reason="lwt_emergency")`. Stale sensor
-  holds the counter; active mode + not read-only only. `space_heating_gate_state()` has
-  `emergency_hold_until`; scorecard `lwt.emergencies`.
-- **Rollout:** deploy with penalty 0 (no change), replay the last 7 days with
-  `patched_config` at 0 vs 0.025 (cost, heating kWh per band, boost placement, predicted
-  indoor min/max, emergency slack), then `PUT /api/v1/settings`. The comfort-band retune
-  (setpoint 21 / ceiling 21.5, lower `DAIKIN_LWT_PREHEAT_COMFORT_BAND_C`) is a settings change,
-  not code.
+- **Lift-segment COP, exact marginal** (`LP_COP_LWT_OFFSET_PENALTY_PER_K`, runtime, code
+  default **0** = bit-for-bit, range 0..0.1; proposed prod 0.025). With E(x) = compressor
+  draw at offset x above the curve and m(x) = max(`LP_COP_LIFT_MIN_MULTIPLIER`, 1 - p*x),
+  thermal output is Th(x) = E(x)*cop_space*m(x): +5 K at 0.025 costs ~12.5 % of the WHOLE
+  heat output. Penalty > 0 and not passive: `e_space = e_base + sum(e_lift_k)`; `e_base`
+  (<= curve draw) at `cop_space`; ONE segment per whole K of lift (`ceil(L)`, last partial;
+  `L = _slot_lift`) so the COP at a physical offset never depends on the clamp; segment COP =
+  `(Th(x1)-Th(x0))/(E(x1)-E(x0))`, clipped non-increasing (concave) so the LP fills in order
+  with NO binaries; the `max_hp` clamp trims the top segments (floor + widths ==
+  `space_ceil_kwh`). RC equation, radiator cap and gentle-recovery cap use the thermal sum.
+  If the older `LP_COP_LIFT_PENALTY_PER_KELVIN` is also > 0 the segments use the curve COP
+  WITHOUT that derate (warned once; the new penalty replaces it over the lift range). Plan:
+  `cop_lwt_offset_penalty_per_k`, `cop_space_effective` (thermal/electric, also into
+  `lwt_learning_log.cop_space`), `space_floor_kwh`, `space_lift_widths_kwh`,
+  `space_lift_cops`; knob in the `lp_inputs_snapshot` config snapshot. Fixture (UA 200,
+  C 16.5, Cosy, 12 C, start 21, tier source): 13-16 lift 1.00 -> 0.24 kWh, max offset +10 -> +3.
+- **Emergency floor in the LP** (`LP_W3_EMERGENCY_FLOOR_C` runtime, 20, 15..22; env-only
+  `LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT`, **code default 0 = no variables, bit-for-bit**;
+  prod sets 1000 via `.env`): `t_in[i+1] + s_em[i] >= min(emergency, that slot's comfort
+  floor)` on every slot - `lwt_coast.effective_emergency_floor_c` is the ONE rule (night
+  floor at night, setpoint - peak delta in the peak band, else setpoint). No cross-validation
+  between the settings. Plan: `comfort_slack_emergency_c`, `w3_emergency_floor_c`; the
+  plausibility gate returns `emergency_slack` for a plan that STARTED at/above the floor yet
+  uses it (LP source unavailable, tier rule used).
+- **Live emergency = alert + replan, NEVER a device write** (`lwt_coast.emergency_tick`,
+  heartbeat after the cold/warm backstops; `LWT_EMERGENCY_ENABLED` **code default false**
+  (prod sets true), `_TICKS` 2, `_REPLAN_COOLDOWN_MINUTES` 60): fresh aggregate indoor below
+  the effective floor of the CURRENT slot for N ticks (stale sensor holds the counter) ->
+  `action_log` `lwt_emergency`, one `notify_risk` per local day (`lwt_emergency_<date>`),
+  `bulletproof_mpc_job(bypass_cooldown=True, trigger_reason="lwt_emergency")` at most once per
+  cooldown (`kv_state` `lwt_emergency_last_replan`). The replan's LP plans the heat through the
+  normal dispatch path (smoothing, ABS_MAX clamp, rows, reconciler); there is no dispatch
+  hold. Skipped (counter stays armed) when the cold or warm backstop replanned this same tick.
+  Needs active mode, not read-only, `LP_W3_TIN_ENABLED`. Scorecard `lwt.emergencies`.
+- **Rollout:** deploy at penalty 0 / emergency pen 0 (no change), replay 7 days with
+  `patched_config` at 0 vs 0.025 and ceiling 23 vs 21.5, then `PUT /api/v1/settings` and set
+  the two emergency env knobs. The comfort-band retune (setpoint 21 / ceiling 21.5, lower
+  `DAIKIN_LWT_PREHEAT_COMFORT_BAND_C`) is a settings change, not code.
 
 ## Key `.env` settings to know
 

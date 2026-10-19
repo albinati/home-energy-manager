@@ -1014,14 +1014,13 @@ class Config:
     LWT_COMFORT_BACKSTOP_HOLD_MINUTES: int = int(os.getenv("LWT_COMFORT_BACKSTOP_HOLD_MINUTES", "90"))
     # #855 warm-side backstop: cancel an active positive LWT boost once the
     # measured house reaches ceiling - DAIKIN_LWT_PREHEAT_COMFORT_BAND_C.
-    # #863 — K lift segments of the space-heat COP (env-only, 1..4), the emergency
-    # floor's slack penalty (env-only) and the live emergency forcing.
-    LP_COP_LWT_LIFT_SEGMENTS: int = max(1, min(4, int(os.getenv("LP_COP_LWT_LIFT_SEGMENTS", "2"))))
-    LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT: float = float(os.getenv("LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT", "1000"))
-    LWT_EMERGENCY_ENABLED: bool = os.getenv("LWT_EMERGENCY_ENABLED", "true").lower() in ("true", "1", "yes")
+    # #863 — emergency floor. Both default OFF (bit-for-bit); prod enables via .env:
+    # LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT=1000 (LP slack penalty, 0 = no variables) and
+    # LWT_EMERGENCY_ENABLED=true (live tick: ALERT + REPLAN only, never a device write).
+    LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT: float = float(os.getenv("LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT", "0"))
+    LWT_EMERGENCY_ENABLED: bool = os.getenv("LWT_EMERGENCY_ENABLED", "false").lower() in ("true", "1", "yes")
     LWT_EMERGENCY_TICKS: int = int(os.getenv("LWT_EMERGENCY_TICKS", "2"))
-    LWT_EMERGENCY_OFFSET_C: float = float(os.getenv("LWT_EMERGENCY_OFFSET_C", "5"))
-    LWT_EMERGENCY_HOLD_MINUTES: int = int(os.getenv("LWT_EMERGENCY_HOLD_MINUTES", "60"))
+    LWT_EMERGENCY_REPLAN_COOLDOWN_MINUTES: int = int(os.getenv("LWT_EMERGENCY_REPLAN_COOLDOWN_MINUTES", "60"))
     LWT_WARM_BACKSTOP_ENABLED: bool = os.getenv("LWT_WARM_BACKSTOP_ENABLED", "true").lower() in ("true", "1", "yes")
     LWT_WARM_BACKSTOP_TICKS: int = int(os.getenv("LWT_WARM_BACKSTOP_TICKS", "2"))
     LWT_WARM_BACKSTOP_HOLD_MINUTES: int = int(os.getenv("LWT_WARM_BACKSTOP_HOLD_MINUTES", "60"))
