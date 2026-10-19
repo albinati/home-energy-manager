@@ -654,6 +654,13 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
             n_slack += 1
     if n_slack > max_slack_slots:
         return False, f"comfort_slack:{n_slack}_slots>{max_slack_slots}"
+    # #863: the emergency floor is for emergencies — the plan must never need it
+    # when it STARTED at or above it.
+    slack_em = getattr(plan, "comfort_slack_emergency_c", None) or []
+    em_floor = getattr(plan, "w3_emergency_floor_c", None)
+    if slack_em and em_floor is not None and float(traj[0]) >= float(em_floor):
+        if any(float(x) > s_tol for x in slack_em):
+            return False, "emergency_slack"
     # Judge the trajectory against the floor/setpoint the plan was SOLVED with;
     # live config only for older plans that did not record them.
     floor = float(plan.w3_night_floor_c if plan.w3_night_floor_c is not None

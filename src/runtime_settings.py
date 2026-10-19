@@ -249,6 +249,35 @@ SCHEMA: dict[str, SettingSpec] = {
             "learned solar_gain_kw_per_pv_kw on the LWT learning card."
         ),
     ),
+    "LP_COP_LWT_OFFSET_PENALTY_PER_K": SettingSpec(
+        key="LP_COP_LWT_OFFSET_PENALTY_PER_K",
+        type_name="float",
+        env_default=_float_env("LP_COP_LWT_OFFSET_PENALTY_PER_K", "0.0"),
+        min_value=0.0,
+        max_value=0.1,
+        description=(
+            "LP (#863): heat-output (COP) loss per K of LWT lift above the weather "
+            "curve (fraction/K): thermal output at offset x = draw(x) * cop * "
+            "max(LP_COP_LIFT_MIN_MULTIPLIER, 1 - p*x), so +5 K at 0.025 costs ~12 % of "
+            "the whole heat output. The LP prices each 1 K lift segment at its exact "
+            "marginal COP. 0 = single COP per slot (off, bit-for-bit)."
+        ),
+    ),
+    "LP_W3_EMERGENCY_FLOOR_C": SettingSpec(
+        key="LP_W3_EMERGENCY_FLOOR_C",
+        type_name="float",
+        env_default=_float_env("LP_W3_EMERGENCY_FLOOR_C", "20.0"),
+        min_value=15.0,
+        max_value=22.0,
+        description=(
+            "W3 EMERGENCY floor (#863, deg C): a very expensive second soft floor on "
+            "every slot, and the live reading below which the heartbeat alerts and "
+            "replans. The effective floor is always min(this, that slot's own comfort "
+            "floor): night floor at night, setpoint - peak delta in the peak band, "
+            "else the setpoint. Inert unless "
+            "LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT > 0 (LP) / LWT_EMERGENCY_ENABLED (tick)."
+        ),
+    ),
     "INDOOR_COMFORT_AGGREGATE": SettingSpec(
         key="INDOOR_COMFORT_AGGREGATE",
         type_name="str",

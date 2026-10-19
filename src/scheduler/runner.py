@@ -2391,10 +2391,14 @@ def bulletproof_heartbeat_tick() -> None:
         # Build a lightweight DaikinClient handle for reconcile (it won't call get_devices again).
         from ..daikin.client import DaikinClient as _DC
         _dc = _DC()
-        _lwt_comfort_backstop_tick(
+        _cold_out = _lwt_comfort_backstop_tick(
             now_utc=now_utc, plan_date=plan_date, dev=dev0, client=_dc, price=price,
         )
-        _lwt_warm_backstop_tick(now_utc=now_utc, plan_date=plan_date, dev=dev0, client=_dc)
+        _warm_out = _lwt_warm_backstop_tick(now_utc=now_utc, plan_date=plan_date, dev=dev0, client=_dc)
+        _lwt_emergency_tick(
+            now_utc=now_utc, plan_date=plan_date, price=price,
+            skip_replan=bool((_cold_out or {}).get("fired") or (_warm_out or {}).get("fired")),
+        )
         reconcile_daikin_schedule_for_date(
             plan_date,
             _dc,
@@ -2730,6 +2734,28 @@ def _lwt_warm_backstop_tick(
         )
     except Exception as exc:
         logger.debug("lwt warm backstop error: %s", exc)
+        return {}
+
+
+def _lwt_emergency_tick(
+    *, now_utc: datetime, plan_date: str, price: float | None, skip_replan: bool = False,
+) -> dict[str, Any]:
+    """#863 — live emergency floor: alert + replan only (``lwt_coast.emergency_tick``).
+    ``skip_replan`` when a backstop already replanned this tick. Never raises."""
+    try:
+        from ..energy.tariff_structure import prefer_plan_thresholds
+        from .lwt_coast import emergency_tick
+
+        in_peak = bool(
+            price is not None and prefer_plan_thresholds()
+            and float(price) > _peak_alert_threshold_p(plan_date)
+        )
+        return emergency_tick(
+            now_utc=now_utc, plan_date=plan_date, in_peak=in_peak,
+            replan_fn=bulletproof_mpc_job, skip_replan=skip_replan,
+        )
+    except Exception as exc:
+        logger.debug("lwt emergency error: %s", exc)
         return {}
 
 
