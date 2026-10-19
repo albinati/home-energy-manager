@@ -114,11 +114,18 @@ def read_lp_initial_state(
     except Exception as e:  # pragma: no cover — never break the solve
         logger.debug("LP initial LWT read failed: %s", e)
 
+    lwt_off: float | None = None
+    try:
+        lwt_off = db.get_active_lwt_offset()
+    except Exception as e:  # pragma: no cover — never break the solve
+        logger.debug("LP initial LWT offset read failed: %s", e)
+
     return LpInitialState(
         soc_kwh=soc_kwh,
         tank_temp_c=tank,
         indoor_temp_c=indoor_c,
         lwt_actual_c=lwt_c,
+        lwt_offset_c=lwt_off,
         soc_source=soc_source,
         tank_source=tank_source,
     )

@@ -47,7 +47,7 @@ def _env(monkeypatch):
         config._overrides.pop(k, None)
 
 
-def solve(*, tau=0.0, penalty=0.025, indoor=21.0, lwt=None, t_out=12.0, prices=None, h0=None):
+def solve(*, tau=0.0, penalty=0.025, indoor=21.0, lwt=None, t_out=12.0, prices=None, h0=None, off=None):
     config.LP_COP_LWT_OFFSET_PENALTY_PER_K = penalty
     config.LP_W3_EMITTER_TAU_MIN = tau
     w = WeatherLpSeries(
@@ -56,7 +56,7 @@ def solve(*, tau=0.0, penalty=0.025, indoor=21.0, lwt=None, t_out=12.0, prices=N
         pv_kwh_per_slot=[0.0] * N, cop_space=[4.7] * N, cop_dhw=[3.0] * N,
     )
     st = LpInitialState(soc_kwh=3.0, tank_temp_c=45.0, indoor_temp_c=indoor, lwt_actual_c=lwt,
-                         emitter_h0_kwh=h0)
+                         emitter_h0_kwh=h0, lwt_offset_c=off)
     return solve_lp(
         slot_starts_utc=SLOTS, price_pence=prices or cosy_prices(), base_load_kwh=[0.3] * N,
         weather=w, initial=st, tz=TZ, export_price_pence=[5.0] * N,
@@ -299,22 +299,111 @@ def test_state_at_carries_stored_loop_heat():
     assert _state_at(p0, SLOTS[10]).emitter_h0_kwh is None            # lag off -> nothing carried
 
 
-def test_snapshot_roundtrip_of_emitter_seed():
-    import json
-
+def _persist(p, init, run_id=1):
     from src.scheduler import optimizer as opt
-    from src.scheduler.lp_replay import _snapshot_emitter
-    p = solve(tau=35.0, lwt=None)
-    init = LpInitialState(soc_kwh=3.0, tank_temp_c=45.0, indoor_temp_c=21.0, lwt_actual_c=33.0)
     opt._persist_lp_snapshots(
-        run_id=1, run_at_iso="2026-10-20T00:00:00Z", plan_date="2026-10-20", plan=p,
+        run_id=run_id, run_at_iso="2026-10-20T00:00:00Z", plan_date="2026-10-20", plan=p,
         initial=init, base_load=[0.3] * N, micro_climate_offset=0.0,
     )
-    row = db.get_lp_inputs(1)
+    return db.get_lp_inputs(run_id)
+
+
+def test_snapshot_always_records_lwt_even_at_tau_zero_and_h0_only_when_lagged():
+    import json
+    init = LpInitialState(soc_kwh=3.0, tank_temp_c=45.0, indoor_temp_c=20.9, lwt_actual_c=33.0,
+                          lwt_offset_c=2.0)
+    row0 = _persist(solve(tau=0.0), init, run_id=1)
+    em0 = json.loads(row0["exogenous_snapshot_json"])["emitter"]
+    assert em0 == {"lwt_actual_c": 33.0, "lwt_offset_c": 2.0, "indoor_c": 20.9}
+    p = solve(tau=35.0, lwt=None)
+    row = _persist(p, init, run_id=2)
     em = json.loads(row["exogenous_snapshot_json"])["emitter"]
-    assert em["h0_kwh"] == pytest.approx(p.w3_emitter_h0_kwh) and em["lwt_actual_c"] == 33.0
-    lwt, h0 = _snapshot_emitter(row)
-    assert lwt == 33.0 and h0 == pytest.approx(p.w3_emitter_h0_kwh)
-    # a pre-#866 snapshot has no key -> (None, None) -> the LP's steady-state-at-curve fallback
-    assert _snapshot_emitter({"exogenous_snapshot_json": "{}"}) == (None, None)
-    assert _snapshot_emitter({"exogenous_snapshot_json": None}) == (None, None)
+    assert em["lwt_actual_c"] == 33.0 and em["indoor_c"] == 20.9
+    assert em["h0_kwh"] == pytest.approx(p.w3_emitter_h0_kwh) and em["tau_min"] == 35.0
+
+
+def test_replay_uses_persisted_h0_only_for_the_same_tau():
+    import json
+    from src.scheduler.lp_replay import _snapshot_emitter, _snapshot_emitter_kwargs
+    init = LpInitialState(soc_kwh=3.0, tank_temp_c=45.0, indoor_temp_c=21.0, lwt_actual_c=None)
+    # a tau-35 run persisted h0 = 0.9 (and no LWT)
+    p35 = solve(tau=35.0, h0=0.9)
+    row = _persist(p35, init, run_id=1)
+    kw = _snapshot_emitter_kwargs(row)
+    assert kw["emitter_h0_kwh"] == pytest.approx(0.9) and kw["emitter_h0_tau_min"] == 35.0
+    same = solve(tau=35.0, lwt=None, h0=kw["emitter_h0_kwh"])
+    # replay at the SAME tau: the persisted h0 is honoured
+    st = LpInitialState(soc_kwh=3.0, tank_temp_c=45.0, indoor_temp_c=21.0, **kw)
+    config.LP_W3_EMITTER_TAU_MIN = 35.0
+    config.LP_COP_LWT_OFFSET_PENALTY_PER_K = 0.025
+    from src.scheduler.lp_optimizer import _emitter_h0_kwh
+    assert _emitter_h0_kwh(initial=st, t_out0=12.0, cop0=4.7, tau_h=35 / 60) == pytest.approx(0.9)
+    assert same.w3_emitter_h0_kwh == pytest.approx(0.9)
+    # replay at ANOTHER tau (60): the persisted h0 is ignored, h0 recomputed from the persisted LWT
+    row_tau0 = _persist(solve(tau=0.0), LpInitialState(soc_kwh=3.0, tank_temp_c=45.0, indoor_temp_c=21.0,
+                                                         lwt_actual_c=26.0), run_id=2)
+    kw0 = _snapshot_emitter_kwargs(row_tau0)
+    assert kw0["emitter_h0_kwh"] is None and kw0["lwt_actual_c"] == 26.0
+    config.LP_W3_EMITTER_TAU_MIN = 60.0
+    st60 = LpInitialState(soc_kwh=3.0, tank_temp_c=45.0, indoor_temp_c=21.0, **kw)
+    h60 = _emitter_h0_kwh(initial=st60, t_out0=12.0, cop0=4.7, tau_h=1.0)
+    assert h60 != pytest.approx(0.9) and h60 == pytest.approx(_curve_h0(60.0))   # no LWT persisted -> curve
+    st60b = LpInitialState(soc_kwh=3.0, tank_temp_c=45.0, indoor_temp_c=21.0, **kw0)
+    h60b = _emitter_h0_kwh(initial=st60b, t_out0=12.0, cop0=4.7, tau_h=1.0)
+    ramp = min(1.0, max(0.0, (26.0 - 21.0 - 1.0) / 3.0))
+    from src.physics import get_kw_per_degc_lwt, get_lwt_base_c
+    lift = max(0.0, 26.0 - get_lwt_base_c(12.0))
+    want60 = get_kw_per_degc_lwt() * 8.0 * 4.7 * max(0.5, 1 - 0.025 * lift) * 1.0 * ramp
+    assert h60b == pytest.approx(want60)
+    # pre-#866 snapshot -> nothing recorded
+    assert _snapshot_emitter({"exogenous_snapshot_json": "{}"}) == {}
+    assert _snapshot_emitter({"exogenous_snapshot_json": None}) == {}
+    assert json.loads("{}") == {}
+
+
+# ── fallback follows the active written offset ────────────────────────────────
+def test_stale_lwt_fallback_follows_a_coast_and_a_boost():
+    from src.physics import get_kw_per_degc_lwt, get_lwt_base_c
+    curve = get_lwt_base_c(12.0)
+    coast = solve(tau=35.0, lwt=None, off=-10.0)
+    assert coast.w3_emitter_h0_kwh == pytest.approx(0.0, abs=1e-9)        # curve-10 is under the room
+    boost = solve(tau=35.0, lwt=None, off=5.0)
+    want = get_kw_per_degc_lwt() * (curve + 5.0 - 18.0) * 4.7 * 35 / 60
+    ramp = min(1.0, max(0.0, (curve + 5.0 - 21.0 - 1.0) / 3.0))
+    want = want * (1 - 0.025 * 5.0) * ramp                                  # +5 K of lift derates the COP
+    assert boost.w3_emitter_h0_kwh == pytest.approx(want, rel=1e-6)
+    assert boost.w3_emitter_h0_kwh > solve(tau=35.0, lwt=None).w3_emitter_h0_kwh
+
+
+def test_dhw_cap_tightens_to_the_active_offset():
+    from src.physics import get_lwt_base_c
+    curve = get_lwt_base_c(12.0)
+    reading = curve + 8.0                    # plausible at max lift 10 (cap curve+15), not at offset 0 (cap curve+5)
+    unknown = solve(tau=35.0, lwt=reading)                       # offset unknown -> accepted
+    known = solve(tau=35.0, lwt=reading, off=0.0)                # offset 0 -> contaminated -> curve
+    assert known.w3_emitter_h0_kwh == pytest.approx(solve(tau=35.0, lwt=None, off=0.0).w3_emitter_h0_kwh)
+    assert unknown.w3_emitter_h0_kwh > known.w3_emitter_h0_kwh
+
+
+def test_active_lwt_offset_reader(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    assert db.get_active_lwt_offset() is None
+    conn = db.get_connection()
+    now = datetime.now(UTC)
+    conn.execute(
+        "INSERT INTO execution_log (timestamp, daikin_lwt_offset) VALUES (?, ?)",
+        ((now - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ"), 4.0))
+    conn.commit()
+    assert db.get_active_lwt_offset() is None                      # older than 2 h
+    conn.execute(
+        "INSERT INTO execution_log (timestamp, daikin_lwt_offset) VALUES (?, ?)",
+        ((now - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"), -3.0))
+    conn.commit()
+    assert db.get_active_lwt_offset() == -3.0
+    conn.execute(
+        "INSERT INTO action_schedule (date, start_time, end_time, device, action_type, params, status, created_at) "
+        "VALUES ('2026-10-20','2026-10-20T10:00:00Z','2026-10-20T11:00:00Z','daikin','lwt_preheat',?, 'active', 'x')",
+        ('{"lwt_offset": 6}',))
+    conn.commit()
+    conn.close()
+    assert db.get_active_lwt_offset() == 6.0                       # the active row wins

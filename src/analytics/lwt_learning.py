@@ -1082,7 +1082,7 @@ def _emitter_event_sse(
 def fit_emitter_tau(
     rows: list[dict[str, Any]], *, ua_w_per_k: float | None = None,
     c_kwh_per_k: float | None = None, cop_fn: Any = None, heat_fn: Any = None,
-    dhw_slots: set[str] | None = None,
+    dhw_slots: set[str] | None = None, tank_samples: list[float] | None = None,
 ) -> dict[str, Any]:
     """REPORT-ONLY emitter-lag estimate (#866): around every offset step >= 3 K, simulate
     the room (minute-level RC model, slot-MEAN comparison) for tau in 0..90 min and report
@@ -1104,8 +1104,10 @@ def fit_emitter_tau(
             v = _emitter_heat_kwh_th(r, cf)
             return 0.0 if v is None else v
     events, dropped = _emitter_events(rows, dhw_slots)
+    blind = _emitter_tank_blind(events, tank_samples)
     res: dict[str, Any] = {
         "n_events": len(events), "n_events_dropped_dhw": dropped, "best_tau_min": None,
+        "n_events_tank_blind": blind,
         "sse_by_tau_min": {}, "sse_ratio_best_vs_zero": None, "sse_gap_vs_zero": None,
         "sse_spread": None, "identifiable": False, "confidence": "none",
         "ua_w_per_k": ua_w_per_k, "c_kwh_per_k": c_kwh_per_k,
@@ -1132,9 +1134,29 @@ def fit_emitter_tau(
         return res
     res["confidence"] = (
         "ok" if len(events) >= EMITTER_CONFIDENT_EVENTS
-        and (res["sse_spread"] or 0.0) >= EMITTER_CONFIDENT_SPREAD else "low"
+        and (res["sse_spread"] or 0.0) >= EMITTER_CONFIDENT_SPREAD
+        and dropped <= len(events) and blind == 0 else "low"
     )
     return res
+
+
+def _emitter_tank_blind(events: list[list[dict[str, Any]]], tank_samples: list[float] | None) -> int:
+    """Kept windows whose tank telemetry has a gap > 40 min (or none at all): the tank-rise DHW
+    filter could not see a reheat there. ``tank_samples`` = epoch seconds of tank readings;
+    None = telemetry not supplied (unit use) -> not counted."""
+    if tank_samples is None:
+        return 0
+    ts = sorted(tank_samples)
+    n = 0
+    for w in events:
+        a, b = _ts(w[0]), _ts(w[-1])
+        if a is None or b is None:
+            continue
+        lo, hi = a.timestamp(), b.timestamp() + SLOT_MIN * 60
+        pts = [lo] + [t for t in ts if lo <= t <= hi] + [hi]
+        if any(y - x > 40 * 60 for x, y in zip(pts, pts[1:])):
+            n += 1
+    return n
 
 
 def _emitter_dhw_slots(start: datetime, end: datetime) -> set[str]:
@@ -1162,12 +1184,16 @@ def _emitter_fit_for_day(day: date, tz: ZoneInfo) -> dict[str, Any]:
         start = day_slots_utc(day - timedelta(days=EMITTER_WINDOW_DAYS - 1), tz)[0]
         end = day_slots_utc(day, tz)[-1] + timedelta(minutes=SLOT_MIN)
         rows = db.get_lwt_learning_rows(_z(start), _z(end))
+        dhw = None
+        tank_ts: list[float] | None = None
         try:
             dhw = _emitter_dhw_slots(start, end)
+            tank_ts = [float(r["fetched_at"]) for r in
+                       db.get_daikin_telemetry_range(start.timestamp(), end.timestamp())
+                       if r.get("tank_temp_c") is not None]
         except Exception:
             logger.debug("emitter fit: dhw slots unavailable", exc_info=True)
-            dhw = None
-        return {"emitter_tau_fit": fit_emitter_tau(rows, dhw_slots=dhw)}
+        return {"emitter_tau_fit": fit_emitter_tau(rows, dhw_slots=dhw, tank_samples=tank_ts)}
     except Exception:
         logger.warning("lwt_learning emitter tau fit failed", exc_info=True)
         return {"emitter_tau_fit": None}

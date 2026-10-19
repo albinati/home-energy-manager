@@ -76,6 +76,11 @@ class LpInitialState:
     # #866: explicit initial emitter-loop heat (kWh_th); takes precedence over the LWT rule.
     # Set by chained replays (predicted end-of-segment state) and persisted snapshots.
     emitter_h0_kwh: float | None = None
+    # Only honoured when this equals the CURRENT tau (a persisted h0 is meaningless for another tau).
+    emitter_h0_tau_min: float | None = None
+    # #866: the LWT offset the device is on right now (None = unknown); lets the stale/implausible
+    # LWT fallback follow a coast or boost instead of the bare curve.
+    lwt_offset_c: float | None = None
     # Provenance strings ("fox_realtime_cache", "db_realtime_snapshot",
     # "daikin_live", "daikin_cache", "daikin_estimate", "execution_log",
     # "default"). Persisted to lp_inputs_snapshot so the History view can show
@@ -358,7 +363,7 @@ def _piecewise_stress_breakpoints(max_power: float, n_seg: int) -> list[tuple[fl
 # Main solver
 # ---------------------------------------------------------------------------
 
-def _emitter_h0_kwh(*, initial: Any, t_out0: float, cop0: float, tau_h: float) -> float:
+def _emitter_h0_kwh(*, initial: Any, t_out0: float, cop0: float, tau_h: float) -> float:  # noqa: C901
     """Initial emitter-loop heat h[0] (kWh_th) for the #866 lag model.
 
     * ``initial.emitter_h0_kwh`` (explicit: a chained replay's predicted end-of-segment
@@ -376,7 +381,9 @@ def _emitter_h0_kwh(*, initial: Any, t_out0: float, cop0: float, tau_h: float) -
       room, full at >= 4 K), not a 3 K cliff.
     """
     explicit = getattr(initial, "emitter_h0_kwh", None)
-    if explicit is not None:
+    etau = getattr(initial, "emitter_h0_tau_min", None)
+    cur_tau = float(getattr(config, "LP_W3_EMITTER_TAU_MIN", 0.0) or 0.0)
+    if explicit is not None and (etau is None or abs(float(etau) - cur_tau) < 1e-6):
         return max(0.0, float(explicit))
     from ..physics import get_kw_per_degc_lwt, get_lwt_base_c
 
@@ -384,16 +391,19 @@ def _emitter_h0_kwh(*, initial: Any, t_out0: float, cop0: float, tau_h: float) -
         curve = None
     else:
         curve = float(get_lwt_base_c(t_out0))
+    off = getattr(initial, "lwt_offset_c", None)
+    off = float(off) if off is not None else None
     lwt = getattr(initial, "lwt_actual_c", None)
     if lwt is not None:
         lwt = float(lwt)
-        cap = 50.0 if curve is None else min(
-            50.0, curve + max(0.0, float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0))) + 5.0
-        )
+        lift = max(0.0, off) if off is not None else max(
+            0.0, float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0)))
+        cap = 50.0 if curve is None else min(50.0, curve + lift + 5.0)
         if lwt > cap:
             lwt = None
-    if lwt is None:
-        lwt = curve
+    if lwt is None and curve is not None:
+        # stale / implausible / absent: the water the CURRENT written offset asks for
+        lwt = curve + (off if off is not None else 0.0)
     if lwt is None:
         return 0.0
     ramp = min(1.0, max(0.0, (lwt - float(initial.indoor_temp_c) - 1.0) / 3.0))

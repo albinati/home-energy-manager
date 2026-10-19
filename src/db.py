@@ -3979,6 +3979,38 @@ def clear_actions_in_range(
             conn.close()
 
 
+def get_active_lwt_offset(now_utc: Any = None, *, max_age_hours: float = 2.0) -> float | None:
+    """The LWT offset the device is CURRENTLY on (#866): the ACTIVE daikin ``lwt_preheat`` /
+    ``restore`` row (newest start), else the latest ``execution_log.daikin_lwt_offset`` no older
+    than ``max_age_hours``, else None (unknown)."""
+    from datetime import UTC, datetime, timedelta
+
+    now = now_utc or datetime.now(UTC)
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                """SELECT params FROM action_schedule
+                   WHERE device = 'daikin' AND status = 'active'
+                   AND action_type IN ('lwt_preheat', 'restore')
+                   ORDER BY start_time DESC, id DESC"""
+            ).fetchall()
+        finally:
+            conn.close()
+    for r in rows:
+        try:
+            p = json.loads(r["params"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(p, dict) and p.get("lwt_offset") is not None:
+            return float(p["lwt_offset"])
+    cutoff = (now - timedelta(hours=max_age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for r in get_execution_logs(from_ts=cutoff, limit=200):
+        if r.get("daikin_lwt_offset") is not None:
+            return float(r["daikin_lwt_offset"])
+    return None
+
+
 def get_pending_actions_in_range(
     start_utc_iso: str,
     end_utc_iso: str,

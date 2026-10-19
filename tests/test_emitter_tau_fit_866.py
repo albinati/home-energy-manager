@@ -135,3 +135,31 @@ def test_default_heat_model_runs_on_log_rows():
     rows, _ = synth_rows(30)
     f = L.fit_emitter_tau(rows, ua_w_per_k=UA, c_kwh_per_k=C)
     assert f["n_events"] > 0 and f["best_tau_min"] in range(0, 100, 10)
+
+
+def _dense_tank(rows, step_min=10):
+    t0 = datetime.fromisoformat(rows[0]["slot_time_utc"].replace("Z", "+00:00")).timestamp()
+    t1 = datetime.fromisoformat(rows[-1]["slot_time_utc"].replace("Z", "+00:00")).timestamp() + 1800
+    return [t0 + i * step_min * 60 for i in range(int((t1 - t0) // (step_min * 60)) + 1)]
+
+
+def test_confidence_low_when_more_dhw_windows_dropped_than_kept():
+    rows, _ = synth_rows(35, dhw_every=1)
+    f = fit(rows, tank_samples=_dense_tank(rows))
+    print(f"[#866 recovery] dhw-heavy: kept {f['n_events']} dropped {f['n_events_dropped_dhw']} conf {f['confidence']}")
+    assert f["n_events_dropped_dhw"] > f["n_events"]
+    assert f["confidence"] == "low"
+
+
+def test_confidence_low_when_tank_telemetry_has_gaps():
+    rows, _ = synth_rows(35, dhw_every=3)
+    dense = fit(rows, tank_samples=_dense_tank(rows))
+    assert dense["n_events_tank_blind"] == 0 and dense["confidence"] in ("ok", "low")
+    gappy = [t for i, t in enumerate(_dense_tank(rows)) if (i // 6) % 4 != 0]     # 1 h holes every 4 h
+    blind = fit(rows, tank_samples=gappy)
+    assert blind["n_events_tank_blind"] > 0
+    assert blind["confidence"] == "low"
+    none = fit(rows, tank_samples=[])
+    assert none["n_events_tank_blind"] == none["n_events"] and none["confidence"] == "low"
+    # not supplied (unit use) -> not counted
+    assert fit(rows)["n_events_tank_blind"] == 0
