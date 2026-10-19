@@ -315,6 +315,7 @@ def replay_run(
                 float(inputs["indoor_initial_c"])
                 if inputs.get("indoor_initial_c") is not None else None
             ),
+            lwt_actual_c=_snapshot_lwt_actual_c(inputs),
         )
 
     # Weather: prefer the exact forecast fetch referenced by the LP snapshot;
@@ -1126,6 +1127,17 @@ def _state_at(plan: LpPlan, when_utc: datetime) -> LpInitialState:
         tank_source="replay_chain",
         indoor_temp_c=float(indoor) if indoor is not None else None,
     )
+
+
+def _snapshot_lwt_actual_c(inputs: dict) -> float | None:
+    """#866 — the live LWT recorded on the snapshot (emitter-lag seed), if any."""
+    try:
+        v = (json.loads(inputs.get("exogenous_snapshot_json") or "{}").get("emitter") or {}).get(
+            "lwt_actual_c"
+        )
+        return float(v) if v is not None else None
+    except Exception:
+        return None
 
 
 def _apply_cadence_filter(

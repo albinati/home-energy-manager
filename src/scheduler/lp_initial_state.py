@@ -97,10 +97,28 @@ def read_lp_initial_state(
     except Exception as e:  # pragma: no cover — never break the solve
         logger.debug("LP initial indoor read failed: %s", e)
 
+    # #866: freshest LIVE leaving-water temperature (<= 30 min old) seeds the emitter-lag
+    # state h[0] (only read by the LP when LP_W3_EMITTER_TAU_MIN > 0).
+    lwt_c: float | None = None
+    try:
+        import time as _time
+
+        row = db.get_latest_daikin_telemetry(source="live")
+        if (
+            row is not None
+            and row.get("lwt_actual_c") is not None
+            and row.get("fetched_at") is not None
+            and _time.time() - float(row["fetched_at"]) <= 30 * 60
+        ):
+            lwt_c = float(row["lwt_actual_c"])
+    except Exception as e:  # pragma: no cover — never break the solve
+        logger.debug("LP initial LWT read failed: %s", e)
+
     return LpInitialState(
         soc_kwh=soc_kwh,
         tank_temp_c=tank,
         indoor_temp_c=indoor_c,
+        lwt_actual_c=lwt_c,
         soc_source=soc_source,
         tank_source=tank_source,
     )

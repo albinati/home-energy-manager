@@ -922,7 +922,7 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
         "payload": {"c_kwh_per_k": c, "ua_est_night_w_per_k": ua_night,
                     # #843: the coast-only UA is C x decay rate with C = tau x UA_pin -> circular
                     "ua_from_tau_scaled_w_per_k": ua, "ua_from_tau_scaled_night_w_per_k": ua_night,
-                    "ua_est_circular": True, **joint,
+                    "ua_est_circular": True, **joint, **_emitter_fit_for_day(day, tz),
                     "n_coast_night_slots": n_coast_night, "n_k_buckets": n_k_buckets, "ua_pinned_w_per_k": ua_pin, "k_pinned_kw_per_c": k_pin,
                     "n_rows": len(rows),
                     "pred_resid": pred_resid_breakdown(rows, tz),
@@ -936,6 +936,137 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
     except Exception:
         logger.debug("lwt_learning_summary log failed", exc_info=True)
     return row
+
+
+# ── #866: report-only emitter / water-loop lag estimate ───────────────────────────────
+EMITTER_TAU_GRID_MIN = tuple(range(0, 100, 10))
+EMITTER_STEP_MIN_K = 3.0       # device-offset change that counts as a step event
+EMITTER_PRE_SLOTS = 4          # slots before the step (offset must be constant there)
+EMITTER_POST_SLOTS = 6         # slots after the step slot
+EMITTER_WINDOW_DAYS = 14
+
+
+def _emitter_heat_kwh_th(r: dict[str, Any], cop_fn: Any) -> float | None:
+    """Thermal kWh the pump PRODUCES in the row's slot: the LP's own draw model
+    (weather curve + written offset -> compressor draw) x COP(outdoor)."""
+    if r.get("outdoor_real_c") is None or r.get("device_offset") is None:
+        return None
+    from ..physics import get_daikin_heating_kw
+    to = float(r["outdoor_real_c"])
+    draw_kw = get_daikin_heating_kw(to, lwt_offset_delta=float(r["device_offset"]))
+    return draw_kw * (SLOT_MIN / 60.0) * _cop(cop_fn, r)
+
+
+def _emitter_events(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Windows (pre + step + post slots) around offset steps >= EMITTER_STEP_MIN_K whose
+    pre-step offset is constant and whose slots are contiguous with indoor/outdoor/offset."""
+    rs = sorted((r for r in rows if _ts(r) is not None), key=lambda r: r["slot_time_utc"])
+    need = EMITTER_PRE_SLOTS + EMITTER_POST_SLOTS + 1          # rows s-pre .. s+post (T needs +1)
+    out: list[list[dict[str, Any]]] = []
+    last_end = -1
+    for s in range(EMITTER_PRE_SLOTS, len(rs) - EMITTER_POST_SLOTS):
+        w = rs[s - EMITTER_PRE_SLOTS: s + EMITTER_POST_SLOTS + 1]
+        if len(w) != need:
+            continue
+        ts = [_ts(r) for r in w]
+        if any((ts[j + 1] - ts[j]) != timedelta(minutes=SLOT_MIN) for j in range(len(w) - 1)):
+            continue
+        if any(r.get("indoor_real_c") is None or r.get("outdoor_real_c") is None
+               or r.get("device_offset") is None for r in w):
+            continue
+        pre = [float(r["device_offset"]) for r in w[:EMITTER_PRE_SLOTS]]
+        if max(pre) - min(pre) > 0.5:
+            continue
+        if abs(float(w[EMITTER_PRE_SLOTS]["device_offset"]) - pre[-1]) < EMITTER_STEP_MIN_K:
+            continue
+        if s - EMITTER_PRE_SLOTS <= last_end:          # windows must not overlap
+            continue
+        last_end = s + EMITTER_POST_SLOTS
+        out.append(w)
+    return out
+
+
+def _emitter_event_sse(
+    w: list[dict[str, Any]], tau_min: float, ua_w_per_k: float, c_kwh_per_k: float,
+    heat_fn: Any,
+) -> float:
+    """One-step-ahead SSE of room deltas (per-event mean residual removed, so a constant
+    gain/UA bias does not pick the lag). State h starts at the steady state of the pre-step
+    production."""
+    dt_h = SLOT_MIN / 60.0
+    q = [float(heat_fn(r)) for r in w[:-1]]
+    t = [float(r["indoor_real_c"]) for r in w]
+    to = [float(r["outdoor_real_c"]) for r in w]
+    if tau_min > 0:
+        tau_h = tau_min / 60.0
+        a = 1.0 - math.exp(-dt_h / tau_h)
+        b = 1.0 - (tau_h / dt_h) * a
+        h = q[0] * tau_h / dt_h
+    res: list[float] = []
+    for j, qj in enumerate(q):
+        if tau_min > 0:
+            d = a * h + b * qj
+            h = h + qj - d
+        else:
+            d = qj
+        pred = (d - ua_w_per_k / 1000.0 * (t[j] - to[j]) * dt_h) / c_kwh_per_k
+        res.append(pred - (t[j + 1] - t[j]))
+    m = sum(res) / len(res)
+    return sum((x - m) ** 2 for x in res)
+
+
+def fit_emitter_tau(
+    rows: list[dict[str, Any]], *, ua_w_per_k: float | None = None,
+    c_kwh_per_k: float | None = None, cop_fn: Any = None, heat_fn: Any = None,
+) -> dict[str, Any]:
+    """REPORT-ONLY emitter-lag estimate (#866): around every offset step >= 3 K, simulate
+    the room with the LP's RC model for tau in 0..90 min and report the tau with the least
+    SSE of room deltas. ``heat_fn(row) -> thermal kWh`` is injectable (tests); the default is
+    the LP draw model. Nothing is applied; ``LP_W3_EMITTER_TAU_MIN`` is set by hand."""
+    if ua_w_per_k is None or c_kwh_per_k is None:
+        from .thermal_learning import get_building_thermal_mass_kwh_per_k, get_building_ua_w_per_k
+        ua_w_per_k = float(get_building_ua_w_per_k()) if ua_w_per_k is None else ua_w_per_k
+        c_kwh_per_k = float(get_building_thermal_mass_kwh_per_k()) if c_kwh_per_k is None else c_kwh_per_k
+    if heat_fn is None:
+        cf = cop_fn or _default_cop_fn()
+
+        def heat_fn(r: dict[str, Any]) -> float:  # noqa: E306
+            v = _emitter_heat_kwh_th(r, cf)
+            return 0.0 if v is None else v
+    events = _emitter_events(rows)
+    res: dict[str, Any] = {
+        "n_events": len(events), "best_tau_min": None, "sse_by_tau_min": {},
+        "sse_ratio_best_vs_zero": None, "identifiable": False,
+        "ua_w_per_k": ua_w_per_k, "c_kwh_per_k": c_kwh_per_k,
+        "step_min_k": EMITTER_STEP_MIN_K, "window_days": EMITTER_WINDOW_DAYS,
+        "applied": False,
+    }
+    if not events:
+        res["reason"] = "no_step_events"
+        return res
+    curve = {tau: sum(_emitter_event_sse(w, tau, ua_w_per_k, c_kwh_per_k, heat_fn) for w in events)
+             for tau in EMITTER_TAU_GRID_MIN}
+    best = min(curve, key=lambda k_: (curve[k_], k_))
+    res["sse_by_tau_min"] = {str(k_): round(v, 6) for k_, v in curve.items()}
+    res["best_tau_min"] = best
+    if curve[0] > 0:
+        res["sse_ratio_best_vs_zero"] = round(curve[best] / curve[0], 4)
+    res["identifiable"] = len(events) >= 3
+    if not res["identifiable"]:
+        res["reason"] = "too_few_step_events"
+    return res
+
+
+def _emitter_fit_for_day(day: date, tz: ZoneInfo) -> dict[str, Any]:
+    """Payload key ``emitter_tau_fit`` over the last EMITTER_WINDOW_DAYS days. Never raises."""
+    try:
+        start = day_slots_utc(day - timedelta(days=EMITTER_WINDOW_DAYS - 1), tz)[0]
+        end = day_slots_utc(day, tz)[-1] + timedelta(minutes=SLOT_MIN)
+        rows = db.get_lwt_learning_rows(_z(start), _z(end))
+        return {"emitter_tau_fit": fit_emitter_tau(rows)}
+    except Exception:
+        logger.warning("lwt_learning emitter tau fit failed", exc_info=True)
+        return {"emitter_tau_fit": None}
 
 
 def _joint_for_day(day: date, tz: ZoneInfo) -> dict[str, Any]:

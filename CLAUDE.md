@@ -960,6 +960,31 @@ bands did not heat less) because the LP priced +10 K of LWT at the curve COP.
   the two emergency env knobs. The comfort-band retune (setpoint 21 / ceiling 21.5, lower
   `DAIKIN_LWT_PREHEAT_COMFORT_BAND_C`) is a settings change, not code.
 
+### Emitter lag (#866)
+
+Prod step tests (2026-10-18/19): a +10 offset reaches LWT target ~25 min later and the room starts
+rising 30-40 min after the write; after a setback the room keeps receiving heat ~35-40 min. The W3 RC
+equation used to put `e_space*COP` into `t_in` in the SAME slot.
+
+- **`LP_W3_EMITTER_TAU_MIN`** (runtime, comfort group, 0..120, **code default 0 = no variables, bit-for-bit**;
+  also in the `lp_overrides` WHITELIST and the `lp_inputs_snapshot` config snapshot). tau > 0, W3 on, not
+  passive: loop heat `h[0..n]` (kWh_th above room) and delivered `d[i]`, `d = a*h + b*q`, `h' = h + q - d`
+  (a = 1-exp(-dt/tau), b = 1-(tau/dt)*a, `q` = `_thermal_space(i)` incl. #863 lift segments). The RC equation
+  uses `d`; the radiator cap and gentle-recovery cap stay on PRODUCTION `q`; comfort/ceiling/emergency
+  constraints are on the room as before. Heat still in the loop at the horizon end is not credited (slight
+  bias against late heating). `space_electric_kwh` / `lwt_offset_c` stay PRODUCTION, so dispatch, the
+  `lwt_learning_log` planned fields and `plan/fronts` keep their meaning. Plan fields: `w3_emitter_tau_min`,
+  `w3_emitter_h0_kwh`, `w3_delivered_kwh` (per slot).
+- **`h[0]`**: `LpInitialState.lwt_actual_c` = freshest `daikin_telemetry` `source='live'` row <= 30 min old
+  (`read_lp_initial_state`; recorded in `exogenous_snapshot_json.emitter` so replays reproduce it). If
+  `lwt_actual - indoor >= 3`: `k*(lwt_actual-18)*cop_space[0]*tau_h`, else 0.
+- **Report-only fit**: nightly `lwt_learning_daily.payload.emitter_tau_fit` (`fit_emitter_tau`): over 14 days,
+  windows of 4 constant-offset slots + a >= 3 K device-offset step + 6 slots, RC one-step room deltas with the
+  LP draw model x COP, tau in 0..90 step 10, least SSE (per-event mean residual removed). Reports
+  `best_tau_min`, `sse_by_tau_min`, `n_events`, `sse_ratio_best_vs_zero`; needs >= 3 events; NEVER applied.
+- Rollout: deploy at 0, read the fit + the ~30-40 min table, replay 7 days at 0 vs tau, then
+  `PUT /api/v1/settings` `LP_W3_EMITTER_TAU_MIN`. Kill switch: set it back to 0.
+
 ## Key `.env` settings to know
 
 ```

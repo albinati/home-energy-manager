@@ -70,6 +70,9 @@ class LpInitialState:
     # W3 (#540): the freshest room-sensor reading, or None when no fresh sensor.
     # Seeds t_in[0] when LP_W3_TIN_ENABLED; None → W3 stays off for this solve.
     indoor_temp_c: float | None = None
+    # #866: freshest LIVE leaving-water temperature (deg C), or None. Only used to seed
+    # the emitter-lag state h[0] when LP_W3_EMITTER_TAU_MIN > 0.
+    lwt_actual_c: float | None = None
     # Provenance strings ("fox_realtime_cache", "db_realtime_snapshot",
     # "daikin_live", "daikin_cache", "daikin_estimate", "execution_log",
     # "default"). Persisted to lp_inputs_snapshot so the History view can show
@@ -112,6 +115,12 @@ class LpPlan:
     w3_gain_kw: list[float] = field(default_factory=list)
     """#854 — the thermal gains (kW) the W3 RC model assumed per slot
     (``internal + solar_coeff x pv_kw``), len N; empty when W3 off or both knobs 0."""
+    w3_emitter_tau_min: float = 0.0
+    w3_emitter_h0_kwh: float = 0.0
+    w3_delivered_kwh: list[float] = field(default_factory=list)
+    """#866 — emitter lag (minutes) the plan was SOLVED with, the initial loop heat h[0]
+    (kWh_th) and the per-slot heat DELIVERED to the room (len N; empty when lag off).
+    ``space_electric_kwh`` / ``lwt_offset_c`` stay PRODUCTION (what the pump is told)."""
     cop_lwt_offset_penalty_per_k: float = 0.0
     """#863 — the per-K lift COP penalty this plan was SOLVED with (0 = single COP)."""
     cop_space_effective: list[float] = field(default_factory=list)
@@ -623,6 +632,27 @@ def solve_lp(
         w3_g_int = max(0.0, float(getattr(config, "LP_W3_INTERNAL_GAIN_KW", 0.0) or 0.0))
         w3_g_sol = max(0.0, float(getattr(config, "LP_W3_SOLAR_GAIN_KW_PER_PV_KW", 0.0) or 0.0))
         w3_gain_kw = [w3_g_int + w3_g_sol * (max(0.0, float(pv_avail[_i])) / slot_h) for _i in range(n)]
+        # #866 — first-order emitter / water-loop lag between heat PRODUCED (q) and heat
+        # DELIVERED to the room (d). Exact discretisation for a piecewise-constant input
+        # over dt: d = a*h + b*q ; h' = h + q - d (h = kWh_th stored in the loop above the
+        # room). tau 0 = off: no variables, the pre-#866 equation bit-for-bit.
+        w3_emit_tau_min = max(0.0, float(getattr(config, "LP_W3_EMITTER_TAU_MIN", 0.0) or 0.0))
+        w3_emit = w3_emit_tau_min > 0.0
+        w3_emit_h0 = 0.0
+        w3_emit_a = w3_emit_b = 0.0
+        if w3_emit:
+            _tau_h = w3_emit_tau_min / 60.0
+            w3_emit_a = 1.0 - math.exp(-slot_h / _tau_h)
+            w3_emit_b = 1.0 - (_tau_h / slot_h) * w3_emit_a
+            # h[0]: if the pump is demonstrably delivering (fresh live LWT well above the
+            # room) the loop holds the steady-state heat of that LWT: P * tau, with
+            # P = k * (LWT - 18) * COP. Otherwise the loop is taken as empty.
+            _lwt0 = getattr(initial, "lwt_actual_c", None)
+            if _lwt0 is not None and float(_lwt0) - float(initial.indoor_temp_c) >= 3.0:
+                from ..physics import get_kw_per_degc_lwt
+
+                _p_kw = get_kw_per_degc_lwt() * max(0.0, float(_lwt0) - 18.0) * float(cop_space[0])
+                w3_emit_h0 = _p_kw * _tau_h
 
         def _w3_floor(i: int) -> float:
             """Three-level comfort floor (#808): night floor 22–07, setpoint
@@ -810,6 +840,10 @@ def solve_lp(
             if w3_em_pen > 0 else {}
         )
         prob += t_in[0] == float(initial.indoor_temp_c)
+        if w3_emit:
+            w3_h = pulp.LpVariable.dicts("emitter_heat", range(n + 1), lowBound=0)
+            w3_d = pulp.LpVariable.dicts("emitter_delivered", range(n), lowBound=0)
+            prob += w3_h[0] == w3_emit_h0
 
     # Piecewise stress auxiliary variables (one per battery power slot)
     stress_aux: dict[int, pulp.LpVariable] = {}
@@ -1192,13 +1226,18 @@ def solve_lp(
         # (floor/ceil above) still bounds the physical draw; this only READS it,
         # so no new equality on e_space → no over-constraint.
         if w3:
-            q_heat_space = _thermal_space(i) * j_per_kwh
+            q_heat_space = _thermal_space(i) * j_per_kwh      # PRODUCTION (pump)
+            q_room_j = q_heat_space                           # DELIVERED to the room
+            if w3_emit:
+                prob += w3_d[i] == w3_emit_a * w3_h[i] + w3_emit_b * _thermal_space(i)
+                prob += w3_h[i + 1] == w3_h[i] + _thermal_space(i) - w3_d[i]
+                q_room_j = w3_d[i] * j_per_kwh
             loss_bld_j = ua_bld * (t_in[i] - t_out[i]) * dt_s
             if w3_g_int > 0 or w3_g_sol > 0:
                 gain_j = w3_gain_kw[i] * slot_h * j_per_kwh
-                prob += t_in[i + 1] == t_in[i] + (q_heat_space - loss_bld_j + gain_j) / c_bld
+                prob += t_in[i + 1] == t_in[i] + (q_room_j - loss_bld_j + gain_j) / c_bld
             else:
-                prob += t_in[i + 1] == t_in[i] + (q_heat_space - loss_bld_j) / c_bld
+                prob += t_in[i + 1] == t_in[i] + (q_room_j - loss_bld_j) / c_bld
             # Soft comfort floor — slack-penalised, so the LP is NEVER Infeasible.
             prob += t_in[i + 1] + s_lo[i] >= _w3_floor(i)
             if w3_em_pen > 0:
@@ -1971,6 +2010,11 @@ def solve_lp(
             plan.w3_internal_gain_kw = w3_g_int
             plan.w3_emergency_floor_c = w3_em_floor
             plan.w3_solar_gain_kw_per_pv_kw = w3_g_sol
+            if w3_emit:
+                plan.w3_emitter_tau_min = w3_emit_tau_min
+                plan.w3_emitter_h0_kwh = w3_emit_h0
+                if i < n:
+                    plan.w3_delivered_kwh.append(_v(w3_d[i]))
             if (w3_g_int > 0 or w3_g_sol > 0) and not plan.w3_gain_kw:
                 plan.w3_gain_kw = [float(g) for g in w3_gain_kw]
             plan.indoor_temp_c.append(_v(t_in[i]))

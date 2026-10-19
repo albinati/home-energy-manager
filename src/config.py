@@ -2617,6 +2617,14 @@ class Config:
         self._rt_set("LP_W3_SOLAR_GAIN_KW_PER_PV_KW", float(value))
 
     @property
+    def LP_W3_EMITTER_TAU_MIN(self) -> float:
+        return float(self._rt_get("LP_W3_EMITTER_TAU_MIN"))
+
+    @LP_W3_EMITTER_TAU_MIN.setter
+    def LP_W3_EMITTER_TAU_MIN(self, value: float) -> None:
+        self._rt_set("LP_W3_EMITTER_TAU_MIN", float(value))
+
+    @property
     def LP_COP_LWT_OFFSET_PENALTY_PER_K(self) -> float:
         return float(self._rt_get("LP_COP_LWT_OFFSET_PENALTY_PER_K"))
 
