@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -63,7 +64,7 @@ def test_dhw_schedule_standoff_day_shows_the_cycle_not_warmup(monkeypatch):
     monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "", raising=False)
     monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
     monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True, raising=False)
-    today = datetime.now(UTC).astimezone().date()
+    today = datetime.now(ZoneInfo(str(config.BULLETPROOF_TIMEZONE))).date()
     monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", today.weekday(), raising=False)
     monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11, raising=False)
     monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0, raising=False)
