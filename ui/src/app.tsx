@@ -50,12 +50,10 @@ export function App() {
             <Route path="/settings">{() => <AdminOnlyRoute component={Settings} />}</Route>
             <Route>
               <div class="page-padded not-found">
-                <h1>Not found</h1>
-                <p>The page you're looking for doesn't exist in this app. The
-                  old per-section routes (heating, history, forecast) merged
-                  into the cockpit.</p>
+                <h1>Não encontrada</h1>
+                <p>Esta página não existe.</p>
                 <p class="not-found-links">
-                  <Link href="/" class="nav-link"><Icon name="house" size={15} />Cockpit</Link>
+                  <Link href="/" class="nav-link"><Icon name="house" size={15} />Casa</Link>
                   <Link href="/insights" class="nav-link"><Icon name="trend" size={15} />Insights</Link>
                 </p>
               </div>

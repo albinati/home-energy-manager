@@ -152,7 +152,7 @@ export function LoadPatternCard({ period }: { period: PeriodState }) {
             {(dc.weekday ?? 0) + (dc.weekend ?? 0)} days learned
             ({dc.weekday ?? 0} weekday / {dc.weekend ?? 0} weekend)
             {(dc.away_excluded ?? 0) > 0 && <> · {dc.away_excluded} away day(s) excluded</>}
-            {(dc.negative_excluded ?? 0) > 0 && <> · {dc.negative_excluded} negative-price slot(s) excluded</>}
+            {(dc.negative_excluded ?? 0) > 0 && <> · {dc.negative_excluded} faixa(s) de preço negativo excluída(s)</>}
             {" · "}
             {data.calibrated_days}/{data.calibrated_days + data.physics_only_days} days calibrated
             to the measured heat-pump split

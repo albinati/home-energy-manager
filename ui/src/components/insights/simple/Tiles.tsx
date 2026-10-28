@@ -1,6 +1,8 @@
 import { useState } from "preact/hooks";
 import { lazy, Suspense } from "preact/compat";
 import type { ComponentChildren } from "preact";
+import { Link } from "wouter-preact";
+import { role } from "../../../lib/auth";
 import type { RecHouse, RecWeekSummary } from "../../../lib/recTypes";
 import { Spinner } from "../../common/Spinner";
 import type { DetailKey } from "./DetailCards";
@@ -24,6 +26,9 @@ function MoreBox({ which, label }: { which: DetailKey; label: string }) {
           <Suspense fallback={<Spinner label="Carregando…" />}>
             <DetailCards which={which} />
           </Suspense>
+          {which === "battery" && role.value === "admin" && (
+            <p class="is-more-link"><Link href="/report">Registro de ações →</Link></p>
+          )}
         </div>
       )}
     </div>

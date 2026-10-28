@@ -33,8 +33,8 @@ export function FairCompareBlock() {
   return (
     <div class="insights-card">
       <p class="muted">
-        Every tariff priced on your <strong>actual metered usage</strong> — each with its own
-        standing charge and export rate; negative-price imports credit the bill.
+        Todas as tarifas calculadas sobre o seu <strong>consumo medido</strong>, cada uma com o
+        próprio custo fixo e taxa de exportação.
       </p>
 
       {/* The first compare for a period is a heavy server-side replay (can

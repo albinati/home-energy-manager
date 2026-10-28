@@ -27,7 +27,8 @@ function Clock() {
   return <span class="nav-clock" aria-label="Hora da casa">{t}</span>;
 }
 
-// Chrome (#879): brand · Casa · Insights · Ajustes (admin) · clock. The brand
+// Chrome (#879): brand · Casa · Insights · Ajustes (admin) · clock. The Journal
+// (/report) is no longer in the nav: reachable from Insights and Settings. The brand
 // is also the home link; on phones the links collapse into the brand.
 export function TopNav() {
   const [path] = useLocation();
@@ -44,11 +45,6 @@ export function TopNav() {
           <Link href="/insights" title="Insights" class={`nav-link nav-link--text${path === "/insights" ? " active" : ""}`}>
             Insights
           </Link>
-          {isAdmin && (
-            <Link href="/report" title="Journal" class={`nav-link nav-link--text${path === "/report" ? " active" : ""}`}>
-              Journal
-            </Link>
-          )}
           {isAdmin && (
             <Link href="/settings" title="Ajustes" aria-label="Ajustes" class={`nav-link nav-link--text${path === "/settings" ? " active" : ""}`}>
               <Icon name="settings" size={14} /><span class="nav-label">Ajustes</span>

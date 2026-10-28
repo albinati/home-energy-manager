@@ -281,10 +281,9 @@ payload (zero extra quota, lag up to `DAIKIN_HEARTBEAT_REFRESH_SECONDS`).
   vacation is a 422). `VACATION_RETURN_AT` accepts a trailing `Z`/offset.
 - **Load scale cutoff.** `LP_VACATION_LOAD_SCALE` applies only to slots BEFORE the stored recovery time
   (`vacation.recovery_cutoff()`), so the plan solved the evening before provisions the arrival evening.
-- **Guests demoted.** `GUESTS_DETECT_ENABLED` code default is now false. The Home Operate card and the
-  Settings ModeSwitcher show `normal | vacation` only (vacation takes a `datetime-local` return time;
-  the date-range footnote is gone); `guests` stays in the enum and in Settings > "Vacation & guests"
-  (advanced).
+- **Guests demoted.** `GUESTS_DETECT_ENABLED` code default is now false. The Home ModeBox shows
+  Normal | Férias (datetime-local return); `guests` stays in the enum, reachable only in
+  Settings > Avançado > "Férias e Daikin".
 - **Surfaces.** `GET /api/v1/cockpit/now` -> `vacation` and `space_heating_gate_state()["vacation"]`:
   `{active, return_at, recovery_at, daikin_holiday_until_sent, holiday_enabled}` (`daikin_holiday_until_sent`
   = the `endDate` WE sent; the characteristic itself is not trustworthy, see #872). Cosy scorecard payload
@@ -1676,10 +1675,18 @@ ui/                        # SPA container (nginx serving a Vite build)
   Dockerfile               # node build stage → nginx:alpine + envsubst for runtime config
   conf/nginx.conf.template # reverse-proxies /api → hem; SPA fallback `try_files $uri /index.html`
   index.html               # single Vite entry — wouter resolves all routes client-side
-  src/routes/              # Preact + TypeScript route components: landing.tsx (`/`),
-                           #   insights.tsx (`/insights`), report.tsx (`/report`),
-                           #   settings.tsx (`/settings`) — four routes, no per-route HTML page
-  src/components|styles/   # Preact components + CSS tokens (see DESIGN.md)
+  src/routes/              # Preact + TypeScript route components (#879 v2): landing.tsx (`/` Home:
+                           #   status + 3 tiles + bill + one band strip + mode), insights.tsx (`/insights`:
+                           #   recommendations, week, house; detail cards lazy behind "ver mais"),
+                           #   settings.tsx (`/settings`: Conforto / Água quente / Conta + Avançado),
+                           #   report.tsx (`/report` Journal, admin, not in the nav) — no per-route HTML page
+  src/components/home/simple/      # Home v2 blocks (StatusLine, tiles, BandStrip, ModeBox) + pure logic.ts (tested)
+  src/components/insights/simple/  # Insights v2 (Tiles, recommendations, DetailCards lazy chunk) + logic.ts
+  src/components/insights/*.tsx    # the detailed cards DetailCards mounts (LoadPattern, CosyScorecard, LwtLearning…)
+  src/components/settings|shell|common|report/  # settings groups + batch bar, top nav/alerts/footer, primitives, journal
+  src/lib/endpoints.ts     # ONLY the wrappers a screen calls (unused ones were deleted in #879 PR 4)
+  src/styles/              # tokens.css (authoritative tokens), base/shell/home-simple/insights-simple CSS
+docs/ui/                   # reference screenshots (home / insights / settings, desktop + phone, admin + viewer)
   ui-entrypoint.sh         # writes /config.js with bearer + apiBase at container boot
 .github/workflows/ui-publish.yml  # builds + pushes ghcr.io/<owner>/home-energy-manager-ui on push to main (paths-scoped)
 quartz/                    # #542 — self-hosted Quartz solar-forecast sidecar (hem-quartz service)
@@ -1738,9 +1745,11 @@ running code — security regression.
 ## Design System
 
 Read `DESIGN.md` (repo root) before any visual or UI change. It is the source of
-truth for color, typography, spacing, layout, motion, and the cockpit's
+truth for color, typography, spacing, layout, motion, the routes, and the UI's
 non-negotiables (deep-dark, borderless, no-emoji, semantic color, system fonts,
-~0.2s perf budget). Token values are authoritative in `ui/src/styles/tokens.css`;
+~0.2s perf budget, every number once, honest £ or no £). The UI shows the Cosy plan
+per band (never a price curve or percentile tiers); Agile vocabulary only when
+`tariff_structure_kind === "dynamic"`. Token values are authoritative in `ui/src/styles/tokens.css`;
 DESIGN.md is the rules + rationale. In QA, flag any UI code that deviates from it.
 
 ---

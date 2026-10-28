@@ -89,3 +89,5 @@
   border-radius: var(--radius-pill); padding: var(--space-1) var(--space-4); font-weight: 600; font-size: var(--font-sm);
 }
 .is-apply:disabled { opacity: 0.5; cursor: default; }
+
+.is-more-link { margin: var(--space-3) 0 0; font-size: var(--font-sm); }

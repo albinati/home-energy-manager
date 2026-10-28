@@ -70,7 +70,6 @@ export function chartTheme() {
     bad: cssVar("--bad", "#ef4444"),
     cheap: cssVar("--cheap", "#10b981"),
     peak: cssVar("--peak", "#f59e0b"),
-    neg: cssVar("--neg-price", "#2563eb"),
     pv: cssVar("--pv", "#fbbf24"),
     thermal: cssVar("--thermal", "#fb923c"),
     batt: cssVar("--batt", "#10b981"),

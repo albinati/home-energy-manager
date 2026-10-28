@@ -1,7 +1,7 @@
 {
   "name": "Home Energy Manager",
   "short_name": "Energy",
-  "description": "Solar + battery + Octopus Agile, optimised.",
+  "description": "Solar + battery + Octopus Cosy, optimised.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
