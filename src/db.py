@@ -641,6 +641,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_daikin_telemetry_source_ts ON daikin_telemetry(source, fetched_at DESC)"
     )
 
+    # #880: per-sample device on/off + Onecta holiday flags (nullable; NULL = unknown
+    # -> the telemetry integral keeps the weather-curve model, bit-for-bit pre-#880).
+    dt_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(daikin_telemetry)")}
+    for _c in ("is_on", "tank_on", "holiday_active", "tank_holiday_active"):
+        if dt_cols and _c not in dt_cols:
+            conn.execute(f"ALTER TABLE daikin_telemetry ADD COLUMN {_c} INTEGER")
+
     # V10: runtime_settings — user-editable tunables that take effect without restart (#52)
     conn.execute(
         """CREATE TABLE IF NOT EXISTS runtime_settings (
@@ -6357,8 +6364,9 @@ def insert_daikin_telemetry(row: dict[str, Any]) -> None:
             conn.execute(
                 """INSERT INTO daikin_telemetry
                    (fetched_at, source, tank_temp_c, indoor_temp_c, outdoor_temp_c,
-                    tank_target_c, lwt_actual_c, mode, weather_regulation)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tank_target_c, lwt_actual_c, mode, weather_regulation,
+                    is_on, tank_on, holiday_active, tank_holiday_active)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     float(row.get("fetched_at") or datetime.now(UTC).timestamp()),
                     str(row.get("source", "live")),
@@ -6371,6 +6379,10 @@ def insert_daikin_telemetry(row: dict[str, Any]) -> None:
                     int(row["weather_regulation"])
                     if row.get("weather_regulation") is not None
                     else None,
+                    *(
+                        int(bool(row[k])) if row.get(k) is not None else None
+                        for k in ("is_on", "tank_on", "holiday_active", "tank_holiday_active")
+                    ),
                 ),
             )
             conn.commit()

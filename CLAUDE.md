@@ -179,6 +179,14 @@ payload (zero extra quota, lag up to `DAIKIN_HEARTBEAT_REFRESH_SECONDS`).
   recovery). Passive/read-only: no power-on, and the notification says HEM is only observing. If the
   signal vanishes while a holiday is stored (kill switch off, payload without the keys) an `exited`
   event is written (`reason`) and the state cleared, so the scorecard flag never sticks.
+- **Telemetry integral while OFF (#880)**: `daikin_telemetry` rows now carry nullable `is_on` /
+  `tank_on` / `holiday_active` / `tank_holiday_active` (written by `_persist_daikin_telemetry_live`).
+  `compute_daikin_2hourly_telemetry` zeroes the space draw when both ends of an interval are known
+  climate-off (holiday or `is_on=0`) and the DHW draw when known tank-off; a bucket whose every
+  interval was fully off is written 0 kWh with `source='telemetry_integral_off'` (measured off, not
+  "no data"). Same overwrite rules as `telemetry_integral`; `onecta_cache` stays authoritative; NULL
+  (historical) rows keep the weather-curve model bit-for-bit. Consumers that gate on
+  `startswith("onecta")` (LWT learning) exclude it automatically.
 - **Surfaces**: `space_heating_gate_state()["daikin_holiday"]`, `/api/v1/daikin/status` `holiday`,
   MCP status `holiday`, brief `Mode:` says `holiday`; the Cosy scorecard payload carries `holiday`
   (from the `holiday_mode` events) and skips the tank-floor `notify_risk` on those days.

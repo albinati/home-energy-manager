@@ -172,6 +172,11 @@ def _persist_daikin_telemetry_live(devices: list[DaikinDevice]) -> None:
             "lwt_actual_c": d0.leaving_water_temperature,
             "mode": d0.operation_mode,
             "weather_regulation": 1 if d0.weather_regulation_enabled else 0,
+            # #880: None stays NULL (unknown) so the integral keeps the model.
+            "is_on": getattr(d0, "is_on", None),
+            "tank_on": getattr(d0, "tank_on", None),
+            "holiday_active": getattr(d0, "holiday_active", None),
+            "tank_holiday_active": getattr(d0, "tank_holiday_active", None),
         })
     except Exception as e:
         logger.debug("daikin_telemetry live persistence failed: %s", e)
@@ -815,7 +820,7 @@ def sync_daikin_daily(date_obj) -> dict | None:
                 conn = _db.get_connection()
                 try:
                     cur = conn.execute(
-                        "SELECT fetched_at, outdoor_temp_c FROM daikin_telemetry "
+                        "SELECT fetched_at, outdoor_temp_c, is_on, holiday_active FROM daikin_telemetry "
                         "WHERE fetched_at >= ? AND fetched_at < ? "
                         "ORDER BY fetched_at ASC",
                         (day_start_epoch, day_end_epoch),
@@ -830,7 +835,7 @@ def sync_daikin_daily(date_obj) -> dict | None:
                 total_kwh = 0.0
                 for i, r in enumerate(rows):
                     out = r.get("outdoor_temp_c")
-                    if out is None:
+                    if out is None or _sample_climate_off(r):  # #880
                         continue
                     load_kw = float(get_daikin_heating_kw(out))
                     # Time slice in hours: half the gap to prev + half to next
@@ -899,6 +904,17 @@ _TANK_STANDING_LOSS_KWH_PER_K_L_H = 1.3e-5
 _TANK_ROOM_TEMP_REF_C = 21.0
 
 
+def _sample_climate_off(r: dict) -> bool:
+    """#880: the telemetry sample KNOWS the climate zone was off (Onecta holiday or
+    onOffMode=off). NULL / absent columns = unknown -> False (keep the model)."""
+    return r.get("holiday_active") == 1 or r.get("is_on") == 0
+
+
+def _sample_tank_off(r: dict) -> bool:
+    """#880: same for the DHW tank (tank holiday or tank onOffMode=off)."""
+    return r.get("tank_holiday_active") == 1 or r.get("tank_on") == 0
+
+
 def compute_daikin_2hourly_telemetry(
     date_obj,
     local_tz: str | None = None,
@@ -940,7 +956,8 @@ def compute_daikin_2hourly_telemetry(
         conn = _db.get_connection()
         try:
             cur = conn.execute(
-                """SELECT fetched_at, outdoor_temp_c, tank_temp_c, lwt_actual_c, mode
+                """SELECT fetched_at, outdoor_temp_c, tank_temp_c, lwt_actual_c, mode,
+                          is_on, tank_on, holiday_active, tank_holiday_active
                    FROM daikin_telemetry
                    WHERE fetched_at >= ? AND fetched_at < ?
                    ORDER BY fetched_at ASC""",
@@ -980,6 +997,11 @@ def compute_daikin_2hourly_telemetry(
         outs = [v for v in (a.get("outdoor_temp_c"), b.get("outdoor_temp_c")) if v is not None]
         mid_outdoor = sum(outs) / len(outs) if outs else None
 
+        # #880: both ends of the interval report the climate zone / tank OFF
+        # (holiday or onOffMode=off) -> that draw is a measured 0, not the model.
+        climate_off = _sample_climate_off(a) and _sample_climate_off(b)
+        tank_off = _sample_tank_off(a) and _sample_tank_off(b)
+
         # Space heating: physics function already returns 0 above the
         # weather-curve cutoff, so it naturally handles "summer day,
         # space heating off". When mode is known to be off, force 0 to
@@ -989,7 +1011,7 @@ def compute_daikin_2hourly_telemetry(
             mode_a = (a.get("mode") or "").lower()
             mode_b = (b.get("mode") or "").lower()
             mode_off = (mode_a in ("off", "standby")) and (mode_b in ("off", "standby"))
-            if not mode_off:
+            if not mode_off and not climate_off:
                 space_kw = float(get_daikin_heating_kw(mid_outdoor))
                 space_kwh = space_kw * dt_h
 
@@ -1000,7 +1022,7 @@ def compute_daikin_2hourly_telemetry(
         # comparatively-rare reheat events.
         dhw_kwh = 0.0
         ta, tb = a.get("tank_temp_c"), b.get("tank_temp_c")
-        if ta is not None and tb is not None:
+        if ta is not None and tb is not None and not tank_off:
             mid_tank = (float(ta) + float(tb)) / 2.0
             room_temp = a.get("indoor_temp_c") or b.get("indoor_temp_c") or _TANK_ROOM_TEMP_REF_C
             dt_room = max(0.0, mid_tank - float(room_temp))
@@ -1027,10 +1049,14 @@ def compute_daikin_2hourly_telemetry(
         if bi < 0:
             continue
         slot = buckets.setdefault(bi, {"kwh_heating": 0.0, "kwh_dhw": 0.0})
+        # #880: a bucket is "measured off" only when EVERY interval in it had both
+        # the climate zone and the tank known-off.
+        slot["_all_off"] = slot.get("_all_off", True) and climate_off and tank_off
         slot["kwh_heating"] += space_kwh
         slot["kwh_dhw"] += dhw_kwh
 
     for slot in buckets.values():
+        slot["off"] = bool(slot.pop("_all_off", False))
         slot["kwh_heating"] = round(slot["kwh_heating"], 3)
         slot["kwh_dhw"] = round(slot["kwh_dhw"], 3)
         slot["kwh_total"] = round(slot["kwh_heating"] + slot["kwh_dhw"], 3)
@@ -1052,7 +1078,8 @@ def sync_daikin_2hourly_telemetry(date_obj) -> dict:
         the rounded integer to a real decimal).
       * If existing row is ``onecta_cache`` and disagrees by ≥ 0.5 kWh →
         leave Onecta in place (it's measured at the inverter; trust it).
-      * If existing row is already ``telemetry_integral`` → overwrite
+      * If existing row is already ``telemetry_integral`` (or
+        ``telemetry_integral_off``, #880: unit measured OFF, 0 kWh) → overwrite
         unconditionally (re-running the integral with more telemetry).
 
     Returns ``{"written": N, "skipped": M, "buckets": [...]}``.
@@ -1094,7 +1121,7 @@ def sync_daikin_2hourly_telemetry(date_obj) -> dict:
         if ex is None:
             write = True
             reason = "no_existing_row"
-        elif ex["source"] == "telemetry_integral":
+        elif ex["source"] in ("telemetry_integral", "telemetry_integral_off"):
             write = True
             reason = "refresh_telemetry"
         elif ex["source"] == "onecta_cache":
@@ -1117,7 +1144,7 @@ def sync_daikin_2hourly_telemetry(date_obj) -> dict:
                 kwh_total=tele_total,
                 kwh_heating=slot["kwh_heating"],
                 kwh_dhw=slot["kwh_dhw"],
-                source="telemetry_integral",
+                source="telemetry_integral_off" if slot.get("off") else "telemetry_integral",
             )
             written += 1
         else:
