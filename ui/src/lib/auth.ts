@@ -3,7 +3,7 @@
 // The UI is a passive VIEWER by default (read-only, no token) so it can be
 // shared safely. An admin "unlocks" by entering the admin secret; we verify it
 // against GET /whoami, persist it (lib/api.setAdminToken → localStorage) and
-// flip `role` to "admin", which reveals the Settings + Journal tabs and the
+// flip `role` to "admin", which reveals the Settings link, the Journal and the
 // write controls. Server-side enforcement is the real boundary (ApiV1RoleAuth);
 // this just drives the UI.
 import { signal } from "@preact/signals";

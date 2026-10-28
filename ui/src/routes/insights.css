@@ -241,10 +241,6 @@
    page. The strip reserves height always (no layout shift) and only animates +
    shows its label when on. */
 
-@keyframes insights-updating-slide {
-  0% { left: -40%; }
-  100% { left: 100%; }
-}
 /* Stale content stays visible (no blank flash) but is dimmed + non-interactive
    while its own fetch is in flight, so the eye knows it's refreshing. */
 .insights-compare.is-updating,

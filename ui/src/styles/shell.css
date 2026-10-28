@@ -180,7 +180,7 @@
 }
 
 /* Mid widths — while the chrome period control is in the bar (>960px) it
- * needs the room the brand text takes (admin unlocked adds Journal +
+ * needs the room the brand text takes (admin unlocked adds
  * Settings + the Admin pill). */
 @media (min-width: 961px) and (max-width: 1180px) {
   .topnav .brand-name { display: none; }

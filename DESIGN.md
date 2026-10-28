@@ -6,8 +6,8 @@ rationale + the rules. When they disagree, fix the drift, don't fork the values.
 
 ## Product Context
 - **What this is:** ops console for a UK residential solar + battery + heat-pump
-  system on **Cosy Octopus**, a banded tariff with three flat prices (cheap
-  12.49p, day 25.45p, peak 38.17p) on the local clock. The UI monitors the plan
+  system on **Cosy Octopus**, a banded tariff with three flat prices (cheap,
+  day, peak; rates come from `/plan/fronts.tariff`) on the local clock. The UI monitors the plan
   **per band** (what the house, tank and battery will do in each band, and what
   was actually spent), never a 48-point price curve. Tariffs are classified by
   the backend (`tariff_structure_kind` = `banded` | `dynamic`, per-slot

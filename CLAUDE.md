@@ -281,10 +281,9 @@ payload (zero extra quota, lag up to `DAIKIN_HEARTBEAT_REFRESH_SECONDS`).
   vacation is a 422). `VACATION_RETURN_AT` accepts a trailing `Z`/offset.
 - **Load scale cutoff.** `LP_VACATION_LOAD_SCALE` applies only to slots BEFORE the stored recovery time
   (`vacation.recovery_cutoff()`), so the plan solved the evening before provisions the arrival evening.
-- **Guests demoted.** `GUESTS_DETECT_ENABLED` code default is now false. The Home Operate card and the
-  Settings ModeSwitcher show `normal | vacation` only (vacation takes a `datetime-local` return time;
-  the date-range footnote is gone); `guests` stays in the enum and in Settings > "Vacation & guests"
-  (advanced).
+- **Guests demoted.** `GUESTS_DETECT_ENABLED` code default is now false. The Home ModeBox shows
+  Normal | Férias (datetime-local return); `guests` stays in the enum, reachable only in
+  Settings > Avançado > "Férias e Daikin".
 - **Surfaces.** `GET /api/v1/cockpit/now` -> `vacation` and `space_heating_gate_state()["vacation"]`:
   `{active, return_at, recovery_at, daikin_holiday_until_sent, holiday_enabled}` (`daikin_holiday_until_sent`
   = the `endDate` WE sent; the characteristic itself is not trustworthy, see #872). Cosy scorecard payload
