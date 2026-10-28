@@ -2590,6 +2590,15 @@ class Config:
         else:
             self._rt_set("DAIKIN_HOLIDAY_DETECT_ENABLED", str(value).strip().lower())
 
+    @property
+    def OCTOPUS_BILLING_CYCLE_DAY(self) -> int:
+        """Day of month the Octopus bill cycle starts (1..28; #879)."""
+        return int(self._rt_get("OCTOPUS_BILLING_CYCLE_DAY"))
+
+    @OCTOPUS_BILLING_CYCLE_DAY.setter
+    def OCTOPUS_BILLING_CYCLE_DAY(self, value: Any) -> None:
+        self._rt_set("OCTOPUS_BILLING_CYCLE_DAY", int(value))
+
     # --- Vacation mode v2 (#873) --------------------------------------------
     @property
     def VACATION_RETURN_AT(self) -> str:

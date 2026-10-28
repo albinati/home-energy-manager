@@ -1,4 +1,4 @@
-import { Link, Route, Switch } from "wouter-preact";
+import { Link, Route, Switch, useLocation } from "wouter-preact";
 import { Icon } from "./components/common/Icon";
 import { lazy, Suspense } from "preact/compat";
 import { useEffect } from "preact/hooks";
@@ -33,10 +33,14 @@ export function App() {
   // Confirm our role with the server on boot (a stored admin token may have
   // been rotated → silently drops to viewer).
   useEffect(() => { refreshRole(); }, []);
+  // Home (#879) renders its own alert line + footer from the endpoints it
+  // already polls, so the shell's copies (extra requests) are skipped there.
+  const [path] = useLocation();
+  const home = path === "/";
   return (
     <div class="shell">
       <TopNav />
-      <AlertStrip />
+      {!home && <AlertStrip />}
       <main class="shell-main">
         <Suspense fallback={<div class="page-padded"><Spinner label="Loading…" /></div>}>
           <Switch>
@@ -59,7 +63,7 @@ export function App() {
           </Switch>
         </Suspense>
       </main>
-      <Footer />
+      {!home && <Footer />}
       <ToastHost />
     </div>
   );

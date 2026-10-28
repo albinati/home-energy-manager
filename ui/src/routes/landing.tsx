@@ -1,377 +1,85 @@
-import { useEffect, useState } from "preact/hooks";
-import { lazy, Suspense } from "preact/compat";
-import { usePoll, useFetch, useAfterPaint } from "../lib/poll";
-import {
-  getCockpitNow,
-  getMetrics,
-  getAgileToday,
-  getWeather,
-  getSchedulerTimeline,
-  getExecutionToday,
-  getEnergyReport,
-  getEnergyPeriod,
-  getDaikinStatus,
-  getDaikinQuota,
-  getPvToday,
-  getHeatingPlan,
-  getEnergyTodayCumulative,
-  getExportOpportunity,
-  getApplianceJobs,
-  getAppliances,
-  getIndoorReadings,
-  getPlanFronts,
-} from "../lib/endpoints";
-import { Widget } from "../components/common/Widget";
+import { useEffect } from "preact/hooks";
+import { usePoll } from "../lib/poll";
+import { getCockpitNow, getPlanFronts, getStatusAlerts } from "../lib/endpoints";
 import { Icon } from "../components/common/Icon";
 import { Spinner } from "../components/common/Spinner";
-import { RefreshCountdown } from "../components/common/RefreshCountdown";
-import { PeriodNavigator } from "../components/shell/PeriodNavigator";
-import { todayISO, usePeriod, periodFetchOpts, periodScope, isCurrentPeriod } from "../lib/period";
-import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
-import { Hero } from "../components/home/Hero";
-import { HeatingWidget } from "../components/home/HeatingWidget";
-import { BatteryPlanCard } from "../components/home/plan/BatteryPlanCard";
-import { TankPlanCard } from "../components/home/plan/TankPlanCard";
-import { HeatingPlanCard } from "../components/home/plan/HeatingPlanCard";
-import { ConsumptionStrip } from "../components/home/plan/ConsumptionStrip";
-import { HemApiError } from "../lib/api";
-import { Pill } from "../components/common/Pill";
-import { WhyNowLine } from "../components/home/WhyNowLine";
-import { FeedbackPanel } from "../components/home/FeedbackPanel";
-import { OperateCard } from "../components/home/OperateCard";
-import { LifetimeStrip } from "../components/home/LifetimeStrip";
+import { computeChips, type Chip } from "../components/shell/AlertStrip";
+import { StatusLine } from "../components/home/simple/StatusLine";
+import { Tile } from "../components/home/simple/Tile";
+import { MoneyCard } from "../components/home/simple/MoneyCard";
+import { ModeBox } from "../components/home/simple/ModeBox";
+import {
+  buildStatus, casaTile, aguaTile, bateriaTile, holidayFlags, footerLine,
+} from "../components/home/simple/logic";
 import { publishFreshness, publishCockpitConn } from "../lib/freshness";
+import { buildSha } from "../lib/api";
 import { role } from "../lib/auth";
-import "../components/home/home.css";
+import { plannerTz } from "../lib/plannerTz";
+import "../styles/home-simple.css";
 
-// Dev-only fixture switch (`?mock=1`). `import.meta.env.DEV` is a build-time
-// constant, so the flag, the dynamic import and the fixture are all eliminated
-// from the production bundle.
+// Dev-only fixture switch (`?mock=1`); eliminated from the production bundle.
 const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "1";
 
-// The four timeline widgets (Solar / Grid / Load / Heating) each own echarts
-// (~193 KB gzip, shared chunk). Lazy-load so the hero + live band paint first
-// and the charts stream in below the fold. Solar/Grid/Load sync to the period
-// navigator; Heating keeps its own D-1/D/D+1 frame (not period-synced).
-// Two synced energy timelines (each owns echarts, shared chunk):
-//   • Generation — solar plan-vs-actual + grid export + Octopus EXPORT price.
-//   • Consumption — the rich load breakdown (Base+Appliances+Heat-pump stacked,
-//     forecast line, Daikin heating/tank over periods) + Octopus IMPORT price.
-// Both sync to the period navigator (day = intraday detail + tariff zones;
-// week/month/year = actuals bars). Heating keeps its own D-1/D/D+1 frame.
-const GenerationWidget = lazy(() =>
-  import("../components/home/GenerationWidget").then((m) => ({ default: m.GenerationWidget })),
-);
-const EnergyChartWidget = lazy(() =>
-  import("../components/home/EnergyChartWidget").then((m) => ({ default: m.EnergyChartWidget })),
-);
-const HeatingPlanWidget = lazy(() =>
-  import("../components/home/HeatingPlanWidget").then((m) => ({ default: m.HeatingPlanWidget })),
-);
-
-// Home dashboard, grouped into three semantic bands so the eye can skim:
-//   1. LIVE   — what's happening right now (Live power, Heating)
-//   2. MONEY  — £ in (Today's bill, Efficiency, Tariff comparison). Export
-//      earnings (today + month) live in the Hero now, not a standalone widget.
-//   3. ENERGY — kWh details over time (Energy flow chart, day/week/month/year)
-// Bands are separated by spacing only (no labels) — minimal, Apple-style.
-// "Today's tariff" widget removed: its info is already in the Hero (current
-// import/export p/kWh) + Energy flow day-view (price line).
-function houseDateOf(utc: string, tz?: string): string {
-  try {
-    return new Date(utc).toLocaleDateString("sv", tz ? { timeZone: tz } : undefined);
-  } catch { return new Date(utc).toLocaleDateString("sv"); }
-}
-
+// Home (#879): ridiculously simple. Reads ONLY /cockpit/now (10 s),
+// /plan/fronts (60 s) and /status/alerts (60 s); /whoami is fetched by the app
+// shell. No chart library is imported on this route.
 export default function Landing() {
-  // Cache-only endpoints — poll while the tab is visible (usePoll auto-pauses
-  // via visibilitychange). All of these read SQLite/memory, no cloud calls.
-  // 10 s matches the nginx viewer micro-cache TTL, so a faster poll would only
-  // re-read the edge cache; freshness upstream is the viewer boost
-  // (FOX_VIEWER_REFRESH_SECONDS) refreshing the Fox snapshot while watching.
   const now = usePoll(getCockpitNow, 10_000);
-  const metrics = usePoll(getMetrics, 5 * 60_000);
-  const timeline = usePoll(getSchedulerTimeline, 5 * 60_000);
-  const pvToday = usePoll(getPvToday, 5 * 60_000);
-
-  // Non-critical, below-the-fold data waits until the browser is idle after
-  // first paint — keeps the heavy Fox/Octopus rollups (lifetime, tariff) from
-  // competing with the above-the-fold hero / live-power / plan data.
-  const deferred = useAfterPaint();
-
-  // Live cache-only reads — poll while visible (usePoll auto-pauses on hidden,
-  // refreshes on return). All read SQLite/memory; the Daikin one is the CACHED
-  // read (no ?refresh), so no cloud call / quota burn. Were one-shot useFetch,
-  // which left an open page frozen until a manual reload (the "stale numbers"
-  // complaint).
-  const agile = usePoll(getAgileToday, 10 * 60_000);
-  const weather = usePoll(getWeather, 5 * 60_000);
-  const execution = usePoll(getExecutionToday, 5 * 60_000);
-  const report = usePoll(() => getEnergyReport(new Date().toISOString().slice(0, 10)), 5 * 60_000);
-  // Export opportunity (SEG-vs-Agile money left on the table) — deferred, slow.
-  const exportOppy = usePoll(() => (deferred ? getExportOpportunity(60) : Promise.resolve(null)), 5 * 60_000, [deferred]);
-  const daikin = usePoll(getDaikinStatus, 2 * 60_000);
-  const daikinQuota = usePoll(getDaikinQuota, 5 * 60_000);
-  // Heating-plan timeline (yesterday/today/tomorrow): outdoor temp + LWT offset
-  // + tank + heating-on, recomputed per slot. Cache-only, poll while visible.
-  const heatingPlan = usePoll(getHeatingPlan, 5 * 60_000);
-  // Indoor sensor history (today) for the heating chart's realised indoor line.
-  const indoorHistory = usePoll(() => getIndoorReadings(24), 5 * 60_000);
-  // Today's grid import/export so far (kWh + real £, credit on negative slots).
-  const todayCum = usePoll(getEnergyTodayCumulative, 60_000);
-  // Appliance status: registered list (once) + active jobs + cheapest-window
-  // suggestions for idle machines. All optional/best-effort (SmartThings may be
-  // unconfigured → the widget shows an empty/register hint).
-  const appliances = usePoll(getAppliances, 5 * 60_000);
-  const applianceJobs = usePoll(() => getApplianceJobs({ limit: 20 }), 5 * 60_000);
-  // The shared period navigator drives the Hero headline + cost breakdown +
-  // energy chart + tariff comparison. Re-fetch whenever the selection changes.
-  const period = usePeriod();
-  // Plan per front (#822) is TODAY-only: a past day in the navigator asks for
-  // that day (the API only plans ≤ today); a future/other period falls back to
-  // today. `?mock=1` serves a fixture so the UI can be developed without the API.
-  const todayIso = todayISO();
-  // #845: Today / Tomorrow toggle. Default = Tomorrow once it's >= 16:00 local
-  // AND the heating-plan API already carries tomorrow's scheduled LP rows (the
-  // evening replan makes tomorrow's plan the one that matters); else Today.
-  // "Tomorrow" and the current hour come from the API's house timezone
-  // (heating-plan `days` + `now_utc` + `timezone`), not the browser clock, so a
-  // viewer abroad still gets the house's evening default. Browser clock is the
-  // fallback only until the heating-plan response has loaded.
-  const hp = heatingPlan.data;
-  const houseTz = hp?.timezone;
-  const tomorrowIso = (() => {
-    const fromApi = hp?.days?.find((x) => x.label === "Tomorrow")?.date;
-    if (fromApi) return fromApi;
-    const d = new Date(); d.setDate(d.getDate() + 1);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  })();
-  const houseHour = (() => {
-    try {
-      if (hp?.now_utc && houseTz) {
-        const h = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone: houseTz })
-          .formatToParts(new Date(hp.now_utc)).find((p) => p.type === "hour")?.value;
-        if (h != null) return Number(h);
-      }
-    } catch { /* unknown tz -> browser clock */ }
-    return new Date().getHours();
-  })();
-  const [frontsPick, setFrontsPick] = useState<"today" | "tomorrow" | null>(null);
-  const tomorrowPlanned = (hp?.slots ?? []).some(
-    (sl) => sl.offset_source === "schedule" && houseDateOf(sl.slot_utc, houseTz) === tomorrowIso,
-  );
-  const frontsDefault: "today" | "tomorrow" = houseHour >= 16 && tomorrowPlanned ? "tomorrow" : "today";
-  const frontsChoice = frontsPick ?? frontsDefault;
-  const pastNav = period.gran === "day" && period.anchor < todayIso;
-  const frontsDate = pastNav ? period.anchor : frontsChoice === "tomorrow" ? tomorrowIso : todayIso;
-  const fronts = useFetch(async () => {
+  const fronts = usePoll(async () => {
     if (import.meta.env.DEV && MOCK) return (await import("../lib/mock/planFronts")).MOCK_PLAN_FRONTS;
-    return getPlanFronts(frontsDate === todayIso ? undefined : frontsDate);
-  }, [frontsDate]);
-  // useFetch is generation-guarded against date switches; add the 60 s refresh.
-  useEffect(() => {
-    const id = setInterval(() => { if (!document.hidden) void fronts.refresh(); }, 60_000);
-    return () => clearInterval(id);
-  }, [frontsDate]);
-  // Never show another day's payload under this date's heading.
-  const frontsData = fronts.data && (MOCK || fronts.data.date === frontsDate || frontsDate === todayIso) ? fronts.data : null;
-  // API not deployed yet (404) -> hide the whole band instead of "unavailable" tiles.
-  const frontsMissing = fronts.error instanceof HemApiError && fronts.error.status === 404 && !frontsData;
-  const frontsFailed = !!fronts.error && !frontsData && !frontsMissing;
-  const periodInsights = useFetch(
-    () => getEnergyPeriod(period.gran, periodFetchOpts(period)),
-    [period.gran, period.anchor],
-    { cacheKey: `energy:${period.gran}:${period.anchor}`, immutable: !isCurrentPeriod(period) },
-  );
+    return getPlanFronts();
+  }, 60_000);
+  const alerts = usePoll(getStatusAlerts, 60_000);
 
-  // Publish the cockpit's per-source freshness map so the shell-level
-  // AlertStrip can flag stale live data WITHOUT its own /cockpit/now poll.
-  // Cleared on unmount — off this route the poll stops, and a frozen map
-  // would let a "stale data" chip linger past its 2-min relevance window.
-  useEffect(() => {
-    publishFreshness(now.data?.freshness);
-  }, [now.data]);
-  useEffect(() => {
-    publishCockpitConn({ failCount: now.failCount, lastFetchAt: now.lastFetchAt });
-  }, [now.failCount, now.lastFetchAt]);
-  useEffect(() => () => {
-    publishFreshness(null);
-    publishCockpitConn(null);
-  }, []);
+  // Keep the shared freshness map fresh for the alert chips (cleared on unmount).
+  useEffect(() => { publishFreshness(now.data?.freshness); }, [now.data]);
+  useEffect(() => { publishCockpitConn({ failCount: now.failCount, lastFetchAt: now.lastFetchAt }); }, [now.failCount, now.lastFetchAt]);
+  useEffect(() => () => { publishFreshness(null); publishCockpitConn(null); }, []);
+  useEffect(() => { plannerTz.value = now.data?.planner_tz; }, [now.data?.planner_tz]);
 
   if (now.loading && !now.data) {
-    return <div class="home"><Spinner label="Loading dashboard…" /></div>;
+    return <div class="hs"><Spinner label="Carregando…" /></div>;
   }
   if (!now.data) {
     return (
-      <div class="home">
-        <p class="muted">Cockpit unavailable: {now.error?.message || "no data"}</p>
-        <button class="btn" onClick={() => now.refresh()}>Retry</button>
+      <div class="hs">
+        <p class="hs-muted">Painel indisponível: {now.error?.message || "sem dados"}</p>
+        <button class="btn" onClick={() => now.refresh()}>Tentar de novo</button>
       </div>
     );
   }
 
   const data = now.data;
-  const s = data.state;
-  // Fox inverter mode for the Plan widget — only surface the pill when actively
-  // forcing the battery (SelfUse is the resting state).
-  const foxMode = data.current_slot?.fox_mode ?? undefined;
-  const liveTime = data.now_utc
-    ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
-    : undefined;
-
-  const scope = periodScope(period);
+  const f = fronts.data;
+  const nowMs = Date.parse(data.now_utc);
+  const holiday = holidayFlags(data);
+  // An unreachable /status/alerts must not read as "Tudo normal".
+  const chips: Chip[] = alerts.error && !alerts.data
+    ? [{ key: "alerts-unavailable", tone: "warn", label: "Status indisponível", detail: alerts.error.message }]
+    : computeChips(alerts.data, alerts.error);
+  const sha = buildSha();
+  const planRunAt = f?.battery && !f.battery.error ? f.battery.plan_run_at : null;
 
   return (
-    <div class="home">
-      {/* Top-level page title for the document outline (visually hidden — the
-          glanceable hero is the visual anchor, no on-screen <h1> needed). The
-          scope <h2> below then sits under a real h1. */}
-      <h1 class="sr-only">Cockpit</h1>
+    <div class="hs">
+      <h1 class="sr-only">Casa</h1>
+      <StatusLine chips={chips} text={buildStatus({ now: data, fronts: f })} />
 
-      {/* Narrow screens only — wide screens get the chrome variant in the
-          sticky TopNav (redesign P4c). Same global signal either way. */}
-      <PeriodNavigator variant="page" />
-
-      {/* ── PERIOD-VIEW scope (redesign) — names what the hero is scoped to.
-          <h2> so the cockpit has a real document outline (period section). */}
-      <h2 class="scope scope--period">
-        <span class="scope-dot" aria-hidden="true" />
-        {scope.scope} · period view
-        {scope.date && <span class="scope-when">{scope.date}</span>}
-      </h2>
-
-      <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data}
-            period={periodInsights.data} periodState={period}
-            periodLoading={periodInsights.loading} todayCum={todayCum.data}
-            weather={weather.data} pv={pvToday.data}
-            spend={frontsData?.spend ?? null} compare={frontsData?.compare ?? null} />
-
-      {/* ── PLAN per front — what each system will do today, next action first. */}
-      {!frontsMissing && <>
-      <h2 class="scope scope--period">
-        <span class="scope-dot" aria-hidden="true" />
-        Plan {frontsDate === todayIso ? "today" : frontsDate === tomorrowIso ? "tomorrow" : frontsDate}{MOCK && <> <Pill tone="warn">MOCK</Pill></>}
-        <span class="scope-when">battery · hot water · heating</span>
-        {!pastNav && (
-          <div class="pnav-grans" role="tablist" aria-label="Plan day" style={{ marginLeft: "auto" }}>
-            {(["today", "tomorrow"] as const).map((k) => (
-              <button key={k} class={`pnav-gran${frontsChoice === k ? " is-active" : ""}`}
-                      role="tab" aria-selected={frontsChoice === k}
-                      onClick={() => setFrontsPick(k)}>{k === "today" ? "Today" : "Tomorrow"}</button>
-            ))}
-          </div>
-        )}
-      </h2>
-      {frontsFailed && <p class="muted">Couldn't load plan for {frontsDate}.</p>}
-      {!frontsFailed && <div class="widget-grid widget-band">
-        <Widget title="Battery plan" icon={<Icon name="battery" size={14} />} tone="power" size="medium">
-          <BatteryPlanCard data={frontsData?.battery ?? null} nowUtc={frontsData?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
-        </Widget>
-        <Widget title="Hot water plan" icon={<Icon name="droplet" size={14} />} tone="thermal" size="medium">
-          <TankPlanCard data={frontsData?.tank ?? null} nowUtc={frontsData?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
-        </Widget>
-        <Widget title="Heating plan" icon={<Icon name="heating" size={14} />} tone="thermal" size="medium">
-          <HeatingPlanCard data={frontsData?.heating ?? null} nowUtc={frontsData?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
-        </Widget>
-        <Widget title="Consumption outlook" icon={<Icon name="chart-bars" size={14} />} tone="tariff" size="wide">
-          <ConsumptionStrip data={frontsData?.consumption ?? null} loading={fronts.loading} />
-        </Widget>
-      </div>}
-      </>}
-
-      {/* ── LIVE scope + band (redesign) — the always-now, self-driving surface
-          that ignores the period selector above. The status row splits 50/50:
-          Live power (animated flow + rates + battery, committed plan as foot)
-          beside Live heating (live gauges + thermal model + dispatch). The
-          heating-plan timeline lives in the period band below, stacked with
-          Generation/Consumption as the third full-width live-window scroller. */}
-      <h2 class="scope scope--live">
-        <span class="scope-dot" aria-hidden="true" />
-        Live now
-        <span class="scope-when">always now — ignores the period above</span>
-      </h2>
-      <div class="widget-band live-band">
-        <div class="live-band-head">
-          <Icon name="power-live" size={13} /> Live · self-driving
-          <span class="grow" />
-          <span class="when">read-only · updates automatically{liveTime ? ` · ${liveTime}` : ""}</span>
-        </div>
-
-        {/* Admin control cluster. Mount-gated on role so viewers never fire
-            its admin-only GET /settings; role is a signal, so the unlock
-            re-renders this route and mounts the card. */}
-        {role.value === "admin" && <OperateCard
-          appliances={appliances.data?.appliances}
-          applianceJobs={applianceJobs.data?.jobs}
-          onChanged={() => {
-            void timeline.refresh();
-            void heatingPlan.refresh();
-            void applianceJobs.refresh();
-            void now.refresh();
-          }}
-        />}
-        <div class="widget-grid">
-          <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="half"
-                  badge={liveTime}
-                  action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
-            <LivePowerWidget state={s} cockpit={data} agile={agile.data} metrics={metrics.data} todayCumulative={todayCum.data} />
-            <WhyNowLine ongoing={timeline.data?.ongoing} foxMode={foxMode} />
-          </Widget>
-
-          <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="half">
-            <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
-                           onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
-          </Widget>
-        </div>
+      <div class="hs-tiles">
+        <Tile icon={<Icon name="house" size={14} />} title="Casa" t={casaTile(data, f)} />
+        <Tile icon={<Icon name="droplet" size={14} />} title="Água quente" t={aguaTile(data, f)} />
+        <Tile icon={<Icon name="battery" size={14} />} title="Bateria" t={bateriaTile(data, f)} />
       </div>
 
-      {/* ── PERIOD scope divider (redesign P4) — everything below follows the
-          day/week/month/year selector in the chrome, in contrast to the live
-          band. <h2> like its two sibling scopes so the document outline holds
-          (a bare <div> here orphaned the period-energy section for SRs). */}
-      <h2 class="scope scope--period">
-        <span class="scope-dot" aria-hidden="true" />
-        {scope.scope} · energy
-        <span class="scope-when">follows the {period.gran} selector</span>
-      </h2>
+      <MoneyCard fronts={f} nowMs={nowMs} holiday={holiday} tz={data.planner_tz} />
 
-      {/* ── TIMELINES — Generation, Consumption, Heating: three full-width live-
-          window scrollers stacked so a given clock time reads straight down all
-          three. Generation/Consumption follow the period navigator; Heating keeps
-          its own D-1/D/D+1 frame (day-level regardless of the selector). ── */}
-      <div class="widget-grid widget-band">
-        <Widget title="Generation" icon={<Icon name="solar" size={14} />} tone="plan" size="wide">
-          <Suspense fallback={<Spinner label="Loading generation…" />}>
-            <GenerationWidget period={period} periodData={periodInsights.data} periodLoading={periodInsights.loading}
-                              agile={agile.data} opportunity={exportOppy.data}
-                              cheapP={metrics.data?.cheap_threshold_pence} peakP={metrics.data?.peak_threshold_pence} />
-          </Suspense>
-        </Widget>
+      {role.value === "admin" && (
+        <ModeBox vacation={data.vacation} preset={data.modes?.optimization_preset}
+                 battery={f?.battery} tariff={f?.tariff} nowMs={nowMs} tz={data.planner_tz}
+                 onChanged={() => { void now.refresh(); void fronts.refresh(); }} />
+      )}
 
-        <Widget title="Consumption" icon={<Icon name="chart-bars" size={14} />} tone="power" size="wide">
-          <Suspense fallback={<Spinner label="Loading consumption…" />}>
-            <EnergyChartWidget execution={execution.data} pv={pvToday.data} />
-          </Suspense>
-        </Widget>
-
-        <Widget title="Heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="wide">
-          <Suspense fallback={<Spinner label="Loading heating…" />}>
-            <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading}
-                               execution={execution.data} indoor={indoorHistory.data} />
-          </Suspense>
-        </Widget>
-      </div>
-
-      {/* ── SELF-CHECK — is the system doing what we shipped it to do?
-          Forecast provenance, PV accuracy, DHW budget vs measured, LWT gate;
-          admins also get the recent-actions feed. The panel renders its own
-          widget band — and nothing at all against an older API image. */}
-      <FeedbackPanel pv={pvToday.data} />
-
-      {/* Lifetime-on-Agile closing line (moved out of the hero — today-first).
-          Self-defers its 6 monthly fetches until the browser is idle. */}
-      <LifetimeStrip />
+      <p class="hs-footer">{footerLine(data, planRunAt, sha.length > 7 ? sha.slice(0, 7) : sha)}</p>
     </div>
   );
 }

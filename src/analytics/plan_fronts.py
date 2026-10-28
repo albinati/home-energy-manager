@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -618,6 +619,8 @@ def heating_section(day: date, windows: list[Any], tz: ZoneInfo, lp_slots: list[
         "indoor_now_c": None, "indoor_rooms_c": {}, "indoor_aggregate": None, "outdoor_now_c": None,
         "setpoint_c": _r(getattr(config, "INDOOR_SETPOINT_C", None), 1),
         "night_floor_c": _r(getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5), 1),
+        "night_start_hour": int(getattr(config, "LP_W3_NIGHT_START_HOUR_LOCAL", 22)),
+        "night_end_hour": int(getattr(config, "LP_W3_NIGHT_END_HOUR_LOCAL", 7)),
         "peak_coast_delta_c": _r(getattr(config, "LP_W3_PEAK_COAST_DELTA_C", 1.0), 1),
         "ceiling_c": _r(_plan_ceiling_c(day, tz), 1),
         "lwt_source": str(getattr(config, "DAIKIN_LWT_SOURCE", "tier") or "tier"),
@@ -754,9 +757,11 @@ def spend_section(day: date, windows: list[Any], now_utc: datetime, tz: ZoneInfo
 
     code = str(getattr(config, "OCTOPUS_TARIFF_CODE", "") or "")
     out: dict[str, Any] = {
-        "realised_import_kwh": None, "realised_import_cost_gbp": None, "realised_avg_import_p": None,
+        "realised_import_kwh": None, "realised_import_cost_gbp": None, "realised_net_cost_gbp": None,
+        "realised_avg_import_p": None,
         "forecast_import_kwh": None, "forecast_avg_import_p": None,
         "peak_import_kwh": None, "ideal_avg_import_p": None, "score": None,
+        "pv_kwh": None,
         "score_thresholds": {"ideal_max_p": None, "above_min_p": None},
         "score_basis": None, "period": {},
     }
@@ -771,9 +776,17 @@ def spend_section(day: date, windows: list[Any], now_utc: datetime, tz: ZoneInfo
         cost = float(pnl_d.get("import_cost_gbp") or 0.0)
         out["realised_import_kwh"] = round(kwh, 3)
         out["realised_import_cost_gbp"] = round(cost, 2)
+        _net = pnl_d.get("realised_net_cost_gbp")
+        out["realised_net_cost_gbp"] = None if _net is None else round(float(_net), 2)
         out["realised_avg_import_p"] = round(cost * 100.0 / kwh, 2) if kwh > 0 else None
     except Exception as exc:  # noqa: BLE001
         out["realised_error"] = f"{type(exc).__name__}: {exc}"
+
+    # Realised PV so far (Home "kWh de sol", #879).
+    try:
+        out["pv_kwh"] = round(sum(float(v) for v in db.half_hourly_solar_kwh_for_day(day).values()), 2)
+    except Exception:  # noqa: BLE001
+        logger.debug("plan_fronts: pv_kwh failed", exc_info=True)
 
     # Forecast (committed stitch × per-slot prices).
     fc = _committed_by_start(day, "import_kwh", tz)
@@ -857,9 +870,177 @@ def compare_section(day: date) -> dict[str, Any]:
     }
 
 
+# -------------------------------------------------------------------- billing
+def billing_cycle_bounds(today: date, cycle_day: int) -> tuple[date, date]:
+    """Inclusive ``(cycle_start, cycle_end)`` of the bill cycle containing ``today``.
+
+    The cycle starts on ``cycle_day`` (clamped 1..28 so every month has it) and
+    ends the day before the next start: day 21 -> 21 Oct .. 20 Nov.
+    """
+    cd = max(1, min(28, int(cycle_day)))
+    if today.day >= cd:
+        start = today.replace(day=cd)
+    else:
+        prev_last = today.replace(day=1) - timedelta(days=1)
+        start = prev_last.replace(day=cd)
+    nm_first = (start.replace(day=1) + timedelta(days=32)).replace(day=1)
+    end = nm_first.replace(day=cd) - timedelta(days=1)
+    return start, end
+
+
+def billing_forecast_gbp(completed_gbp: float, completed_days: int, today_gbp: float,
+                         days_after_today: int) -> float | None:
+    """Cycle forecast: completed days + today (at least the completed-day average,
+    today is partial) + the completed-day average x the days after today.
+    No completed day -> no basis -> None."""
+    if completed_days <= 0:
+        return None
+    avg = completed_gbp / completed_days
+    return round(completed_gbp + max(today_gbp, avg) + avg * max(0, int(days_after_today)), 2)
+
+
+_TARIFF_SHORT = (
+    (r"FLUX", "Flux"), (r"(^|[-_ ])GO($|[-_ ])", "Go"), (r"TRACKER", "Tracker"),
+    (r"AGILE", "Agile"), (r"COSY", "Cosy"), (r"FLEX|VAR-|STANDARD VARIABLE|SVT", "variável"),
+    (r"FIX|BG-", "fixo"),
+)
+
+
+def short_tariff_label(display_name: str | None, product_code: str | None = None) -> str:
+    """Short pt-BR label for a tariff family ("Cosy (your tariff)" -> "Cosy")."""
+    import re
+
+    blob = f"{product_code or ''} {display_name or ''}".upper()
+    for pat, label in _TARIFF_SHORT:
+        if re.search(pat, blob):
+            # a fixed-term variant of a family ("Cosy 12M Fixed") must not collide with the family
+            if label not in ("fixo", "variável") and re.search(r"FIX", blob):
+                return f"{label} fixo"
+            return label
+    name = re.sub(r"\s*\(.*?\)", "", str(display_name or "")).strip()
+    return " ".join(name.split()[:2]) or str(product_code or "?")
+
+
+_past_compare_cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
+_PAST_COMPARE_TTL_S = 6 * 3600.0  # completed days do not change
+
+
+def _past_compare(start: date, end: date) -> dict[str, Any]:
+    from . import fair_compare
+
+    key = (str(config.DB_PATH), start.isoformat(), end.isoformat())
+    hit = _past_compare_cache.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _PAST_COMPARE_TTL_S:
+        return hit[1]
+    res = fair_compare.compute_fair_comparison(start, end, max_tariffs=4)
+    if len(_past_compare_cache) > 16:
+        _past_compare_cache.clear()
+    _past_compare_cache[key] = (time.monotonic(), res)
+    return res
+
+
+def _cycle_compare_rows(cycle_start: date, day: date) -> tuple[list[dict[str, Any]], bool]:
+    """Per-tariff net £ over cycle_start..day = COMPLETED days (long-cached) + today
+    (single-day comparison, normal 900 s cache). Only product codes present in EVERY
+    part are kept (the catalogue can differ between the cached parts: a tariff priced
+    for one day against the current tariff's full cycle would be a false winner);
+    ``partial`` is True when the parts disagreed."""
+    from . import fair_compare
+
+    parts: list[dict[str, Any]] = []
+    if day > cycle_start:
+        parts.append(_past_compare(cycle_start, day - timedelta(days=1)))
+    parts.append(fair_compare.cached_fair_comparison(day, day, 4))
+    code_sets = [{str(t.get("product_code")) for t in (res.get("tariffs") or [])} for res in parts]
+    common = set.intersection(*code_sets) if code_sets else set()
+    partial = any(cs != common for cs in code_sets)
+    acc: dict[str, dict[str, Any]] = {}
+    for res in parts:
+        for t in res.get("tariffs") or []:
+            code = str(t.get("product_code"))
+            if code not in common:
+                continue
+            row = acc.setdefault(code, {**t, "net_pence": 0.0, "approximate": False})
+            row["net_pence"] = float(row["net_pence"]) + float(t.get("net_pence") or 0.0)
+            row["approximate"] = bool(row["approximate"]) or bool(t.get("approximate"))
+            row["is_current"] = bool(row.get("is_current")) or bool(t.get("is_current"))
+    return list(acc.values()), partial
+
+
+def billing_section(day: date) -> dict[str, Any]:
+    from ..energy.tariff_structure import display_name
+    from . import pnl
+
+    cycle_start, cycle_end = billing_cycle_bounds(day, int(config.OCTOPUS_BILLING_CYCLE_DAY))
+    days_total = (cycle_end - cycle_start).days + 1
+    days_elapsed = (day - cycle_start).days + 1
+    done = _period(cycle_start, day - timedelta(days=1)) if day > cycle_start else {"n_days": 0, "net_cost_gbp": 0.0}
+    today = _period(day, day)
+    completed_gbp = float(done.get("net_cost_gbp") or 0.0)
+    today_gbp = float(today.get("net_cost_gbp") or 0.0)
+    realised = round(completed_gbp + today_gbp, 2)
+    # SMART_TARIFF_START_DATE clamp: the PnL may cover fewer days than the cycle.
+    clamp = pnl._agile_start_date()
+    since = clamp.isoformat() if clamp is not None and clamp > cycle_start else None
+    forecast = billing_forecast_gbp(completed_gbp, int(done.get("n_days") or 0), today_gbp,
+                                    days_total - days_elapsed)
+    rows_raw, partial = _cycle_compare_rows(cycle_start, day)
+    current, rows = compare_rows({"tariffs": rows_raw})
+    compare = []
+    for r in rows:
+        if r["is_current"] or r["delta_vs_current_gbp"] is None:
+            continue
+        d = float(r["delta_vs_current_gbp"])
+        compare.append({
+            "tariff": r["product_code"], "label": r["display_name"],
+            "short_label": short_tariff_label(r["display_name"], r["product_code"]),
+            "delta_gbp": d, "approximate": bool(r["approximate"]),
+            # within a pound, or only a proxy estimate: not a real difference
+            "tie": bool(r["approximate"]) or abs(d) < 1.0,
+        })
+    cur_label = short_tariff_label((current or {}).get("display_name"), (current or {}).get("product_code")) \
+        if current else display_name()
+    winner = None
+    if current is not None:
+        winner = {"tariff": current["product_code"], "label": cur_label, "is_current": True}
+        better = [c for c in compare if not c["tie"] and c["delta_gbp"] <= -1.0]
+        if better:
+            b = min(better, key=lambda c: c["delta_gbp"])
+            winner = {"tariff": b["tariff"], "label": b["short_label"], "is_current": False}
+    return {
+        "cycle_start": cycle_start.isoformat(), "cycle_end": cycle_end.isoformat(),
+        "days_elapsed": days_elapsed, "days_total": days_total,
+        "realised_gbp": realised, "forecast_cycle_gbp": forecast, "since": since, "partial": partial,
+        "current_label": cur_label,
+        "compare": compare, "winner": winner,
+    }
+
+
 # ----------------------------------------------------------------------- main
+_inflight_guard = threading.Lock()
+_inflight: dict[tuple[str, str], threading.Lock] = {}
+
+
 def plan_fronts(day: date | None = None, *, now_utc: datetime | None = None,
                 use_cache: bool = True) -> dict[str, Any]:
+    """Cached (60 s) and SINGLE-FLIGHT per (db, day): concurrent cold requests
+    share one build instead of each running the slow comparison (#879)."""
+    if not use_cache or now_utc is not None:
+        return _plan_fronts_build(day, now_utc=now_utc, use_cache=use_cache)
+    tz = _tz()
+    d = day or datetime.now(UTC).astimezone(tz).date()
+    key = (str(config.DB_PATH), d.isoformat())
+    with _inflight_guard:
+        floor = (d - timedelta(days=2)).isoformat()
+        for k in [k for k in _inflight if k[1] < floor]:   # prune locks of old days
+            del _inflight[k]
+        lock = _inflight.setdefault(key, threading.Lock())
+    with lock:
+        return _plan_fronts_build(day, now_utc=None, use_cache=True)
+
+
+def _plan_fronts_build(day: date | None = None, *, now_utc: datetime | None = None,
+                       use_cache: bool = True) -> dict[str, Any]:
     from .load_expected import band_windows_for_day, expected_load_by_band
 
     tz = _tz()
@@ -899,6 +1080,7 @@ def plan_fronts(day: date | None = None, *, now_utc: datetime | None = None,
                                use_cache=use_cache),
         "spend": _guard(spend_section, day, windows, now_utc, tz),
         "compare": _guard(compare_section, day),
+        "billing": _guard(billing_section, day),
     }
     if use_cache:
         if len(_cache) > 32:

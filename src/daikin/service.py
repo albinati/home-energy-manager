@@ -607,6 +607,18 @@ def holiday_state(max_age_seconds: float | None = None) -> dict:
         res = get_cached_devices(allow_refresh=False, actor="holiday_state")
     except Exception:
         return out
+    return holiday_state_from(res, max_age_seconds)
+
+
+def holiday_state_from(res, max_age_seconds: float | None = None) -> dict:
+    """Holiday flags from an ALREADY-fetched cached result (no service lock).
+
+    Lets async endpoints that fetched ``get_cached_devices`` off-loop reuse it
+    instead of re-entering the service lock on the event loop (#879).
+    """
+    out: dict = {"climate": None, "tank": None, "window": None, "cache_age_seconds": None}
+    if not config.DAIKIN_HOLIDAY_DETECT_ENABLED or res is None:
+        return out
     age = res.age_seconds
     out["cache_age_seconds"] = None if age == float("inf") else round(float(age), 1)
     if max_age_seconds is not None and age > max_age_seconds:

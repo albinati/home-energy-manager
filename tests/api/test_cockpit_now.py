@@ -34,7 +34,8 @@ def test_cockpit_now_shape(client):
     # Top-level keys.
     assert set(body.keys()) == {
         "now_utc", "planner_tz", "current_slot", "next_transition",
-        "state", "freshness", "thresholds", "modes", "vacation", "plan_date", "_legend",
+        "state", "freshness", "thresholds", "modes", "vacation", "daikin", "quota", "plan",
+        "plan_date", "_legend",
     }
     # _legend disambiguates sign conventions for LLM consumers (OpenClaw etc.).
     # The signed fields MUST carry a description so a negative value cannot be
@@ -267,3 +268,109 @@ def test_cockpit_now_indoor_from_sensor(monkeypatch, tmp_path):
     assert ind["rooms"][0]["room"] == "sala"
     assert body["state"]["indoor_c"] == 23.5          # sensor drives indoor_c
     assert body["freshness"]["indoor"]["stale"] is False
+
+
+class _StubCached:
+    """Stand-in for daikin_service.get_cached_devices() - returns instantly, no lock."""
+    devices: list = []
+    age_seconds = 0.0
+    fetched_at_wall = None
+    stale = False
+
+
+def test_cockpit_now_does_not_block_event_loop_on_daikin_lock(monkeypatch):
+    """#879 B1: the Daikin service lock (held up to ~15 s by a viewer-boost
+    refresh) must never stall the event loop through cockpit/now.
+
+    get_cached_devices is stubbed to return at once, so the ONLY remaining path
+    into the lock is the quota read (and the old holiday read) - which pre-fix ran
+    synchronously on the loop thread. Verified to FAIL on the pre-fix handler
+    (commit 3c00b18) and pass now."""
+    import asyncio
+    import threading
+    import time
+
+    import httpx
+
+    from src.daikin import service as dk
+
+    monkeypatch.setattr(dk, "get_cached_devices", lambda **kw: _StubCached())
+    held = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        with dk._lock:
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=_hold, daemon=True)
+    t.start()
+    assert held.wait(2)
+
+    async def _run():
+        # A ticker measures the largest gap between loop iterations while cockpit/now
+        # runs end to end (the quota read is the LAST step, so a one-off probe request
+        # could land before the stall; the ticker cannot miss it).
+        gaps: list[float] = []
+        stop = False
+
+        async def _ticker():
+            last = time.monotonic()
+            while not stop:
+                await asyncio.sleep(0.02)
+                now = time.monotonic()
+                gaps.append(now - last)
+                last = now
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            tick = asyncio.create_task(_ticker())
+            threading.Timer(2.0, release.set).start()
+            r = await c.get("/api/v1/cockpit/now")
+            stop = True
+            await tick
+            return r.status_code, max(gaps)
+
+    try:
+        status, worst_gap = asyncio.run(_run())
+    finally:
+        release.set()
+        t.join(3)
+    assert status == 200
+    assert worst_gap < 1.0, f"event loop stalled {worst_gap:.2f}s behind the Daikin lock"
+
+
+def test_cockpit_now_quota_and_holiday_run_off_the_loop_thread(monkeypatch, client):
+    import threading
+
+    from src.api.routers import status as status_router
+    from src.daikin import service as dk
+
+    seen: dict[str, bool] = {}
+
+    def _quota():
+        seen["quota"] = threading.current_thread() is not threading.main_thread()
+        return {"fox": None, "daikin": None}
+
+    monkeypatch.setattr(status_router, "_quota_block", _quota)
+    monkeypatch.setattr(dk, "get_cached_devices", lambda **kw: _StubCached())
+    real_from = dk.holiday_state_from
+
+    def _holiday_from(res, *a, **k):
+        # pure derivation from the already-fetched result: must not take the service lock
+        assert not dk._lock._is_owned()
+        seen["holiday_pure"] = True
+        return real_from(res, *a, **k)
+
+    monkeypatch.setattr(dk, "holiday_state_from", _holiday_from)
+    assert client.get("/api/v1/cockpit/now").status_code == 200
+    assert seen == {"quota": True, "holiday_pure": True}
+
+
+def test_cockpit_now_new_fields_content(client):
+    body = client.get("/api/v1/cockpit/now").json()
+    assert set(body["daikin"]) == {"holiday"}
+    q = body["quota"]
+    assert q is None or set(q) == {"fox", "daikin"}
+    # Fox plan upload time only; never the Octopus fetch fallback.
+    assert set(body["plan"]) == {"pushed_at_utc"}

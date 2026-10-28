@@ -29,6 +29,7 @@ export const MOCK_PLAN_FRONTS: PlanFrontsResponse = {
   tariff: {
     display_name: "Cosy", structure: "banded",
     windows: [
+      { key: "band_day", label: "day", ...win("00:00", "04:00"), price_p: 25.45, status: "done" },
       { key: "band_cheap", label: "cheap", ...win("04:00", "07:00"), price_p: 12.49, status: "done" },
       { key: "band_day", label: "day", ...win("07:00", "13:00"), price_p: 25.45, status: "done" },
       { key: "band_cheap", label: "cheap", ...win("13:00", "16:00"), price_p: 12.49, status: "ongoing" },
@@ -108,6 +109,7 @@ export const MOCK_PLAN_FRONTS: PlanFrontsResponse = {
     forecast_import_kwh: 8.9, forecast_avg_import_p: 17.2, peak_import_kwh: 0,
     ideal_avg_import_p: 12.49, score: "below",
     score_thresholds: { ideal_max_p: 14.36, above_min_p: 18.97 }, score_basis: "realised",
+    pv_kwh: 4.2, realised_net_cost_gbp: 1.42,
     period: {
       week: { n_days: 2, net_cost_gbp: 3.1, per_day_gbp: 1.55, import_kwh: 17.4, avg_import_p: 17.8 },
       month: { n_days: 7, net_cost_gbp: 11.2, per_day_gbp: 1.6, import_kwh: 61.2, avg_import_p: 18.3 },
@@ -123,5 +125,14 @@ export const MOCK_PLAN_FRONTS: PlanFrontsResponse = {
       { product_code: "AGILE", display_name: "Agile", net_gbp: 10.4, approximate: true, is_current: false, delta_vs_current_gbp: -0.8 },
     ],
     framing: "Staying on Cosy for the contract — comparison is informational",
+  },
+  billing: {
+    cycle_start: "2026-10-01", cycle_end: "2026-10-31", days_elapsed: 7, days_total: 31, since: null,
+    realised_gbp: 11.2, forecast_cycle_gbp: 48.4, current_label: "Cosy",
+    compare: [
+      { tariff: "BG-FIXED", label: "British Gas Fixed", short_label: "fixo", delta_gbp: 3.7, approximate: false, tie: false },
+      { tariff: "AGILE", label: "Agile", short_label: "Agile", delta_gbp: -0.8, approximate: true, tie: true },
+    ],
+    winner: { tariff: "COSY-22-12-08", label: "Cosy", is_current: true },
   },
 };

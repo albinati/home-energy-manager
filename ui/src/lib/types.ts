@@ -118,7 +118,24 @@ export interface CockpitNow {
   next_transition: CockpitTransition | null;
   freshness?: Record<string, FreshnessEntry>;
   thresholds?: { cheap_p: number; peak_p: number };
+  modes?: { daikin_control_mode?: string; optimization_preset?: string };
+  /** #873 vacation snapshot (return_at is a local ISO datetime with offset). */
+  vacation?: CockpitVacation | null;
+  /** #872 Onecta holiday flags (null = unknown). */
+  daikin?: { holiday?: { climate: boolean | null; tank: boolean | null; window?: unknown; cache_age_seconds?: number | null } | null };
+  /** #879 vendor quota (same shape as /status/alerts quota). */
+  quota?: { fox: CockpitQuotaEntry | null; daikin: CockpitQuotaEntry | null } | null;
+  plan?: { pushed_at_utc: string | null };
+  planner_tz?: string;
 }
+export interface CockpitVacation {
+  active: boolean;
+  return_at: string | null;
+  recovery_at: string | null;
+  daikin_holiday_until_sent: string | null;
+  holiday_enabled: boolean;
+}
+export interface CockpitQuotaEntry { used: number | null; budget: number | null; blocked: boolean }
 
 /* ----- /scheduler/timeline ----- */
 
@@ -1403,6 +1420,8 @@ export interface PlanFrontsHeating {
   setpoint_c: number | null;
   night_floor_c: number | null;
   peak_coast_delta_c: number | null;
+  night_start_hour?: number;
+  night_end_hour?: number;
   ceiling_c?: number | null;
   lwt_source: "tier" | "lp" | null;
   coast_mode?: string | null;
@@ -1476,6 +1495,9 @@ export interface PlanFrontsSpend {
   score: SpendScore | null;
   score_thresholds: { ideal_max_p: number | null; above_min_p: number | null } | null;
   score_basis: "realised" | "forecast" | null;
+  pv_kwh?: number | null;
+  /** Net realised today: import + standing - export (same basis as the bill). */
+  realised_net_cost_gbp?: number | null;
   period: { week: SpendPeriodRollup | null; month: SpendPeriodRollup | null } | null;
   error?: string;
 }
@@ -1499,6 +1521,23 @@ export interface PlanFrontsCompare {
   error?: string;
 }
 
+/** #879 — Octopus bill cycle (cycle_start..cycle_end inclusive, ISO dates). */
+export interface PlanFrontsBilling {
+  cycle_start: string;
+  cycle_end: string;
+  days_elapsed: number;
+  days_total: number;
+  realised_gbp: number;
+  /** null until one full day of the cycle is complete. */
+  forecast_cycle_gbp: number | null;
+  /** ISO date when the SMART_TARIFF_START_DATE clamp shortens the cycle. */
+  since: string | null;
+  current_label: string | null;
+  compare: Array<{ tariff: string; label: string; short_label: string; delta_gbp: number; approximate: boolean; tie: boolean }>;
+  winner: { tariff: string; label: string; is_current: boolean } | null;
+  error?: string;
+}
+
 export interface PlanFrontsResponse {
   date: string;
   now_utc: string;
@@ -1509,6 +1548,7 @@ export interface PlanFrontsResponse {
   consumption: PlanFrontsConsumption | null;
   spend: PlanFrontsSpend | null;
   compare: PlanFrontsCompare | null;
+  billing?: PlanFrontsBilling | null;
 }
 
 // ---- Cosy daily scorecard (#831) — GET /api/v1/scorecard/cosy ----

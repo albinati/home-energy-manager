@@ -628,6 +628,17 @@ Every section is guarded on its own (`{"error": ...}`); the response is cached
 60 s per `(DB_PATH, date)` (the comparison takes seconds), bypassed when
 `now_utc` is passed.
 
+**Billing cycle (#879).** `billing` section: the Octopus bill cycle containing `day`
+(`OCTOPUS_BILLING_CYCLE_DAY`, runtime, 1..28, default 21 → 21 Oct … 20 Nov):
+`cycle_start/end`, `days_elapsed/total`, `realised_gbp` (net incl. standing, `_period` 600 s
+cache, clamped by `SMART_TARIFF_START_DATE`), `forecast_cycle_gbp = realised + realised/days ×
+days_remaining`, `compare` (`cached_fair_comparison` over the cycle so far; `delta_gbp` =
+other − current, positive = other costs more) and `winner`. `spend.pv_kwh` = realised PV today.
+`/cockpit/now` also carries `daikin.holiday`, `quota` (fox/daikin used/budget) and
+`plan.pushed_at_utc` for the Home footer. The Home route (`ui/src/routes/landing.tsx`) reads
+only `/cockpit/now`, `/plan/fronts`, `/status/alerts` (+ `/whoami` from the shell) and loads no
+ECharts; pure helpers in `ui/src/components/home/simple/logic.ts` (`npm test` in `ui/`).
+
 **Spend score.** `ideal_avg_import_p` = cheapest band price (banded) or the
 day's q25 (dynamic); `ideal_max_p = ideal × SPEND_SCORE_IDEAL_RATIO` (1.15),
 `above_min_p` = `cheap_thr` (banded) or q50. `ideal` when avg ≤ ideal_max and
