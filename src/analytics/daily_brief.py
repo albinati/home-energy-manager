@@ -273,7 +273,21 @@ def _mode_status_line() -> str:
     LLM rendering the brief doesn't invent tactical space-heating advice.
     """
     daikin_mode = (config.DAIKIN_CONTROL_MODE or "passive").strip().lower()
-    if daikin_mode == "active":
+    holiday_label = None
+    try:
+        from ..daikin import service as _ds
+
+        _hs = _ds.holiday_state()
+        if _hs.get("climate") is True or _hs.get("tank") is True:
+            holiday_label = (
+                "holiday (Onecta holiday mode active — unit off, HEM writes nothing and "
+                "plans zero Daikin draw until it ends)"
+            )
+    except Exception:  # pragma: no cover — the brief must render
+        holiday_label = None
+    if holiday_label:
+        daikin_label = holiday_label
+    elif daikin_mode == "active":
         daikin_label = (
             "active (HEM dispatches DHW tank target per LP plan; firmware "
             "weather curve owns space heating — HEM does NOT write LWT offset)"

@@ -584,7 +584,42 @@ def _require_client_and_devices(actor: str):
     return _get_or_create_client(), result.devices
 
 
-def _passive_guard(action: str) -> None:
+def holiday_state(max_age_seconds: float | None = None) -> dict:
+    """#872 — holiday flags from the CACHED payload (never an API read).
+
+    ``climate`` / ``tank`` are ``isHolidayModeActive`` per management point (None =
+    unknown); ``window`` is the informational ``holidayMode`` value. With the kill
+    switch off every flag reads None so no gate fires (bit-for-bit pre-#872).
+    """
+    out: dict = {"climate": None, "tank": None, "window": None, "cache_age_seconds": None}
+    if not config.DAIKIN_HOLIDAY_DETECT_ENABLED:
+        return out
+    try:
+        res = get_cached_devices(allow_refresh=False)
+    except Exception:
+        return out
+    age = res.age_seconds
+    out["cache_age_seconds"] = None if age == float("inf") else round(float(age), 1)
+    if max_age_seconds is not None and age > max_age_seconds:
+        return out
+    for dev in res.devices or []:
+        # isinstance guards: only a real parsed bool/dict counts (duck-typed test
+        # doubles must never read as "holiday").
+        if isinstance(getattr(dev, "holiday_active", None), bool):
+            out["climate"] = dev.holiday_active
+        if isinstance(getattr(dev, "tank_holiday_active", None), bool):
+            out["tank"] = dev.tank_holiday_active
+        if isinstance(getattr(dev, "holiday_window", None), dict):
+            out["window"] = dev.holiday_window
+    return out
+
+
+def daikin_holiday_active(point: str = "climate") -> bool:
+    """True only when the cache says the given point ("climate"|"tank") is in holiday."""
+    return holiday_state().get("tank" if point == "tank" else "climate") is True
+
+
+def _passive_guard(action: str, point: str = "climate") -> None:
     """Raise DaikinError when DAIKIN_CONTROL_MODE=passive — blocks every writer.
 
     See plan: passive mode means zero outbound writes from this service.
@@ -592,6 +627,8 @@ def _passive_guard(action: str) -> None:
     """
     if config.DAIKIN_CONTROL_MODE == "passive":
         raise DaikinError(f"DAIKIN_CONTROL_MODE=passive — cannot {action}")
+    if daikin_holiday_active(point):
+        raise DaikinError(f"[holiday] Daikin holiday mode active — cannot {action}")
 
 
 def set_power(on: bool, actor: str = "api") -> None:
@@ -635,7 +672,7 @@ def set_operation_mode(mode_str: str, actor: str = "api") -> None:
 
 
 def set_tank_temperature(temperature: float, actor: str = "api") -> None:
-    _passive_guard("set tank temperature")
+    _passive_guard("set tank temperature", "tank")
     if should_block("daikin"):
         raise DaikinError("Daikin daily quota exhausted — cannot set tank temperature")
     client, devices = _require_client_and_devices(actor)
@@ -645,7 +682,7 @@ def set_tank_temperature(temperature: float, actor: str = "api") -> None:
 
 
 def set_tank_power(on: bool, actor: str = "api") -> None:
-    _passive_guard("set tank power")
+    _passive_guard("set tank power", "tank")
     if should_block("daikin"):
         raise DaikinError("Daikin daily quota exhausted — cannot set tank power")
     client, devices = _require_client_and_devices(actor)
@@ -655,7 +692,7 @@ def set_tank_power(on: bool, actor: str = "api") -> None:
 
 
 def set_tank_powerful(on: bool, actor: str = "api") -> None:
-    _passive_guard("set tank powerful mode")
+    _passive_guard("set tank powerful mode", "tank")
     if should_block("daikin"):
         raise DaikinError("Daikin daily quota exhausted — cannot set tank powerful mode")
     client, devices = _require_client_and_devices(actor)

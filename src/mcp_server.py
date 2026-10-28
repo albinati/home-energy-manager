@@ -403,6 +403,16 @@ def _plan_date_today(tz_name: str) -> str:
     return datetime.now(ZoneInfo(tz_name)).date().isoformat()
 
 
+def _holiday_state_or_none() -> dict | None:
+    """#872 — cached Onecta holiday flags (no API read)."""
+    try:
+        from .daikin import service as _ds
+
+        return _ds.holiday_state()
+    except Exception:  # pragma: no cover
+        return None
+
+
 def _device_status_dict(client: DaikinClient, dev: DaikinDevice) -> dict[str, Any]:
     s = client.get_status(dev)
     summary = _daikin_state_summary(s, config.DAIKIN_CONTROL_MODE)
@@ -416,6 +426,7 @@ def _device_status_dict(client: DaikinClient, dev: DaikinDevice) -> dict[str, An
         "climate_on": s.climate_on,
         "dhw_on": s.dhw_on,
         "control_mode": config.DAIKIN_CONTROL_MODE,
+        "holiday": _holiday_state_or_none(),
         "mode": s.mode,
         "room_temp": s.room_temp,
         "target_temp": s.target_temp,

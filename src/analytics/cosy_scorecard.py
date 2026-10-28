@@ -485,6 +485,39 @@ def _spend(day: date, windows: list[Any], tz: ZoneInfo, a: datetime, b: datetime
 
 
 # --------------------------------------------------------------------- build
+def _holiday_day(a: datetime, b: datetime) -> bool:
+    """#872 — True when the Daikin was in holiday mode at any point of [a, b).
+
+    Decided from the `holiday_mode` action_log events (entered/exited), the same
+    record the heartbeat writes — a house cooling on purpose is not a comfort or
+    tank-floor failure. Never raises.
+    """
+    try:
+        rows = db.get_action_logs(
+            device="daikin", action="holiday_mode",
+            since=(a - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ"), limit=200,
+        )
+        evs: list[tuple[datetime, str]] = []
+        for r in rows:
+            prm = r.get("params")
+            if isinstance(prm, str):
+                prm = json.loads(prm)
+            ts = datetime.fromisoformat(str(r["timestamp"]).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            evs.append((ts, str((prm or {}).get("event"))))
+        evs.sort(key=lambda x: x[0])
+        active = False
+        for ts, ev in evs:
+            if ts < a:
+                active = ev == "entered"
+            elif ts < b:
+                return True  # entered or exited inside the day
+        return active
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def build_scorecard(day: date, *, tz: ZoneInfo | None = None) -> dict[str, Any]:
     """Compose the scorecard row for local ``day`` (not persisted)."""
     from . import pnl
@@ -517,6 +550,7 @@ def build_scorecard(day: date, *, tz: ZoneInfo | None = None) -> dict[str, Any]:
         payload["battery"]["cycles"] = _r(battery_charge / cap, 3) if (battery_charge is not None and cap) else None
 
     payload["comfort"] = _section("comfort", _comfort, day, windows, tz, a, b)
+    payload["holiday"] = _holiday_day(a, b)
     payload["tank"] = _section("tank", _tank, day, tz)
     payload["lwt"] = _section("lwt", _lwt, day, tz, a, b, windows)
     payload["ops"] = _section("ops", _ops, a, b)
@@ -577,7 +611,10 @@ def evaluate_alerts(row: dict[str, Any]) -> list[tuple[str, str]]:
         if streak:
             out.append((f"cosy_peak_underforecast_{(d - timedelta(days=2)).isoformat()}",
                         f"Peak-band load under-forecast 3 days running (to {day}) - the battery may be sized too small for the peak."))
-    low = [s for s in ((p.get("tank") or {}).get("showers") or []) if s.get("below_floor")]
+    # #872: a holiday day's tank is off on purpose - no shower-floor alert.
+    low = [] if p.get("holiday") else [
+        s for s in ((p.get("tank") or {}).get("showers") or []) if s.get("below_floor")
+    ]
     if low:
         txt = ", ".join(f"{s['label']} {s['tank_c']}C < {s['floor_c']}C at {s['entry_local']}" for s in low)
         out.append((f"cosy_tank_floor_{day}", f"Tank below the shower floor on {day}: {txt}."))

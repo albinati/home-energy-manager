@@ -48,6 +48,7 @@ def evaluate_actuation_health(
     tank_stale_hours: float,
     failed_threshold: int,
     dhw_mode: str,
+    holiday: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Verdict per actuation domain from `db.get_actuation_health` output.
 
@@ -61,6 +62,11 @@ def evaluate_actuation_health(
     reads — the two can never disagree. Rejections stay live in every mode: a
     refused write means something regardless of intent.
 
+    #872: while the unit is in holiday mode (``holiday`` = service.holiday_state()),
+    the firmware owns it — no rows execute and writes 400, so the tank age alarm
+    and the tank/LWT rejection counts are suppressed per management point (~30 h of
+    holiday would otherwise page a false wedge).
+
     ``daikin_lwt``: rejection count only. LWT is demand-gated and legitimately
     dormant in summer, so an age alarm there would cry wolf for months.
     """
@@ -70,7 +76,16 @@ def evaluate_actuation_health(
     lwt_fail = int(raw.get("lwt_failed_24h") or 0)
     fail_thr = max(1, int(failed_threshold or 3))
 
-    tank_age_alarm = tank_stale_hours > 0 and (dhw_mode or "").strip().lower() != "vacation"
+    hol = holiday or {}
+    # `climate` gates LWT; `tank` gates the tank. A climate-only holiday still
+    # leaves the tank to the usual alarms.
+    tank_holiday = hol.get("tank") is True
+    lwt_holiday = hol.get("climate") is True
+    tank_age_alarm = (
+        tank_stale_hours > 0
+        and (dhw_mode or "").strip().lower() != "vacation"
+        and not tank_holiday
+    )
 
     return {
         "fox": {
@@ -83,11 +98,13 @@ def evaluate_actuation_health(
             "age_hours": None if tank_age is None else round(tank_age, 1),
             "failed_24h": tank_fail,
             "stale": tank_age_alarm and (tank_age is None or tank_age > tank_stale_hours),
-            "failing": tank_fail >= fail_thr,
+            "failing": tank_fail >= fail_thr and not tank_holiday,
+            "holiday": tank_holiday,
         },
         "daikin_lwt": {
             "failed_24h": lwt_fail,
-            "failing": lwt_fail >= fail_thr,
+            "failing": lwt_fail >= fail_thr and not lwt_holiday,
+            "holiday": lwt_holiday,
         },
     }
 

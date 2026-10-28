@@ -284,6 +284,22 @@ def _active_negative_row(plan_date: str, now_utc: datetime) -> dict[str, Any] | 
     return best
 
 
+def _holiday_climate(dev: Any = None) -> bool:
+    """#872 — climate zone in holiday: the house is cooling on purpose, so the
+    backstops/emergency stay silent (counters HOLD, they neither advance nor reset).
+    Prefers the device snapshot's flag, else the cached service state."""
+    if not bool(getattr(config, "DAIKIN_HOLIDAY_DETECT_ENABLED", True)):
+        return False
+    flag = getattr(dev, "holiday_active", None) if dev is not None else None
+    if isinstance(flag, bool):
+        return flag
+    try:
+        from ..daikin import service as _ds
+        return _ds.daikin_holiday_active("climate")
+    except Exception:
+        return False
+
+
 def reset_backstop() -> None:
     global _backstop_ticks, _warm_ticks, _emergency_ticks
     _backstop_ticks = 0
@@ -305,6 +321,8 @@ def backstop_tick(
     out: dict[str, Any] = {"active_row": None, "ticks": 0, "fired": False}
     try:
         if not bool(getattr(config, "LWT_COMFORT_BACKSTOP_ENABLED", True)):
+            return out
+        if _holiday_climate(dev):
             return out
         if str(getattr(config, "DAIKIN_CONTROL_MODE", "passive")) != "active" or bool(
             getattr(config, "OPENCLAW_READ_ONLY", False)
@@ -484,6 +502,8 @@ def warm_backstop_tick(
     try:
         if not bool(getattr(config, "LWT_WARM_BACKSTOP_ENABLED", True)):
             return out
+        if _holiday_climate(dev):
+            return out
         if str(getattr(config, "DAIKIN_CONTROL_MODE", "passive")) != "active" or bool(
             getattr(config, "OPENCLAW_READ_ONLY", False)
         ):
@@ -605,6 +625,8 @@ def emergency_tick(
     out: dict[str, Any] = {"ticks": 0, "fired": False}
     try:
         if not bool(getattr(config, "LWT_EMERGENCY_ENABLED", False)):
+            return out
+        if _holiday_climate(_unused.get("dev")):
             return out
         if (
             str(getattr(config, "DAIKIN_CONTROL_MODE", "passive")) != "active"

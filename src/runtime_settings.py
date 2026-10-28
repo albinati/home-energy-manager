@@ -489,6 +489,18 @@ SCHEMA: dict[str, SettingSpec] = {
             "readers ignore persisted decisions, effective next re-plan."
         ),
     ),
+    "DAIKIN_HOLIDAY_DETECT_ENABLED": SettingSpec(
+        key="DAIKIN_HOLIDAY_DETECT_ENABLED",
+        type_name="str",  # "true" / "false"
+        env_default=_str_env("DAIKIN_HOLIDAY_DETECT_ENABLED", "true"),
+        enum=("true", "false"),
+        description=(
+            "Daikin holiday-mode detection (#872): when the cached Onecta payload "
+            "says isHolidayModeActive, HEM behaves as passive for that management "
+            "point (no writes/alerts) and the LP plans zero Daikin draw. false = "
+            "kill switch (pre-#872 behaviour, no gate fires)."
+        ),
+    ),
     "DHW_DYNAMIC_BOOST_HOLD_HOURS": SettingSpec(
         key="DHW_DYNAMIC_BOOST_HOLD_HOURS",
         type_name="int",

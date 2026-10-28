@@ -1380,6 +1380,8 @@ def _persist_lp_snapshots(
     # Config snapshot — everything the LP meaningfully conditioned on. Keep
     # compact; dashboards read this directly from the JSON.
     cfg_snap = {
+        # #872: "active" | "passive" | "off" (holiday) — the Daikin state this plan was solved in.
+        "daikin_state": str(getattr(plan, "daikin_state", "active")),
         # #808: thermal-control knobs so a replay can reproduce the source/clamp/UA.
         "DAIKIN_LWT_SOURCE": str(getattr(config, "DAIKIN_LWT_SOURCE", "tier")),
         "LP_W3_TIN_ENABLED": bool(getattr(config, "LP_W3_TIN_ENABLED", False)),

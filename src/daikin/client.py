@@ -157,6 +157,13 @@ class DaikinClient:
                 if on_off is not None:
                     device.is_on = (on_off == "on")
 
+                hol = (mp.get("isHolidayModeActive") or {}).get("value")
+                if isinstance(hol, bool):
+                    device.holiday_active = hol
+                hol_win = (mp.get("holidayMode") or {}).get("value")
+                if isinstance(hol_win, dict):
+                    device.holiday_window = hol_win
+
                 op_mode = mp.get("operationMode", {}).get("value")
                 if op_mode:
                     device.operation_mode = op_mode
@@ -207,6 +214,9 @@ class DaikinClient:
                 tank_on_off = mp.get("onOffMode", {}).get("value")
                 if tank_on_off is not None:
                     device.tank_on = (tank_on_off == "on")
+                tank_hol = (mp.get("isHolidayModeActive") or {}).get("value")
+                if isinstance(tank_hol, bool):
+                    device.tank_holiday_active = tank_hol
                 tank_powerful = mp.get("powerfulMode", {}).get("value")
                 if tank_powerful is not None:
                     device.tank_powerful = (tank_powerful == "on")

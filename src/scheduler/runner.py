@@ -1,6 +1,7 @@
 """Scheduler runner: legacy Agile tick, Bulletproof heartbeat, APScheduler jobs."""
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from datetime import UTC, date, datetime, timedelta
@@ -1248,6 +1249,7 @@ def bulletproof_actuation_health_monitor_job() -> None:
             tank_stale_hours=float(getattr(config, "DAIKIN_TANK_STALE_HOURS", 30) or 0),
             failed_threshold=int(getattr(config, "DAIKIN_FAILED_ALERT_THRESHOLD", 3) or 3),
             dhw_mode=getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal",
+            holiday=daikin_service.holiday_state(),
         )
         issues = actuation_issues(block)
         today = now.date().isoformat()
@@ -2158,6 +2160,100 @@ def _maybe_fire_import_overshoot(now_utc: datetime) -> None:
         logger.debug("import_overshoot check failed (non-fatal): %s", e)
 
 
+def _holiday_transition_tick(devices: list[Any], *, trigger: str = "heartbeat") -> str | None:
+    """#872 — detect Daikin holiday entry/exit on the CACHED payload (zero API reads).
+
+    Persists ``kv_state daikin_holiday_active`` ({climate, tank}); on a change writes
+    ``action_log`` ``holiday_mode`` + ONE notification. On EXIT: when control is active
+    and not read-only, power the unit back on if the cached ``onOffMode`` is still off
+    (``leavingWaterOffset`` is read-only with the zone off, so LWT rows would 400
+    forever), then re-solve (`holiday_end`). Returns "entered" / "exited" / None.
+    Never raises.
+    """
+    try:
+        if not config.DAIKIN_HOLIDAY_DETECT_ENABLED or not devices:
+            return None
+        dev = devices[0]
+        climate = getattr(dev, "holiday_active", None)
+        tank = getattr(dev, "tank_holiday_active", None)
+        if climate is None and tank is None:
+            return None  # payload carries no holiday keys: no signal, no transition
+        cur_any = bool(climate) or bool(tank)
+        prev_raw = db.get_kv("daikin_holiday_active")
+        prev_any: bool | None = None
+        if prev_raw:
+            try:
+                _p = json.loads(prev_raw)
+                prev_any = bool(_p.get("climate")) or bool(_p.get("tank"))
+            except Exception:
+                prev_any = None
+        db.set_kv(
+            "daikin_holiday_active",
+            json.dumps({"climate": bool(climate), "tank": bool(tank)}),
+        )
+        if prev_any is None and not cur_any:
+            return None
+        if bool(prev_any) == cur_any:
+            return None
+        event = "entered" if cur_any else "exited"
+        window = getattr(dev, "holiday_window", None)
+        db.log_action(
+            device="daikin",
+            action="holiday_mode",
+            params={"event": event, "climate": bool(climate), "tank": bool(tank), "window": window},
+            result="ok",
+            trigger=trigger,
+        )
+        try:
+            from ..notifier import notify_action_confirmation
+
+            if event == "entered":
+                notify_action_confirmation(
+                    "Daikin holiday mode detected — HEM stops writing to the unit and plans zero heat-pump draw until it ends."
+                )
+            else:
+                notify_action_confirmation(
+                    "Daikin holiday mode ended — HEM resumes control and re-plans the recovery."
+                )
+        except Exception as exc:  # pragma: no cover — notify must not break the tick
+            logger.debug("holiday notify failed: %s", exc)
+        if event == "exited":
+            if (
+                (config.DAIKIN_CONTROL_MODE or "").strip().lower() == "active"
+                and not config.OPENCLAW_READ_ONLY
+            ):
+                powered: dict[str, str] = {}
+                for label, is_on, fn in (
+                    ("climate", getattr(dev, "is_on", None), daikin_service.set_power),
+                    ("tank", getattr(dev, "tank_on", None), daikin_service.set_tank_power),
+                ):
+                    if is_on is False:
+                        try:
+                            fn(True, actor="heartbeat")
+                            powered[label] = "ok"
+                        except Exception as exc:
+                            powered[label] = f"failed: {exc}"
+                            logger.warning("holiday exit power-on (%s) failed: %s", label, exc)
+                if powered:
+                    db.log_action(
+                        device="daikin",
+                        action="holiday_exit_power_on",
+                        params=powered,
+                        result="ok" if all(v == "ok" for v in powered.values()) else "failed",
+                        trigger=trigger,
+                    )
+            try:
+                bulletproof_mpc_job(
+                    bypass_cooldown=True, trigger_reason="holiday_end",
+                )
+            except Exception as exc:
+                logger.warning("holiday_end MPC trigger failed: %s", exc)
+        return event
+    except Exception as exc:
+        logger.debug("holiday transition tick failed (non-fatal): %s", exc)
+        return None
+
+
 def bulletproof_heartbeat_tick() -> None:
     """Heartbeat monitor (every HEARTBEAT_INTERVAL_SECONDS, default 5 min): Daikin schedule execution, telemetry, Fox flag check."""
     global _last_exec_halfhour_key, _last_fox_verify_monotonic, _last_room_temp, _last_room_wall_utc, _last_notified_slot_kind, _last_notified_slot_kind_loaded
@@ -2199,6 +2295,7 @@ def bulletproof_heartbeat_tick() -> None:
         except Exception as e:
             logger.debug("Daikin heartbeat cache read skip: %s", e)
             devices = []
+    _holiday_transition_tick(devices)
 
     soc = None
     fox_mode = None

@@ -315,6 +315,8 @@ def replay_run(
                 float(inputs["indoor_initial_c"])
                 if inputs.get("indoor_initial_c") is not None else None
             ),
+            holiday_climate=False,  # #872: a replay must not inherit today's holiday
+            holiday_tank=False,
             **_snapshot_emitter_kwargs(inputs),
         )
 
@@ -1131,6 +1133,8 @@ def _state_at(plan: LpPlan, when_utc: datetime) -> LpInitialState:
             if (hs := list(getattr(plan, "w3_emitter_heat_kwh", []) or [])) else None
         ),
         emitter_h0_tau_min=float(getattr(plan, "w3_emitter_tau_min", 0.0) or 0.0) or None,
+        holiday_climate=False,
+        holiday_tank=False,
     )
 
 

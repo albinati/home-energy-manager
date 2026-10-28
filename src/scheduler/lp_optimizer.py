@@ -88,6 +88,11 @@ class LpInitialState:
     # backwards-compat for callers that construct LpInitialState directly.
     soc_source: str = "unknown"
     tank_source: str = "unknown"
+    # #872 — Daikin holiday mode per management point (isHolidayModeActive). None = read
+    # the cached service state ONCE per solve; replays pass False so a historical day is
+    # never planned against today's holiday.
+    holiday_climate: bool | None = None
+    holiday_tank: bool | None = None
 
 
 @dataclass
@@ -111,6 +116,8 @@ class LpPlan:
     tank_temp_c: list[float] = field(default_factory=list)   # len N+1
     soc_kwh: list[float] = field(default_factory=list)       # len N+1
     indoor_temp_c: list[float] = field(default_factory=list)  # len N+1; W3 (#540), empty when off
+    daikin_state: str = "active"
+    """#872 — "active" | "passive" | "off" (holiday mode: zero Daikin draw planned)."""
     w3_night_floor_c: float | None = None
     """#820 — the W3 night floor this plan was SOLVED with (the plausibility
     gate must judge the trajectory against it, not the live config)."""
@@ -634,14 +641,37 @@ def solve_lp(
     # is autonomous. We predict the per-slot autonomous draw and clamp e_dhw and
     # e_space to that vector below, so the LP correctly attributes the thermal
     # load when allocating PV/battery/grid. Active mode keeps v9 free variables.
-    passive_daikin = config.DAIKIN_CONTROL_MODE == "passive"
+    # #872 — holiday = a third Daikin state, `off`: the firmware switched the unit off, so
+    # the plan carries ZERO draw (NOT the passive firmware-curve prediction). Read ONCE.
+    _hol_c, _hol_t = initial.holiday_climate, initial.holiday_tank
+    if _hol_c is None and _hol_t is None:
+        try:
+            from ..daikin import service as _daikin_svc
+            _hs = _daikin_svc.holiday_state()
+            _hol_c, _hol_t = _hs.get("climate"), _hs.get("tank")
+        except Exception:  # pragma: no cover — never break a solve
+            _hol_c = _hol_t = None
+    off_climate = bool(_hol_c) and bool(config.DAIKIN_HOLIDAY_DETECT_ENABLED)
+    off_tank = bool(_hol_t) and bool(config.DAIKIN_HOLIDAY_DETECT_ENABLED)
+    daikin_off = off_climate and off_tank
+    # Both points off reuses the passive machinery (no W3 / shower floors / DHW block /
+    # min-on, hp_on pinned) with an all-zero draw vector instead of the prediction.
+    passive_daikin = config.DAIKIN_CONTROL_MODE == "passive" or daikin_off
+    daikin_state = (
+        "off" if daikin_off
+        else "passive" if config.DAIKIN_CONTROL_MODE == "passive"
+        else "active"
+    )
     # #714 — LP-owned DHW gate, resolved here so the block can be built before the
     # per-slot loop. Precedence passive > lp_owned > K1 pin (the pin is computed at
     # its own site, gated on ``not _lp_owned``). Forced off in passive (#639).
     _lp_owned = (
         bool(force_dhw_lp_owned) or bool(getattr(config, "DHW_LP_OWNED_ENABLED", False))
-    ) and not passive_daikin
-    if passive_daikin:
+    ) and not passive_daikin and not off_tank
+    if daikin_off:
+        passive_e_space = [0.0] * n
+        passive_e_dhw = [0.0] * n
+    elif passive_daikin:
         passive_e_space, passive_e_dhw = predict_passive_daikin_load(
             t_out, cop_dhw, cop_space,
             slot_h=slot_h,
@@ -659,6 +689,7 @@ def solve_lp(
         bool(getattr(config, "LP_W3_TIN_ENABLED", False))
         and getattr(initial, "indoor_temp_c", None) is not None
         and not passive_daikin
+        and not off_climate  # #872: the zone is off on purpose; comfort slack would dominate
     )
     if w3:
         from ..analytics.thermal_learning import (
@@ -1006,6 +1037,7 @@ def solve_lp(
         bool(getattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False))
         and not passive_daikin
         and not _lp_owned
+        and not off_tank
     )
     _pinned_e_dhw: list[float] = []
     _pinned_tank: list[float] = []
@@ -1231,6 +1263,11 @@ def solve_lp(
             prob += e_space[i] <= space_ceil_kwh[i]
             if _lp_owned:
                 prob += e_dhw[i] == 0  # the block owns DHW; retire the old var
+            # #872 — one point in holiday while the other is live: zero draw there.
+            if off_tank:
+                prob += e_dhw[i] == 0
+            if off_climate:
+                prob += e_space[i] == 0
 
         # DHW tank thermodynamics — PR Phase B: indoor temp is no longer a
         # state variable. Tank loss uses INDOOR_SETPOINT_C as the constant
@@ -1247,7 +1284,7 @@ def solve_lp(
         # LP a way to compensate makes the tank crash below the 20°C floor
         # → infeasibility on shower-window replays. Skip the draw term in
         # passive: the firmware handles reheat opaque to the LP.
-        draw_j_i = 0.0 if passive_daikin else shower_draw_j[i]
+        draw_j_i = 0.0 if (passive_daikin or off_tank) else shower_draw_j[i]
         # PR K2 — skip the tank thermodynamic equation when DHW pinning is
         # active. e_dhw and tank[i+1] are already pinned to the dhw_policy
         # forecast above; layering this constraint on top would over-
@@ -1275,7 +1312,7 @@ def solve_lp(
             # warm enough, and forcing a per-slot minimum would BLOCK the coast-through-
             # peak arbitrage (a big LWT setback can legitimately drop heat below the
             # curve floor). So skip the floor when W3 owns comfort.
-            if space_floor_kwh[i] > 0 and not w3:
+            if space_floor_kwh[i] > 0 and not w3 and not off_climate:
                 prob += e_space[i] + e_dhw[i] >= space_floor_kwh[i]
 
         # ── W3 (#540): building RC dynamics + soft comfort + gentle recovery ──
@@ -1427,7 +1464,7 @@ def solve_lp(
     # against the pinned tank trajectory (37 °C overnight < typical
     # evening floor of 40+ °C). Tank temp is fully owned by dhw_policy
     # now; this floor is irrelevant.
-    if not passive_daikin and not _vacation_mode and not _dhw_pinned and not _lp_owned:
+    if not passive_daikin and not off_tank and not _vacation_mode and not _dhw_pinned and not _lp_owned:
         for i in range(n):
             if shower_mask[i]:
                 kind = _slot_window_kind(slot_starts_utc[i])
@@ -1502,7 +1539,7 @@ def solve_lp(
         # physics prediction (which carries its own legionella uplift), so this
         # floor is redundant at best — and if the two formulas ever drift, it
         # makes passive Infeasible on legionella day.
-        if 0 <= _leg_day <= 6 and not _dhw_pinned and not passive_daikin and not _lp_owned:
+        if 0 <= _leg_day <= 6 and not _dhw_pinned and not passive_daikin and not _lp_owned and not off_tank:
             try:
                 _leg_hour = int(_rts.get_setting("DHW_LEGIONELLA_HOUR_LOCAL"))
                 _leg_minutes = int(_rts.get_setting("DHW_LEGIONELLA_DURATION_MIN"))
@@ -1707,7 +1744,7 @@ def solve_lp(
     # so an additional ``tank[n] >= terminal_dhw_floor`` floor can directly
     # contradict the pin (guests mode + last slot in a shower window → pinned
     # 45 °C vs a 53 °C floor → Infeasible). The pin governs the tank entirely.
-    if not passive_daikin and not _dhw_pinned and not _lp_owned:
+    if not passive_daikin and not off_tank and not _dhw_pinned and not _lp_owned:
         # PR 4 of plan: when the last slot lands inside a shower window, keep
         # the tight terminal floor so the LP must finish with a hot tank for
         # in-progress showers. When it lands OUTSIDE shower windows (e.g. a
@@ -2060,6 +2097,7 @@ def solve_lp(
         plan.tank_temp_c.append(
             _v(_dhw_block.tank[i]) if _lp_owned else _v(tank[i])
         )
+        plan.daikin_state = daikin_state
         if w3:
             plan.w3_night_floor_c = w3_night_floor
             plan.w3_setpoint_c = w3_day_sp
