@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  fmt, gbp, pct, moneyText, moneyTone, splitHeadline, showApply, sortItems, bandSegments,
+  fmt, gbp, sgbp, weekParams, weekHeading, pct, moneyText, moneyTone, splitHeadline, showApply, sortItems, bandSegments,
   billCaption, energyCaption, solarCaption, batteryCaption, houseTiles,
 } from "./logic.ts";
 
@@ -65,11 +65,11 @@ test("week captions", () => {
   assert.equal(energyCaption({ total_kwh: 112, by_band: {}, shares: { cheap: 0.5 }, peak_kwh: 0 }), "50 % na faixa barata · 0 kWh no pico");
   assert.equal(
     solarCaption({ kwh: 23, self_use_share: 0.61, export_kwh: 9, export_gbp: 1.35, forecast_mape: 0.12 }),
-    "61 % usado em casa, 39 % exportado a 15p (£1,35). Previsão acertou ±12 %",
+    "61 % usado em casa, 39 % exportado a 15p (£1,35). Previsão errou em média 12 %",
   );
   assert.equal(
     batteryCaption({ arbitrage_gbp: 3.9, cheap_bought_kwh: 58, cheap_p: 12.49, cycles_per_day: 1, peak_covered_days: 6, days: 7 }),
-    "58 kWh comprados a 12,5p cobriram dia/pico · 1,0 ciclo/dia · pico coberto 6 de 7 dias",
+    "58 kWh comprados a 12,5p cobriram dia/pico · 1,0 ciclo/dia",
   );
 });
 
@@ -83,12 +83,12 @@ test("house tiles: only identifiable estimators produce a tile", () => {
   });
   assert.deepEqual(t.map((x) => x.key), ["cooling", "heating", "solar", "tank"]);
   assert.equal(t[0].value, "0,06");
-  assert.equal(t[0].caption, "sem aquecer, a 9 °C fora (τ ≈ 70 h)");
-  assert.equal(t[1].caption, "com +3 de LWT. Calor chega ~35 min depois");
+  assert.equal(t[0].caption, "sem aquecer, a 9 °C fora (constante de tempo ≈ 70 h)");
+  assert.equal(t[1].caption, "com a água dos radiadores +3 °C acima da curva. O calor chega ~35 min depois");
   assert.equal(t[2].value, "+0,4");
   assert.match(t[2].caption, /ainda não entra no plano \(ganho solar = 0\)/);
-  assert.match(t[3].caption, /ratio 1,02/);
+  assert.match(t[3].caption, /o modelo bate com o medido \(razão 1,02\)/);
   // heating without a lag estimate drops the sentence instead of faking one
   const h = houseTiles({ heating_c_per_h: { value: 0.1, offset_c: -2, lag_min: null } });
-  assert.equal(h[0].caption, "com −2 de LWT.");
+  assert.equal(h[0].caption, "com a água dos radiadores −2 °C acima da curva.");
 });

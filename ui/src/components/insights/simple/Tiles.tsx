@@ -5,7 +5,7 @@ import type { RecHouse, RecWeekSummary } from "../../../lib/recTypes";
 import { Spinner } from "../../common/Spinner";
 import type { DetailKey } from "./DetailCards";
 import {
-  bandSegments, batteryCaption, billCaption, energyCaption, fmt, gbp, houseTiles, pct, solarCaption,
+  bandSegments, batteryCaption, billCaption, energyCaption, fmt, houseTiles, pct, sgbp, solarCaption,
 } from "./logic";
 
 // Lazy: ECharts and every detailed card live in this chunk, fetched on first expand.
@@ -51,7 +51,7 @@ export function WeekTiles({ ws }: { ws: RecWeekSummary }) {
   const b = ws.battery;
   return (
     <div class="is-tiles">
-      <Tile title="Conta" value={ws.net_gbp != null ? gbp(ws.net_gbp) : "—"} more="bill" moreLabel="Comparação de tarifas">
+      <Tile title="Conta" value={ws.net_gbp != null ? sgbp(ws.net_gbp) : "—"} more="bill" moreLabel="Comparação de tarifas">
         <p class="is-cap">{billCaption(ws) || "Sem dados medidos nesta semana."}</p>
       </Tile>
       <Tile title="Energia" value={e?.total_kwh != null ? fmt(e.total_kwh, 0) : "—"} unit="kWh" more="energy"
@@ -74,7 +74,7 @@ export function WeekTiles({ ws }: { ws: RecWeekSummary }) {
       <Tile title="Sol" value={s?.kwh != null ? fmt(s.kwh, 0) : "—"} unit="kWh" more="solar" moreLabel="Geração">
         <p class="is-cap">{s ? solarCaption(s) : "Sem geração medida nesta semana."}</p>
       </Tile>
-      <Tile title="Bateria" value={b?.arbitrage_gbp != null ? gbp(b.arbitrage_gbp) : "—"} unit="arbitragem"
+      <Tile title="Bateria" value={b?.arbitrage_gbp != null ? sgbp(b.arbitrage_gbp) : "—"} unit="arbitragem"
             more="battery" moreLabel="Placar diário">
         <p class="is-cap">{b ? batteryCaption(b) : "Sem uso da bateria nesta semana."}</p>
       </Tile>

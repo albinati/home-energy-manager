@@ -188,21 +188,21 @@ export function isCurrentPeriod(p: PeriodState): boolean {
   return today >= monday && today <= sunday;
 }
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 
 /** Instant local label for the navigator (the API also returns period_label). */
 export function periodLabel(p: PeriodState): string {
   const d = parse(p.anchor);
   if (p.gran === "day") {
-    return isCurrentPeriod(p) ? "Today" : `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+    return isCurrentPeriod(p) ? "Hoje" : `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
   }
   if (p.gran === "month") return `${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
   if (p.gran === "year") return String(d.getFullYear());
   // week
   const monday = new Date(d);
   monday.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-  if (isCurrentPeriod(p)) return "This week";
-  return `Week of ${monday.getDate()} ${MONTHS[monday.getMonth()]}`;
+  if (isCurrentPeriod(p)) return "Esta semana";
+  return `Semana de ${monday.getDate()} ${MONTHS[monday.getMonth()]}`;
 }
 
 /** Short noun used in the Hero eyebrow ("June", "This week", "2 Jun", "2026"). */

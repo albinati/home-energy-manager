@@ -419,7 +419,12 @@ export interface TuningSuggestionsResponse { weeks: number; suggestions: TuningS
 export const getTuningSuggestions = (weeks = 4) =>
   getJson<TuningSuggestionsResponse>(`/tuning/suggestions?weeks=${weeks}`);
 
-// Insights (#879 PR 2): the "O que fazer" list + week + house numbers. `end` is the
-// last day (YYYY-MM-DD, local) of the 7-day window; omitted = today.
-export const getRecommendations = (end?: string) =>
-  getJson<RecommendationsResponse>(`/insights/recommendations${end ? `?end=${encodeURIComponent(end)}` : ""}`);
+// Insights (#879 PR 2): the "O que fazer" list + week + house numbers. `range` is the
+// navigator's week (Mon..Sun clamped to today, YYYY-MM-DD local); `fresh` bypasses the
+// server's 10-minute cache (after an Aplicar).
+export const getRecommendations = (range?: { start: string; end: string }, fresh = false) => {
+  const q: string[] = [];
+  if (range) q.push(`start=${encodeURIComponent(range.start)}`, `end=${encodeURIComponent(range.end)}`);
+  if (fresh) q.push("fresh=1");
+  return getJson<RecommendationsResponse>(`/insights/recommendations${q.length ? `?${q.join("&")}` : ""}`);
+};

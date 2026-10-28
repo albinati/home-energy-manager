@@ -22,13 +22,13 @@ import "./period-nav.css";
 //   • "page"  — the in-flow selector at the top of the route; shown ONLY on
 //     narrow screens, where it replaces the hidden chrome control.
 const GRANS: { key: Granularity; label: string }[] = [
-  { key: "day", label: "Day" },
-  { key: "week", label: "Week" },
-  { key: "month", label: "Month" },
-  { key: "year", label: "Year" },
+  { key: "day", label: "Dia" },
+  { key: "week", label: "Semana" },
+  { key: "month", label: "Mês" },
+  { key: "year", label: "Ano" },
 ];
 
-export function PeriodNavigator({ variant = "page" }: { variant?: "page" | "chrome" }) {
+export function PeriodNavigator({ variant = "page", weekOnly = false }: { variant?: "page" | "chrome"; weekOnly?: boolean }) {
   const p = usePeriod();
   const atNow = isCurrentPeriod(p);
   // Chrome stepper reads "Today · 8 Jun 2026" (scope · date) per the redesign;
@@ -37,17 +37,17 @@ export function PeriodNavigator({ variant = "page" }: { variant?: "page" | "chro
   const label = variant === "chrome" && scope.date ? `${scope.scope} · ${scope.date}` : periodLabel(p);
 
   return (
-    <div class={`pnav pnav--${variant}`} role="group" aria-label="Period selector">
+    <div class={`pnav pnav--${variant}`} role="group" aria-label="Período">
       <div class="pnav-stepper">
-        <button class="pnav-arrow" onClick={() => stepPeriod(-1)} aria-label="Previous period">‹</button>
+        <button class="pnav-arrow" onClick={() => stepPeriod(-1)} aria-label="Período anterior">‹</button>
         <span class="pnav-label" aria-live="polite">{label}</span>
         <button class="pnav-arrow" onClick={() => stepPeriod(1)} disabled={atNow}
-                aria-label="Next period" title={atNow ? "Already at the current period" : undefined}>›</button>
+                aria-label="Próximo período" title={atNow ? "Já no período atual" : undefined}>›</button>
         <button class="pnav-today" onClick={goToNow} disabled={atNow}
-                aria-label="Jump to the current period"
-                title={atNow ? "Already at the current period" : "Jump to now"}>Today</button>
+                aria-label="Ir para o período atual"
+                title={atNow ? "Já no período atual" : "Ir para agora"}>Hoje</button>
       </div>
-      <div class="pnav-grans" role="tablist" aria-label="Granularity">
+      {!weekOnly && <div class="pnav-grans" role="tablist" aria-label="Granularidade">
         {GRANS.map((g) => (
           <button key={g.key}
                   class={`pnav-gran${p.gran === g.key ? " is-active" : ""}`}
@@ -56,7 +56,7 @@ export function PeriodNavigator({ variant = "page" }: { variant?: "page" | "chro
             {g.label}
           </button>
         ))}
-      </div>
+      </div>}
     </div>
   );
 }

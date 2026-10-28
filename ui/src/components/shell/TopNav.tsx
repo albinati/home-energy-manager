@@ -56,7 +56,7 @@ export function TopNav() {
           )}
         </nav>
         <span class="topnav-spacer" />
-        {periodRoutes.includes(path) && <PeriodNavigator variant="chrome" />}
+        {periodRoutes.includes(path) && <PeriodNavigator variant="chrome" weekOnly />}
         <Clock />
         <AdminButton />
         <ThemeToggle />

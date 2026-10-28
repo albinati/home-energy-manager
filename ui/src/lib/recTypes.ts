@@ -17,6 +17,8 @@ export interface RecItem {
 }
 export interface RecBandShares { cheap: number | null; day: number | null; peak: number | null; solar: number | null }
 export interface RecWeekSummary {
+  /** Complete days of the range the figures cover (today's partial day is left out). */
+  complete_days: number;
   net_gbp: number | null;
   usual_gbp: number | null;
   current_label: string | null;
@@ -40,12 +42,15 @@ export interface RecWeekSummary {
 export interface RecHouse {
   cooling_c_per_h?: { value: number; outdoor_c: number; tau_h: number };
   heating_c_per_h?: { value: number; offset_c: number; lag_min: number | null };
-  solar_gain?: { coefficient: number; value_c_per_sunny_afternoon: number | null; applied: boolean };
-  tank?: { c_per_h_night: number; ratio_median_recent: number | null };
+  solar_gain?: {
+    coefficient: number; value_c_per_sunny_afternoon: number | null; applied: boolean;
+    assumed_pv_kw?: number; assumed_hours?: number;
+  };
+  tank?: { c_per_h_night: number; ratio_median_recent: number | null; n_recent?: number | null };
 }
 export interface RecommendationsResponse {
   generated_at: string;
-  week: { start: string; end: string };
+  week: { start: string; end: string; complete_days?: number; last_complete?: string | null };
   items: RecItem[];
   week_summary: RecWeekSummary;
   house: RecHouse;
