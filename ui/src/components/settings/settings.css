@@ -526,3 +526,11 @@
 }
 .sim-warnings ul { margin: var(--space-2) 0 0 var(--space-4); padding: 0; }
 .sim-warnings li { margin: var(--space-1) 0; }
+
+/* #873: vacation return-time input under the mode segment */
+.mode-switcher-return {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}

@@ -1,6 +1,7 @@
 // Settings groups — hand-curated map keyed on visual sections.
-// OPTIMIZATION_PRESET is rendered separately as the ModeSwitcher above the
-// group list, so it does NOT appear here.
+// OPTIMIZATION_PRESET is rendered as the ModeSwitcher (normal | vacation) above
+// the group list; the advanced "vacation" group below repeats it as a plain
+// select so the backend-only "guests" mode stays reachable (#873).
 
 export interface GroupSpec {
   id: string;
@@ -111,6 +112,20 @@ export const SETTINGS_GROUPS: GroupSpec[] = [
     keys: ["PV_CALIBRATION_WINDOW_DAYS", "WEATHER_LAT", "WEATHER_LON"],
   },
   {
+    id: "vacation",
+    title: "Vacation & guests",
+    subtitle: "Away-until-return mode (Daikin holiday + scheduled recovery) and the advanced household-mode select, which still accepts guests.",
+    expanded: false,
+    advanced: true,
+    keys: [
+      "OPTIMIZATION_PRESET",
+      "VACATION_RETURN_AT",
+      "VACATION_RECOVERY_HOURS",
+      "LP_VACATION_LOAD_SCALE",
+      "VACATION_DAIKIN_HOLIDAY_ENABLED",
+    ],
+  },
+  {
     id: "safety",
     title: "Safety gates",
     subtitle: "Lock-down switches for batch settings writes.",
@@ -130,6 +145,10 @@ export const KEY_LABELS: Record<string, string> = {
   LP_W3_SOLAR_GAIN_KW_PER_PV_KW: "Solar gain (kW thermal per PV kW)",
   LP_W3_EMITTER_TAU_MIN: "Emitter lag (minutes)",
   OPTIMIZATION_PRESET: "Household mode",
+  VACATION_RETURN_AT: "Vacation return (local ISO, e.g. 2026-11-07T18:00)",
+  VACATION_RECOVERY_HOURS: "Recovery lead before return (hours)",
+  LP_VACATION_LOAD_SCALE: "House load while away (scale)",
+  VACATION_DAIKIN_HOLIDAY_ENABLED: "Use Daikin holiday mode",
   DHW_TEMP_NORMAL_C: "Normal tank target",
   DHW_TEMP_COMFORT_C: "Comfort tank target (plunge fill)",
   DHW_TEMP_PV_ABUNDANCE_TARGET_C: "PV-abundance tank target",

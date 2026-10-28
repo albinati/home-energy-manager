@@ -174,6 +174,11 @@ export default function Settings() {
           pendingValue={pending.OPTIMIZATION_PRESET as string | undefined}
           onChange={(v) => onChange("OPTIMIZATION_PRESET", v)}
           onRevert={() => onRevert("OPTIMIZATION_PRESET")}
+          returnAt={
+            (pending.VACATION_RETURN_AT as string | undefined) ??
+            (specByKey.get("VACATION_RETURN_AT")?.value as string | undefined)
+          }
+          onReturnAtChange={(v) => onChange("VACATION_RETURN_AT", v)}
         />
       )}
 

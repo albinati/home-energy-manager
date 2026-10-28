@@ -384,8 +384,8 @@ def _slot_fox_tuple(
                 "LP_SOLAR_CHARGE_FOX_MODE=%r not recognised — using 'selfuse'", mode
             )
             mode = "selfuse"
-        if _optimization_preset_away_like():
-            # Vacation — plain self-use at reserve (no grid->battery).
+        if _vacation_pv_only_battery():
+            # Vacation (export enabled) — plain self-use at reserve (no grid->battery).
             return ("SelfUse", None, None, min_r, None)
         if mode == "backup_hold":
             return ("Backup", None, None, min_r, min_r)
@@ -556,6 +556,34 @@ def _optimization_preset_away_like() -> bool:
         return p == OperationPreset.VACATION
     except ValueError:
         return False
+
+
+def _vacation_pv_only_battery() -> bool:
+    """#873 — True when the vacation preset keeps its historical PV-only battery.
+
+    Vacation v2 plans the battery with NORMAL LP economics (cheap-band grid
+    charging, pessimistic floor, normal Fox shapes). The old vacation semantics
+    (``chg <= pv_use``, ``solar_charge`` labels, SelfUse(reserve), no A1 hold)
+    survive only when ``LP_BATTERY_EXPORT_ENABLED=true`` (Agile arbitrage).
+    """
+    return bool(_optimization_preset_away_like()) and bool(
+        getattr(config, "LP_BATTERY_EXPORT_ENABLED", True)
+    )
+
+
+def _vacation_base_load_scale() -> float:
+    """#873 — multiplier on the residual base-load forecast while away.
+
+    ``LP_VACATION_LOAD_SCALE`` (default 0.35: an empty house measured 0.3-0.45 kW
+    vs ~1 kW occupied) applies only in the vacation preset; exactly 1.0
+    (bit-identical no-op) in every other mode.
+    """
+    if _optimization_preset_away_like():
+        try:
+            return float(getattr(config, "LP_VACATION_LOAD_SCALE", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+    return 1.0
 
 
 def _guests_base_load_scale() -> float:
@@ -1391,6 +1419,7 @@ def _persist_lp_snapshots(
         "LP_W3_INTERNAL_GAIN_KW": float(getattr(config, "LP_W3_INTERNAL_GAIN_KW", 0.0)),
         "LP_W3_SOLAR_GAIN_KW_PER_PV_KW": float(getattr(config, "LP_W3_SOLAR_GAIN_KW_PER_PV_KW", 0.0)),
         "LP_W3_EMITTER_TAU_MIN": float(getattr(config, "LP_W3_EMITTER_TAU_MIN", 0.0)),
+        "LP_VACATION_LOAD_SCALE": float(getattr(config, "LP_VACATION_LOAD_SCALE", 1.0)),
         "LP_COP_LWT_OFFSET_PENALTY_PER_K": float(getattr(config, "LP_COP_LWT_OFFSET_PENALTY_PER_K", 0.0)),
         "LP_W3_EMERGENCY_FLOOR_C": float(getattr(config, "LP_W3_EMERGENCY_FLOOR_C", 20.0)),
         "LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT": float(getattr(config, "LP_W3_EMERGENCY_PEN_PENCE_PER_DEGC_SLOT", 0.0)),
@@ -1972,7 +2001,7 @@ def _run_optimizer_lp(
     _load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
     # guests preset lifts the residual base load (visitors raise base load, not
     # just DHW) — 1.0 no-op for normal/vacation. Applied on top of _load_scale.
-    _guests_scale = _guests_base_load_scale()
+    _guests_scale = _guests_base_load_scale() * _vacation_base_load_scale()
     # Phase-2 additive per-local-hour bias correction — applied to the residual
     # base load (so the committed base_load_json the error log measures includes
     # it → the loop closes). OFF unless LOAD_RECENT_BIAS_ENABLED; empty otherwise.

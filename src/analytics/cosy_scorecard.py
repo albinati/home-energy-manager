@@ -520,6 +520,36 @@ def _holiday_day(a: datetime, b: datetime) -> bool:
         return False
 
 
+def _vacation_day(a: datetime, b: datetime) -> bool:
+    """#873 - True when the household was away (vacation preset) at any point of [a, b).
+
+    Decided from the ``vacation_start`` / ``vacation_end`` action_log events the
+    vacation module writes. An empty, cooling house is not a comfort or tank-floor
+    failure. Never raises.
+    """
+    try:
+        since = (a - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        evs: list[tuple[datetime, str]] = []
+        for name, kind in (("vacation_start", "entered"), ("vacation_end", "exited")):
+            for r in db.get_action_logs(device="system", action=name, since=since, limit=200):
+                if str(r.get("result") or "") == "skipped":
+                    continue
+                ts = datetime.fromisoformat(str(r["timestamp"]).replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                evs.append((ts, kind))
+        evs.sort(key=lambda x: x[0])
+        active = False
+        for ts, ev in evs:
+            if ts < a:
+                active = ev == "entered"
+            elif ts < b:
+                return True
+        return active
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def build_scorecard(day: date, *, tz: ZoneInfo | None = None) -> dict[str, Any]:
     """Compose the scorecard row for local ``day`` (not persisted)."""
     from . import pnl
@@ -553,6 +583,7 @@ def build_scorecard(day: date, *, tz: ZoneInfo | None = None) -> dict[str, Any]:
 
     payload["comfort"] = _section("comfort", _comfort, day, windows, tz, a, b)
     payload["holiday"] = _holiday_day(a, b)
+    payload["vacation"] = _vacation_day(a, b)  # #873
     payload["tank"] = _section("tank", _tank, day, tz)
     payload["lwt"] = _section("lwt", _lwt, day, tz, a, b, windows)
     payload["ops"] = _section("ops", _ops, a, b)
@@ -613,8 +644,8 @@ def evaluate_alerts(row: dict[str, Any]) -> list[tuple[str, str]]:
         if streak:
             out.append((f"cosy_peak_underforecast_{(d - timedelta(days=2)).isoformat()}",
                         f"Peak-band load under-forecast 3 days running (to {day}) - the battery may be sized too small for the peak."))
-    # #872: a holiday day's tank is off on purpose - no shower-floor alert.
-    low = [] if p.get("holiday") else [
+    # #872/#873: a holiday / vacation day's tank is off on purpose - no shower-floor alert.
+    low = [] if (p.get("holiday") or p.get("vacation")) else [
         s for s in ((p.get("tank") or {}).get("showers") or []) if s.get("below_floor")
     ]
     if low:

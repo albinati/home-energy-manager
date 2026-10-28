@@ -885,6 +885,16 @@ def _preset_line() -> str | None:
         "guests": "👥 Guests",
         "vacation": "🏖 Vacation",
     }.get(preset, f"🏠 {preset.title()}")
+    if preset == "vacation":
+        # #873: away until <return>; the recovery job brings the house back.
+        try:
+            from .. import vacation as _vac
+
+            ret = _vac.status_block().get("return_at")
+            if ret:
+                badge += f" (volta {str(ret)[:16].replace('T', ' ')})"
+        except Exception:  # noqa: BLE001 - the chip must render
+            pass
     return f"**Mode:** {badge} · Daikin: `{daikin}`"
 
 

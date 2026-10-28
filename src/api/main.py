@@ -1164,6 +1164,8 @@ async def cockpit_now():
             # that still read the field.
             "energy_strategy_mode": "removed",
         },
+        # #873: {active, return_at, recovery_at, daikin_holiday_until_sent, holiday_enabled}
+        "vacation": _vacation_status_safe(),
         "plan_date": plan_block["plan_date"],
         # Sign conventions for state.grid_kw / state.battery_kw / current_slot
         # prices. LLM consumers (notably OpenClaw) cannot see Pydantic Field
@@ -2356,7 +2358,21 @@ async def settings_put(key: str, payload: dict, x_simulation_id: str | None = He
         raise HTTPException(status_code=404, detail=f"unknown setting {key!r}")
     if "value" not in payload:
         raise HTTPException(status_code=400, detail="missing 'value' in body")
+    from .. import vacation as _vac
+
+    # #873: vacation needs a future VACATION_RETURN_AT -> 422 (optional
+    # ``return_at`` in the body sets it in the same call).
+    prev_preset = _vac.current_preset()
+    vac_changes: dict = {key: payload["value"]}
+    if key == "OPTIMIZATION_PRESET" and payload.get("return_at") is not None:
+        vac_changes["VACATION_RETURN_AT"] = payload["return_at"]
     try:
+        _vac.check_preset_changes(vac_changes)
+    except _vac.VacationReturnAtError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    try:
+        if "VACATION_RETURN_AT" in vac_changes and key != "VACATION_RETURN_AT":
+            rts.set_setting("VACATION_RETURN_AT", vac_changes["VACATION_RETURN_AT"], actor="api")
         canonical = rts.set_setting(key, payload["value"], actor="api")
     except rts.SettingValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -2365,7 +2381,12 @@ async def settings_put(key: str, payload: dict, x_simulation_id: str | None = He
     if rts.SCHEMA[key].cron_reload:
         cron_status = reregister_cron_jobs(reason=f"settings_put:{key}")
 
-    return {"key": key, "value": canonical, "cron_status": cron_status}
+    out = {"key": key, "value": canonical, "cron_status": cron_status}
+    if key in ("OPTIMIZATION_PRESET", "VACATION_RETURN_AT"):
+        info = _vac.after_settings_applied(prev_preset, vac_changes, actor="api")
+        if info is not None:
+            out["vacation"] = info
+    return out
 
 
 @app.delete("/api/v1/settings/{key}")
@@ -2380,6 +2401,16 @@ async def settings_delete(key: str):
     if rts.SCHEMA[key].cron_reload:
         cron_status = reregister_cron_jobs(reason=f"settings_delete:{key}")
     return {"key": key, "removed": removed, "cron_status": cron_status}
+
+
+def _vacation_status_safe() -> dict | None:
+    """#873 — vacation snapshot for the Home/status payloads; None on any error."""
+    try:
+        from .. import vacation as _vac
+
+        return _vac.status_block()
+    except Exception:  # pragma: no cover — status must render
+        return None
 
 
 def _daikin_holiday_state() -> dict | None:
@@ -4237,7 +4268,18 @@ async def optimization_pending():
 async def optimization_set_preset(req: SetPresetRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Switch the household preset at runtime (normal/guests/travel/away/boost)."""
     _enforce_simulation_id("optimization.set_preset", x_simulation_id)
-    config.OPTIMIZATION_PRESET = req.preset
+    from .. import vacation as _vac
+
+    if req.preset in ("travel", "away"):
+        # #873: the legacy aliases are vacation -> same mandatory return time.
+        try:
+            _vac.set_preset("vacation", req.return_at, actor="api")
+        except _vac.VacationReturnAtError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+    else:
+        _prev = _vac.current_preset()
+        config.OPTIMIZATION_PRESET = req.preset
+        _vac.after_settings_applied(_prev, {"OPTIMIZATION_PRESET": req.preset}, actor="api")
     logger.info("Optimization preset changed to %s", req.preset)
     return SetPresetResponse(
         ok=True,
@@ -4794,6 +4836,12 @@ async def optimization_auto_approve_simulate(req: SetAutoApproveRequest):
 
 @app.put("/api/v1/settings/{key}/simulate")
 async def settings_simulate(key: str, body: dict):
+    from .. import vacation as _vac
+
+    try:
+        _vac.check_preset_changes({key: body.get("value")})
+    except _vac.VacationReturnAtError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     return _register_diff(_diffs.diff_setting_change(key, body.get("value")))
 
 
@@ -4803,6 +4851,12 @@ async def settings_batch_simulate(body: dict):
     changes = body.get("changes") or {}
     if not isinstance(changes, dict) or not changes:
         raise HTTPException(status_code=400, detail="changes must be a non-empty object")
+    from .. import vacation as _vac
+
+    try:
+        _vac.check_preset_changes(changes)
+    except _vac.VacationReturnAtError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     return _register_diff(_diffs.diff_settings_batch(changes))
 
 
@@ -4822,6 +4876,20 @@ async def settings_batch_apply(
     if not isinstance(changes, dict) or not changes:
         raise HTTPException(status_code=400, detail="changes must be a non-empty object")
     from .. import runtime_settings as rts
+    from .. import vacation as _vac
+
+    # #873: validate the vacation pair up front (422) and apply the return time
+    # BEFORE the preset, whatever order the client sent them in.
+    prev_preset = _vac.current_preset()
+    try:
+        _vac.check_preset_changes(changes)
+    except _vac.VacationReturnAtError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    if "VACATION_RETURN_AT" in changes and "OPTIMIZATION_PRESET" in changes:
+        changes = {
+            "VACATION_RETURN_AT": changes["VACATION_RETURN_AT"],
+            **{k: v for k, v in changes.items() if k != "VACATION_RETURN_AT"},
+        }
 
     applied: list[tuple[str, Any]] = []  # (key, prior_value) for rollback
     results: list[dict] = []
@@ -4855,7 +4923,12 @@ async def settings_batch_apply(
                     "rollback_errors": rollback_errors,
                 },
             )
-    return {"ok": True, "results": results}
+    out = {"ok": True, "results": results}
+    if "OPTIMIZATION_PRESET" in changes or "VACATION_RETURN_AT" in changes:
+        info = _vac.after_settings_applied(prev_preset, changes, actor="api_batch")
+        if info is not None:
+            out["vacation"] = info
+    return out
 
 
 @app.post("/api/v1/scheduler/pause/simulate")

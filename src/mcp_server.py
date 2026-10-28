@@ -1447,23 +1447,35 @@ def build_mcp() -> FastMCP:
         name="set_optimization_preset",
         description=(
             "Switch the household preset. "
-            "Options: normal (family at home — standard DHW + selective peak-export), "
+            "Options: normal (family at home), "
             "guests (extra DHW for visitors via DHW_GUEST_COUNT), "
-            "vacation (DHW off, battery in pure arbitrage mode — peak-export aggressive, "
-            "PV-only charging). "
+            "vacation (away: Daikin put in Onecta holiday mode, battery planned with normal "
+            "economics, reduced house load; a scheduled recovery brings the house back before "
+            "you return). vacation REQUIRES return_at - a local ISO datetime in the future "
+            "(e.g. '2026-11-07T18:00'; 'coloca em ferias ate sabado' maps to it). "
+            "Switching back to normal while on vacation runs the recovery immediately. "
             "After switching, call propose_optimization_plan to re-solve with the new preset."
         ),
     )
-    def set_optimization_preset(preset: str) -> dict[str, Any]:
+    def set_optimization_preset(preset: str, return_at: str | None = None) -> dict[str, Any]:
+        from . import vacation as _vac
+
+        p = _vac.normalize_preset(preset)
         valid = {"normal", "guests", "vacation"}
-        if preset not in valid:
+        if p not in valid:
             return {"ok": False, "error": f"Invalid preset '{preset}'. Valid: {sorted(valid)}"}
-        config.OPTIMIZATION_PRESET = preset
+        try:
+            res = _vac.set_preset(p, return_at, actor="mcp")
+        except _vac.VacationReturnAtError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
         return {
             "ok": True,
-            "preset": preset,
+            "preset": p,
+            "vacation": res.get("vacation"),
             "message": (
-                f"Preset set to '{preset}'. "
+                f"Preset set to '{p}'. "
                 "Call propose_optimization_plan to generate a new plan with this preset."
             ),
         }
@@ -2930,9 +2942,12 @@ def build_mcp() -> FastMCP:
         if key not in rts.SCHEMA:
             return {"ok": False, "error": f"unknown setting {key!r}"}
         spec = rts.SCHEMA[key]
+        from . import vacation as _vac
+
         try:
             # Always validate first — dry-runs exercise the schema.
             canonical = rts._validate(spec, value)
+            _vac.check_preset_changes({key: canonical})  # #873: vacation needs a return time
         except rts.SettingValidationError as e:
             return {"ok": False, "error": str(e)}
         if not confirmed:
@@ -2945,6 +2960,7 @@ def build_mcp() -> FastMCP:
                 "cron_reload": spec.cron_reload,
                 "message": "dry-run; pass confirmed=True to apply",
             }
+        prev_preset = _vac.current_preset()
         try:
             canonical = rts.set_setting(key, value, actor="mcp")
         except rts.SettingValidationError as e:
@@ -2952,13 +2968,18 @@ def build_mcp() -> FastMCP:
         cron_status = None
         if spec.cron_reload:
             cron_status = reregister_cron_jobs(reason=f"mcp:{key}")
-        return {
+        out = {
             "ok": True,
             "confirmed": True,
             "key": key,
             "value": canonical,
             "cron_status": cron_status,
         }
+        if key in ("OPTIMIZATION_PRESET", "VACATION_RETURN_AT"):
+            info = _vac.after_settings_applied(prev_preset, {key: canonical}, actor="mcp")
+            if info is not None:
+                out["vacation"] = info
+        return out
 
     # -------------------------------------------------------------------
     # Cockpit parity — read-only tools wrapping the PR #133–137 endpoints

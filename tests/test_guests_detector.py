@@ -6,8 +6,16 @@ already in guests mode. NEVER auto-applies.
 """
 from __future__ import annotations
 
+import pytest
+
 from src.config import config
 from src.scheduler import runner
+
+
+@pytest.fixture(autouse=True)
+def _detector_enabled(monkeypatch):
+    # #873: GUESTS_DETECT_ENABLED code default is now false; these tests exercise the job itself.
+    monkeypatch.setattr(config, "GUESTS_DETECT_ENABLED", True, raising=False)
 
 
 def _ev(daily, **kw):

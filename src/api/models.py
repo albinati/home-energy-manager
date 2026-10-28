@@ -472,6 +472,10 @@ class SetPresetRequest(BaseModel):
         description="Preset: normal | guests | travel | away | boost",
         pattern=r"^(normal|guests|travel|away|boost)$",
     )
+    return_at: str | None = Field(
+        default=None,
+        description="Local ISO datetime of the return (#873); required for travel/away (= vacation).",
+    )
 
 
 class SetPresetResponse(BaseModel):

@@ -131,6 +131,43 @@ class DaikinClient:
                 continue
         raise DaikinError("HTTP 401: authorization failed after retry")
 
+    def _post(self, path: str, body: dict) -> dict:
+        """POST (Onecta action endpoints, e.g. holiday-mode). Same retry/quota
+        pattern as :meth:`_patch`; a 204 / empty body returns ``{}``."""
+        url = f"{self.BASE_URL}{path}"
+        payload = json.dumps(body).encode()
+        max_429 = max(0, int(config.DAIKIN_HTTP_429_MAX_RETRIES))
+        for auth_try in range(2):
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers=self._headers(force_refresh=auth_try > 0),
+                method="POST",
+            )
+            retry_auth = False
+            for r429 in range(max_429 + 1):
+                try:
+                    resp = urllib.request.urlopen(req, timeout=15)
+                except urllib.error.HTTPError as e:
+                    self._safe_record("write", ok=False)
+                    err_body = e.read().decode()
+                    if e.code == 401 and auth_try == 0:
+                        retry_auth = True
+                        break
+                    if e.code == 429 and r429 < max_429:
+                        time.sleep(self._retry_after_seconds(e))
+                        continue
+                    raise DaikinError(f"HTTP {e.code}: {err_body}")
+                except Exception:
+                    self._safe_record("write", ok=False)
+                    raise
+                self._safe_record("write", ok=True)
+                rb = resp.read()
+                return json.loads(rb) if rb else {}
+            if retry_auth:
+                continue
+        raise DaikinError("HTTP 401: authorization failed after retry")
+
     def get_devices(self) -> list[DaikinDevice]:
         """List all gateway devices."""
         data = self._get("/gateway-devices")
@@ -313,6 +350,32 @@ class DaikinClient:
         self._patch(
             self._dhw_path(device, "temperatureControl"),
             {"value": {"operationModes": {"heating": {"setpoints": {"domesticHotWaterTemperature": {"value": temperature}}}}}},
+        )
+
+    def set_holiday_mode(
+        self,
+        device: DaikinDevice,
+        enabled: bool,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> None:
+        """Enable/disable the Onecta holiday window (#873).
+
+        ``POST /gateway-devices/{id}/management-points/{climateMpId}/holiday-mode``
+        with the body UNWRAPPED (no ``value``) -> 204. Enabling carries
+        ``startDate`` / ``endDate`` (``YYYY-MM-DD``, ``endDate`` INCLUSIVE: the
+        firmware resumes at 00:00 the day after); disabling is ``{"enabled": false}``
+        with NO dates.
+        """
+        if enabled:
+            if not start_date or not end_date:
+                raise ValueError("holiday-mode enable needs start_date and end_date")
+            body: dict = {"enabled": True, "startDate": start_date, "endDate": end_date}
+        else:
+            body = {"enabled": False}
+        self._post(
+            f"/gateway-devices/{device.id}/management-points/{device.climate_mp_id}/holiday-mode",
+            body,
         )
 
     def set_tank_power(self, device: DaikinDevice, on: bool) -> None:

@@ -14,7 +14,7 @@ import {
   cancelApplianceJob,
 } from "../../lib/endpoints";
 import { HemApiError } from "../../lib/api";
-import { MODE_META } from "../settings/ModeSwitcher";
+import { MODE_META, PRIMARY_MODES, toDatetimeLocal } from "../settings/ModeSwitcher";
 import { Modal } from "../common/Modal";
 import { Icon } from "../common/Icon";
 import { toast } from "../../lib/toast";
@@ -29,9 +29,10 @@ import "./operate.css";
 
 // "Operate" — the admin control cluster at the top of the live band. Four
 // actions, all behind the same lockbar consent as HeatingControls:
-//   1. household mode (normal/guests/vacation) via /settings/batch — the SAME
-//      path the Settings page uses (NEVER /optimization/preset: legacy enum
-//      that bypasses runtime_settings),
+//   1. household mode (normal | vacation; vacation carries a mandatory return
+//      time, VACATION_RETURN_AT) via /settings/batch — the SAME path the
+//      Settings page uses (NEVER /optimization/preset: legacy enum that
+//      bypasses runtime_settings),
 //   2. replan now (/optimization/propose, simulate→confirm),
 //   3. scheduler pause/resume,
 //   4. cancel a scheduled appliance run.
@@ -48,7 +49,7 @@ interface OperateCardProps {
 }
 
 type Confirm =
-  | { kind: "mode"; mode: string; sim: SimulateBatchResponse }
+  | { kind: "mode"; mode: string; changes: Record<string, unknown>; sim: SimulateBatchResponse }
   | { kind: "replan" | "pause" | "resume"; diff: ActionDiffResponse };
 
 const MODE_KEY = "OPTIMIZATION_PRESET";
@@ -68,10 +69,14 @@ export function OperateCard({ appliances, applianceJobs, onChanged }: OperateCar
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [replanSuggested, setReplanSuggested] = useState(false);
+  // #873: vacation needs a return time - draft shown inline until confirmed.
+  const [vacationDraft, setVacationDraft] = useState<string | null>(null);
 
   const modeSpec = settings.data?.settings.find((s) => s.key === MODE_KEY);
   const currentMode = modeSpec ? String(modeSpec.value) : null;
-  const modes = (modeSpec?.enum ?? ["normal", "guests", "vacation"]) as string[];
+  const allModes = (modeSpec?.enum ?? ["normal", "guests", "vacation"]) as string[];
+  // normal | vacation only; a stored "guests" stays visible so the control never lies.
+  const modes = allModes.filter((m) => PRIMARY_MODES.includes(m) || m === currentMode);
 
   // Admin-only surface (after hooks — stable order if the role flips live).
   if (role.value !== "admin") return null;
@@ -104,24 +109,34 @@ export function OperateCard({ appliances, applianceJobs, onChanged }: OperateCar
     /Simulation(Expired|IdRequired|IdMismatch)/.test(e.body || "");
 
   // ── mode (settings batch — same flow as the Settings page) ──────────────
+  const simulateMode = (m: string, changes: Record<string, unknown>) =>
+    void guard(async () => {
+      const sim = await simulateBatch(changes);
+      setVacationDraft(null);
+      setConfirm({ kind: "mode", mode: m, changes, sim });
+    });
+
   const chooseMode = (m: string) => {
     if (!unlocked || m === currentMode) return;
-    void guard(async () => {
-      const sim = await simulateBatch({ [MODE_KEY]: m });
-      setConfirm({ kind: "mode", mode: m, sim });
-    });
+    if (m === "vacation") {
+      // Return time first: the backend rejects vacation without a future one (422).
+      setVacationDraft("");
+      return;
+    }
+    setVacationDraft(null);
+    simulateMode(m, { [MODE_KEY]: m });
   };
 
   const confirmMode = (c: Extract<Confirm, { kind: "mode" }>) =>
     void guard(async () => {
       try {
-        await applyBatch(c.sim.simulation_id, { [MODE_KEY]: c.mode });
+        await applyBatch(c.sim.simulation_id, c.changes);
       } catch (e) {
         // Modal sat open past the 5-min sim TTL → re-simulate once and ask
         // again on the fresh diff. Other failures (409 BatchPartialFailure
         // etc.) fall through to guard()'s toast.
         if (isSimIdError(e)) {
-          setConfirm({ kind: "mode", mode: c.mode, sim: await simulateBatch({ [MODE_KEY]: c.mode }) });
+          setConfirm({ kind: "mode", mode: c.mode, changes: c.changes, sim: await simulateBatch(c.changes) });
           toast.error("Simulation expired", "Review the refreshed diff and confirm again.");
           return;
         }
@@ -229,6 +244,29 @@ export function OperateCard({ appliances, applianceJobs, onChanged }: OperateCar
               );
             })}
           </div>
+          {vacationDraft !== null && (
+            <div class="operate-btnrow">
+              <label class="operate-label" for="operate-vacation-return">Volta em</label>
+              <input
+                id="operate-vacation-return"
+                type="datetime-local"
+                value={toDatetimeLocal(vacationDraft)}
+                disabled={!unlocked || busy}
+                onInput={(e) => setVacationDraft((e.currentTarget as HTMLInputElement).value)}
+              />
+              <button
+                type="button"
+                class="btn btn--sm btn--primary"
+                disabled={!unlocked || busy || !vacationDraft}
+                onClick={() => simulateMode("vacation", { [MODE_KEY]: "vacation", VACATION_RETURN_AT: vacationDraft })}
+              >
+                Continuar
+              </button>
+              <button type="button" class="btn btn--sm btn--ghost" disabled={busy} onClick={() => setVacationDraft(null)}>
+                Cancelar
+              </button>
+            </div>
+          )}
         </div>
 
         {/* plan + scheduler actions */}
