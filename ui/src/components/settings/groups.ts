@@ -42,8 +42,10 @@ export const VISIBLE_GROUPS: GroupSpec[] = [
     keys: [
       "DHW_TEMP_NORMAL_C",
       "DHW_TEMP_COMFORT_C",
+      "DHW_SHOWER_COMFORT_C",
       "DHW_SHOWER_EVENING_START_HOUR",
       "DHW_SHOWER_EVENING_END_HOUR",
+      "DHW_MORNING_RESERVE_C",
       "DHW_MORNING_RESERVE_START_HOUR",
       "DHW_MORNING_RESERVE_END_HOUR",
     ],
@@ -107,8 +109,6 @@ export const ADVANCED_GROUPS: GroupSpec[] = [
     keys: [
       "DHW_TEMP_PV_ABUNDANCE_TARGET_C",
       "DHW_TANK_OVERNIGHT_TARGET_C",
-      "DHW_SHOWER_COMFORT_C",
-      "DHW_MORNING_RESERVE_C",
       "DHW_MORNING_RESERVE_HOUR_LOCAL",
       "DHW_TANK_USABLE_FRACTION",
       "DHW_WARMUP_START_HOUR_LOCAL",
@@ -151,7 +151,7 @@ export const ADVANCED_GROUPS: GroupSpec[] = [
   {
     id: "schedule",
     title: "Horários e agendador",
-    subtitle: "Quando rodam o plano e a telemetria. Mudanças recarregam o agendador sem reiniciar.",
+    subtitle: "Quando rodam o plano e a telemetria. A mudança vale no próximo reinício do serviço (ou ao gravar a chave sozinha).",
     keys: [
       "LP_PLAN_PUSH_HOUR",
       "LP_PLAN_PUSH_MINUTE",
@@ -183,12 +183,14 @@ export const ADVANCED_GROUPS: GroupSpec[] = [
 // description, which is written for developers).
 export const PLAIN_COPY: Record<string, PlainCopy> = {
   INDOOR_SETPOINT_C: { label: "Temperatura da casa de dia", hint: "A temperatura que a casa deve ter durante o dia." },
-  LP_W3_NIGHT_FLOOR_C: { label: "Mínimo à noite (22–07)", hint: "A casa pode esfriar até aqui de madrugada." },
-  LP_W3_PEAK_COAST_DELTA_C: { label: "Quanto pode esfriar no pico 16–19", hint: "Graus abaixo da temperatura do dia aceitos com o aquecimento desligado no pico. 0 = não esfriar." },
+  LP_W3_NIGHT_FLOOR_C: { label: "Mínimo à noite", hint: "A casa pode esfriar até aqui durante a noite." },
+  LP_W3_PEAK_COAST_DELTA_C: { label: "Quanto pode esfriar no pico", hint: "No pico (faixa mais cara) o piso de conforto é a temperatura do dia menos este valor. 0 = manter a temperatura do dia." },
   LP_W3_CEILING_C: { label: "Máximo (não aquecer acima)", hint: "Acima disto o aquecimento não liga, nem com energia barata." },
   INDOOR_COMFORT_AGGREGATE: { label: "Qual sensor é “a casa”", hint: "mean = média dos cômodos, min = o mais frio, max = o mais quente, ou room:nome para um cômodo só." },
   DHW_TEMP_NORMAL_C: { label: "Temperatura normal do tanque", hint: "Meta do dia a dia, suficiente para os banhos." },
-  DHW_TEMP_COMFORT_C: { label: "Temperatura mínima quando aquece", hint: "Quando o sistema decide aquecer a água, ela sobe pelo menos até aqui." },
+  DHW_TEMP_COMFORT_C: { label: "Meta do tanque quando aquece com energia barata (piso ao aquecer)", hint: "Quando o sistema decide aquecer a água, ela sobe pelo menos até aqui." },
+  DHW_SHOWER_COMFORT_C: { label: "Temperatura mínima para o banho da noite", hint: "O tanque deve estar pelo menos assim quente no início dos banhos da noite." },
+  DHW_MORNING_RESERVE_C: { label: "Temperatura mínima para o banho da manhã", hint: "O tanque deve estar pelo menos assim quente na reserva da manhã." },
   DHW_SHOWER_EVENING_START_HOUR: { label: "Banhos da noite: começam às", hint: "Hora do dia (0–24) em que os banhos da noite começam." },
   DHW_SHOWER_EVENING_END_HOUR: { label: "Banhos da noite: terminam às", hint: "Hora do dia (0–24) em que os banhos da noite terminam." },
   DHW_MORNING_RESERVE_START_HOUR: { label: "Banho da manhã: a partir das", hint: "Hora do dia (0–24) em que começa a reserva de água da manhã." },
@@ -199,39 +201,39 @@ export const PLAIN_COPY: Record<string, PlainCopy> = {
 // Friendly labels for the Avancado keys; keys without an entry fall back to
 // the raw key (still searchable, description comes from the backend).
 export const KEY_LABELS: Record<string, string> = {
-  DAIKIN_LWT_SOURCE: "Fonte dos ajustes da Daikin (tier | lp)",
+  DAIKIN_LWT_SOURCE: "Fonte dos ajustes da Daikin",
   DAIKIN_LWT_COAST_MODE: "Modo de descanso do aquecimento",
-  LP_W3_EMERGENCY_FLOOR_C: "Piso de emergência (°C)",
+  LP_W3_EMERGENCY_FLOOR_C: "Piso de emergência",
   LP_COP_LWT_OFFSET_PENALTY_PER_K: "Perda de eficiência por grau de reforço",
-  LP_W3_EMITTER_TAU_MIN: "Atraso dos radiadores (minutos)",
-  LP_W3_INTERNAL_GAIN_KW: "Calor interno da casa (kW)",
-  LP_W3_SOLAR_GAIN_KW_PER_PV_KW: "Ganho solar (kW por kW de painel)",
+  LP_W3_EMITTER_TAU_MIN: "Atraso dos radiadores",
+  LP_W3_INTERNAL_GAIN_KW: "Calor interno da casa",
+  LP_W3_SOLAR_GAIN_KW_PER_PV_KW: "Ganho solar por kW de painel",
   LP_LOAD_SCALE_FACTOR: "Fator da previsão de consumo",
-  LP_LOAD_EXPENSIVE_BAND_QUANTILE: "Folga da previsão nas faixas caras (p75 | p90)",
-  LP_GUESTS_BASE_LOAD_SCALE: "Consumo base com hóspedes (fator)",
-  LP_VACATION_LOAD_SCALE: "Consumo da casa em férias (fator)",
+  LP_LOAD_EXPENSIVE_BAND_QUANTILE: "Folga da previsão nas faixas caras",
+  LP_GUESTS_BASE_LOAD_SCALE: "Consumo base com hóspedes",
+  LP_VACATION_LOAD_SCALE: "Consumo da casa em férias",
   LP_POSITIVE_HOLD_ENABLED: "Segurar bateria em preço positivo",
-  LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE: "Ganho mínimo para segurar (p)",
+  LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE: "Ganho mínimo para segurar",
   LP_POSITIVE_HOLD_MAX_GROUPS: "Máximo de blocos de retenção",
-  LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT: "Margem mínima de bateria (%)",
+  LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT: "Margem mínima de bateria",
   LP_SOLAR_CHARGE_FOX_MODE: "Modo da Fox ao carregar com sol",
-  OPTIMIZATION_PRESET: "Modo da casa (normal | hóspedes | férias)",
-  VACATION_RETURN_AT: "Volta das férias (ISO local, ex. 2026-11-07T18:00)",
-  VACATION_RECOVERY_HOURS: "Antecedência para religar o aquecimento (h)",
+  OPTIMIZATION_PRESET: "Modo da casa",
+  VACATION_RETURN_AT: "Volta das férias (ex. 2026-11-07T18:00)",
+  VACATION_RECOVERY_HOURS: "Antecedência para religar o aquecimento",
   VACATION_DAIKIN_HOLIDAY_ENABLED: "Usar modo férias da Daikin",
   DAIKIN_HOLIDAY_DETECT_ENABLED: "Detectar modo férias ligado na Daikin",
-  DAIKIN_CONTROL_MODE: "HEM controla a Daikin? (passive | active)",
+  DAIKIN_CONTROL_MODE: "HEM controla a Daikin?",
   DHW_TEMP_PV_ABUNDANCE_TARGET_C: "Teto do tanque com sol sobrando",
   DHW_TANK_OVERNIGHT_TARGET_C: "Meta do tanque na madrugada",
   DHW_SHOWER_COMFORT_C: "Temperatura mínima para o banho",
   DHW_MORNING_RESERVE_C: "Temperatura da reserva da manhã",
   DHW_MORNING_RESERVE_HOUR_LOCAL: "Hora da reserva da manhã",
   DHW_TANK_USABLE_FRACTION: "Fração útil do tanque",
-  DHW_WARMUP_START_HOUR_LOCAL: "Início do aquecimento do tanque (h)",
-  DHW_SETBACK_START_HOUR_LOCAL: "Início da redução do tanque (h)",
+  DHW_WARMUP_START_HOUR_LOCAL: "Início do aquecimento do tanque",
+  DHW_SETBACK_START_HOUR_LOCAL: "Início da redução do tanque",
   DHW_WARMUP_PRICE_AWARE_ENABLED: "Aquecer o tanque seguindo o preço",
-  DHW_WARMUP_WINDOW_START_LOCAL: "Janela de aquecimento: início (h)",
-  DHW_WARMUP_WINDOW_END_LOCAL: "Janela de aquecimento: fim (h)",
+  DHW_WARMUP_WINDOW_START_LOCAL: "Janela de aquecimento: início",
+  DHW_WARMUP_WINDOW_END_LOCAL: "Janela de aquecimento: fim",
   DHW_DYNAMIC_WINDOW_ENABLED: "Janela dinâmica do tanque",
   DHW_DYNAMIC_BOOST_HOLD_HOURS: "Horas de reforço mantido",
   DHW_SHOWERS_NORMAL_EVENING: "Banhos à noite (normal)",
@@ -251,9 +253,9 @@ export const KEY_LABELS: Record<string, string> = {
   REQUIRE_SIMULATION_ID: "Exigir simulação antes de aplicar em lote",
   LP_PLAN_PUSH_HOUR: "Envio do plano: hora (UTC)",
   LP_PLAN_PUSH_MINUTE: "Envio do plano: minuto (UTC)",
-  MPC_FORECAST_REFRESH_INTERVAL_MINUTES: "Atualização da previsão (min)",
-  PV_TELEMETRY_INTERVAL_MINUTES: "Intervalo da telemetria solar (min)",
-  PV_CALIBRATION_WINDOW_DAYS: "Janela de calibração solar (dias)",
+  MPC_FORECAST_REFRESH_INTERVAL_MINUTES: "Atualização da previsão",
+  PV_TELEMETRY_INTERVAL_MINUTES: "Intervalo da telemetria solar",
+  PV_CALIBRATION_WINDOW_DAYS: "Janela de calibração solar",
   WEATHER_LAT: "Latitude do local",
   WEATHER_LON: "Longitude do local",
   LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH: "Valor da bateria no fim do plano",
@@ -266,18 +268,18 @@ export function labelFor(key: string): string {
 
 export const ALL_GROUPS: GroupSpec[] = [...VISIBLE_GROUPS, ...ADVANCED_GROUPS];
 
-/** Every key placed in some group (visible or advanced). */
+/** test helpers: every key placed in some group (visible or advanced). */
 export function listedKeys(): string[] {
   return ALL_GROUPS.flatMap((g) => g.keys);
 }
 
-/** Registry keys that no group lists. The UI test asserts this is empty. */
+/** test helpers: registry keys that no group lists. */
 export function unlistedKeys(registryKeys: string[]): string[] {
   const seen = new Set(listedKeys());
   return registryKeys.filter((k) => !seen.has(k));
 }
 
-/** Keys listed in more than one place (a bug: edits would be ambiguous). */
+/** test helpers: keys listed in more than one place (a bug: edits would be ambiguous). */
 export function duplicateKeys(): string[] {
   const seen = new Set<string>();
   const dup = new Set<string>();
@@ -335,7 +337,7 @@ export function unitFor(key: string): string {
   return "";
 }
 
-const TZ_SUFFIX = /(Z|[+-]\d\d:?\d\d)$/;
+const TZ_SUFFIX = /(Z|[+-]\d\d:?\d\d)$/i;
 
 /**
  * "Normal" / "Férias até dom 12:00" for the read-only mode line. A naive ISO
@@ -350,11 +352,87 @@ export function modeLine(preset: unknown, returnAt: unknown, tz = "Europe/London
   const raw = String(returnAt ?? "").trim();
   if (!raw) return "Férias";
   const naive = !TZ_SUFFIX.test(raw);
-  const d = new Date(naive ? raw + "Z" : raw);
+  const d = new Date((naive ? raw + "Z" : raw).toUpperCase());
   if (Number.isNaN(d.getTime())) return "Férias";
   const fmt = new Intl.DateTimeFormat("pt-BR", {
     weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
     hour12: false, timeZone: naive ? "UTC" : tz,
   });
-  return `Férias até ${fmt.format(d).replace(",", "")}`;
+  return `Férias até ${fmt.format(d).replace(/,/g, "")}`;
+}
+
+// ---- enums, danger notes, error copy (#883 review) ------------------------
+
+/** Display labels for enum values; the raw value is what gets sent. */
+export const ENUM_LABELS: Record<string, Record<string, string>> = {
+  OPTIMIZATION_PRESET: { normal: "Normal", guests: "Hóspedes", vacation: "Férias" },
+};
+
+export function enumLabel(key: string, value: string): string {
+  return ENUM_LABELS[key]?.[value] ?? value;
+}
+
+/** A `true`/`false` enum is a switch, not a select. */
+export function isBoolEnum(options: readonly string[] | null | undefined): boolean {
+  return !!options && options.length === 2 && options.includes("true") && options.includes("false");
+}
+
+/** Keys that need a visible warning under the field. */
+export const DANGER: Record<string, string> = {
+  DAIKIN_CONTROL_MODE: "passive = o HEM para de escrever na Daikin (a bomba segue a curva dela).",
+  OPTIMIZATION_PRESET: "Muda toda a política da casa. O normal é trocar o modo na Casa; aqui existe só para hóspedes.",
+  REQUIRE_SIMULATION_ID: "Ligado: exige simulação antes de qualquer escrita, inclusive scripts e MCP. Desligar abre mão dessa trava.",
+};
+
+/** pt-BR sentences for the backend's simulation safety flags. */
+export const SAFETY_FLAG_COPY: Record<string, string> = {
+  disables_daikin_writes: "O HEM deixa de escrever na Daikin.",
+  enables_daikin_writes: "O HEM passa a escrever na Daikin.",
+  starts_daikin_holiday_and_schedules_recovery: "Liga o modo férias da Daikin e agenda a volta do aquecimento.",
+  ends_vacation_and_runs_recovery_now: "Encerra as férias e religa o aquecimento agora.",
+  no_cached_device: "Sem leitura recente da Daikin.",
+  plans_will_apply_without_review: "Os planos passam a ser aplicados sem revisão.",
+  takes_effect_on_next_solve: "Vale a partir do próximo plano.",
+  overrides_active_lp_dispatch_until_next_solve: "Substitui o plano ativo até o próximo plano.",
+};
+
+export function safetyFlagText(flag: string): string {
+  return SAFETY_FLAG_COPY[flag] ?? flag.replace(/_/g, " ");
+}
+
+/** The backend's generic per-key summary adds nothing over the before/after chips. */
+export function isGenericSummary(summary: string | undefined, key: string): boolean {
+  return !summary || new RegExp(`^Change setting ${key}\\b`).test(summary);
+}
+
+export interface ApiErrorInfo {
+  message: string;
+  /** Per-key failures of a 409 BatchPartialFailure: key -> message. */
+  byKey: Record<string, string>;
+}
+
+/** Turn an HemApiError body (FastAPI `{detail}`) into plain pt-BR for toasts/fields. */
+export function parseApiError(body: string | undefined, fallback: string): ApiErrorInfo {
+  const byKey: Record<string, string> = {};
+  let detail: unknown;
+  try { detail = (JSON.parse(body || "") as { detail?: unknown }).detail; } catch { detail = body; }
+  let message = "";
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+    const d = detail as { error?: string; message?: string; results?: { key: string; ok: boolean; error?: string }[] };
+    for (const r of d.results ?? []) if (!r.ok) byKey[r.key] = friendlyError(r.error ?? "");
+    message = d.error === "SimulationExpired" ? "A simulação expirou."
+      : d.error === "SimulationIdRequired" ? "É preciso simular antes de aplicar."
+      : d.error === "BatchPartialFailure" ? "Alguns ajustes não foram aplicados; os anteriores foram desfeitos."
+      : friendlyError(d.message ?? d.error ?? "");
+  } else if (Array.isArray(detail)) {
+    message = detail.map((x) => friendlyError(String((x as { msg?: string }).msg ?? x))).join("; ");
+  } else if (typeof detail === "string") {
+    message = friendlyError(detail);
+  }
+  return { message: message || fallback, byKey };
+}
+
+export function friendlyError(msg: string): string {
+  if (/VACATION_RETURN_AT/.test(msg) && /requir/i.test(msg)) return "Férias exige data de volta (defina na Casa).";
+  return msg;
 }

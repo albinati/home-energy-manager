@@ -13,7 +13,12 @@ import { Modal } from "../components/common/Modal";
 import { Link } from "wouter-preact";
 import { SettingField } from "../components/settings/SettingField";
 import { BatchBar } from "../components/settings/BatchBar";
-import { VISIBLE_GROUPS, ADVANCED_GROUPS, labelFor, filterAdvanced, modeLine } from "../components/settings/groups";
+import {
+  VISIBLE_GROUPS, ADVANCED_GROUPS, labelFor, filterAdvanced, modeLine, safetyFlagText, isGenericSummary,
+  parseApiError,
+} from "../components/settings/groups";
+import { toDatetimeLocal, isAwayPreset } from "../components/home/simple/logic";
+import { plannerTz } from "../lib/plannerTz";
 import type { SettingSpec, SimulateBatchResponse } from "../lib/types";
 import "../components/settings/settings.css";
 import "../components/settings/settings-advanced.css";
@@ -30,6 +35,8 @@ export default function Settings() {
   const [simResult, setSimResult] = useState<SimulateBatchResponse | null>(null);
   const [simOpen, setSimOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [advOpen, setAdvOpen] = useState(false);
+  const [applyErrors, setApplyErrors] = useState<Record<string, string>>({});
 
   const specByKey = useMemo(() => {
     const map = new Map<string, SettingSpec>();
@@ -37,9 +44,13 @@ export default function Settings() {
     return map;
   }, [settings.data]);
 
+  // Same reading as the Home ModeBox: aliases count as away, the stored return
+  // time is local wall-clock (the server lower-cases it, "t12:00:00z").
+  const presetVal = String(specByKey.get("OPTIMIZATION_PRESET")?.value ?? "");
   const modeText = modeLine(
-    specByKey.get("OPTIMIZATION_PRESET")?.value,
-    specByKey.get("VACATION_RETURN_AT")?.value,
+    isAwayPreset(presetVal) ? "vacation" : presetVal,
+    toDatetimeLocal(specByKey.get("VACATION_RETURN_AT")?.value),
+    plannerTz.value,
   );
 
   const onChange = (key: string, value: unknown) => {
@@ -97,7 +108,7 @@ export default function Settings() {
       setSimOpen(true);
     } catch (e) {
       const err = e as HemApiError;
-      toast.error("Falha na simulação", err.body || err.message);
+      toast.error("Falha na simulação", parseApiError(err.body, err.message).message);
     } finally {
       setBusy(false);
     }
@@ -106,27 +117,38 @@ export default function Settings() {
   const onApply = async () => {
     if (!simResult) return;
     setBusy(true);
+    setApplyErrors({});
     try {
       // Re-derive {KEY: proposed} from the simulated sub_actions (per-key
       // after is a single-entry {KEY: value} object).
-      const changes = Object.fromEntries(simResult.sub_actions.map((s) => [s.key, s.after[s.key]]));
+      const changes = Object.fromEntries(simResult.sub_actions.map((sa) => [sa.key, sa.after[sa.key]]));
       const result = await applyBatch(simResult.simulation_id, changes);
-      const failed = result.results.filter((r) => !r.ok);
-      if (failed.length > 0) {
-        toast.error(
-          `${failed.length} ajuste${failed.length === 1 ? "" : "s"} com falha`,
-          failed.map((f) => `${f.key}: ${f.error}`).join("\n"),
-        );
-      } else {
-        toast.success(`${result.results.length} ajuste${result.results.length === 1 ? "" : "s"} aplicado${result.results.length === 1 ? "" : "s"}`);
-        setPending({});
-      }
+      toast.success(`${result.results.length} ajuste${result.results.length === 1 ? "" : "s"} aplicado${result.results.length === 1 ? "" : "s"}`);
+      setPending({});
       setSimOpen(false);
       setSimResult(null);
       await settings.refresh();
     } catch (e) {
       const err = e as HemApiError;
-      toast.error("Falha ao aplicar", err.body || err.message);
+      if (err instanceof HemApiError && (err.status === 409 || err.status === 410) &&
+          /Simulation(Expired|IdRequired|IdMismatch)/.test(err.body || "")) {
+        // Sat past the 5 min TTL (or the id was used): re-simulate, show the fresh diff, ask again.
+        try {
+          const cleanChanges = Object.fromEntries(simResult.sub_actions.map((sa) => [sa.key, sa.after[sa.key]]));
+          setSimResult(await simulateBatch(cleanChanges));
+          toast.error("Simulação expirada", "Confira o resumo atualizado e confirme de novo.");
+        } catch (e2) {
+          const err2 = e2 as HemApiError;
+          toast.error("Falha na simulação", parseApiError(err2.body, err2.message).message);
+        }
+      } else {
+        // 409 BatchPartialFailure: per-key failures go under their fields; earlier keys were rolled back.
+        const info = parseApiError(err.body, err.message);
+        setApplyErrors(info.byKey);
+        if (Object.keys(info.byKey).length > 0) setSimOpen(false);
+        setSimResult(null);
+        toast.error("Falha ao aplicar", info.message);
+      }
     } finally {
       setBusy(false);
     }
@@ -164,6 +186,7 @@ export default function Settings() {
           spec={spec}
           plain={plain}
           pending={pending[spec.key]}
+          error={applyErrors[spec.key]}
           onChange={onChange}
           onRevert={onRevert}
         />
@@ -199,7 +222,7 @@ export default function Settings() {
         </div>
       ))}
 
-      <details class="settings-advanced" open={searching || undefined}>
+      <details class="settings-advanced" open={advOpen || searching} onToggle={(e) => setAdvOpen((e.currentTarget as HTMLDetailsElement).open)}>
         <summary>
           <span class="settings-advanced-title">Avançado</span>
           <span class="settings-advanced-sub">todos os outros ajustes ({advancedAll.length})</span>
@@ -216,7 +239,7 @@ export default function Settings() {
           />
           {advancedShown.length === 0 && <p class="muted">Nenhum ajuste encontrado.</p>}
           {advancedShown.map((g) => (
-            <details class="settings-adv-group" key={g.id} open={searching || undefined}>
+            <details class="settings-adv-group" key={g.id} open={searching ? true : undefined}>
               <summary>
                 <span class="settings-section-title">{g.title}</span>
                 <span class="settings-adv-count">{g.keys.length}</span>
@@ -273,14 +296,14 @@ export default function Settings() {
                     <td>
                       <div>{labelFor(d.key)}</div>
                       <div class="muted"><code>{d.key}</code></div>
-                      {d.human_summary && <div class="muted">{d.human_summary}</div>}
+                      {!isGenericSummary(d.human_summary, d.key) && <div class="muted">{d.human_summary}</div>}
                     </td>
                     <td>
                       <code class="from">{String(d.before[d.key])}</code>
                       <span class="arrow"><Icon name="chevron" size={12} /></span>
                       <code class="to">{String(d.after[d.key])}</code>
                       {specByKey.get(d.key)?.cron_reload && (
-                        <div class="muted">Recarrega o agendador</div>
+                        <div class="muted">Vale no próximo reinício</div>
                       )}
                     </td>
                   </tr>
@@ -291,7 +314,7 @@ export default function Settings() {
               <div class="sim-warnings">
                 <strong>Avisos:</strong>
                 <ul>
-                  {simResult.safety_flags.map((w, i) => <li key={i}>{w}</li>)}
+                  {simResult.safety_flags.map((w, i) => <li key={i}>{safetyFlagText(w)}</li>)}
                 </ul>
               </div>
             )}

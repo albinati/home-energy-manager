@@ -50,6 +50,17 @@
 .settings-adv-group > summary .settings-section-title { font-size: var(--font-md); }
 .settings-adv-sub { padding-bottom: var(--space-2); }
 
+.setting-field-danger,
+.setting-field-error {
+  font-size: var(--font-xs);
+  margin-top: var(--space-1);
+  line-height: 1.4;
+}
+.setting-field-danger { color: var(--warn); }
+.setting-field-error { color: var(--bad); }
+.setting-field-key { flex-wrap: wrap; }
+.setting-field-key code { overflow-wrap: anywhere; }
+
 @media (max-width: 600px) {
   .setting-field { grid-template-columns: 1fr; }
   .settings-mode-link { margin-left: 0; }

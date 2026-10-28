@@ -2,7 +2,7 @@ import type { SettingSpec } from "../../lib/types";
 import { NumberInput, Select, Toggle, TextInput, SliderInput } from "../common/Inputs";
 import { Pill } from "../common/Pill";
 import { Icon } from "../common/Icon";
-import { labelFor, unitFor, PLAIN_COPY } from "./groups";
+import { labelFor, unitFor, PLAIN_COPY, DANGER, enumLabel, isBoolEnum } from "./groups";
 import "./settings.css";
 
 interface SettingFieldProps {
@@ -12,6 +12,8 @@ interface SettingFieldProps {
   onRevert: (key: string) => void;
   /** Visible groups: plain-words hint instead of the developer description, key line hidden. */
   plain?: boolean;
+  /** Apply failure for this key (409 per-key result). */
+  error?: string;
 }
 
 function effectiveValue(spec: SettingSpec, pending: unknown | undefined): unknown {
@@ -34,13 +36,34 @@ function stepFor(spec: SettingSpec): number {
   return 0.1;
 }
 
-export function SettingField({ spec, pending, onChange, onRevert, plain }: SettingFieldProps) {
+export function SettingField({ spec, pending, onChange, onRevert, plain, error }: SettingFieldProps) {
   const value = effectiveValue(spec, pending);
   const dirty = hasPendingEdit(spec, pending);
   const hasRange = (spec.type === "int" || spec.type === "float") && spec.min != null && spec.max != null;
   const unit = unitFor(spec.key);
 
+  const boolEnum = isBoolEnum(spec.enum);
   const inputEl = (() => {
+    // The API sends enums as type "str" + an `enum` list (bool-like ones as "true"/"false").
+    if (spec.enum && spec.enum.length > 0) {
+      if (boolEnum) {
+        return (
+          <Toggle
+            value={String(value).toLowerCase() === "true"}
+            ariaLabel={labelFor(spec.key)}
+            onChange={(v) => onChange(spec.key, v ? "true" : "false")}
+          />
+        );
+      }
+      return (
+        <Select
+          value={String(value)}
+          options={spec.enum.map((v) => ({ value: v, label: enumLabel(spec.key, v) }))}
+          ariaLabel={labelFor(spec.key)}
+          onChange={(v) => onChange(spec.key, v)}
+        />
+      );
+    }
     switch (spec.type) {
       case "int":
       case "float":
@@ -99,7 +122,8 @@ export function SettingField({ spec, pending, onChange, onRevert, plain }: Setti
     }
   })();
 
-  const defaultDisplay = `${String(spec.default)}${unit ? " " + unit : ""}`;
+  const rawDefault = String(spec.default);
+  const defaultDisplay = `${spec.enum ? enumLabel(spec.key, rawDefault) : rawDefault}${unit ? " " + unit : ""}`;
 
   return (
     <div class={`setting-field${dirty ? " is-dirty" : ""}${hasRange ? " has-slider" : ""}`}>
@@ -137,6 +161,8 @@ export function SettingField({ spec, pending, onChange, onRevert, plain }: Setti
         {plain && PLAIN_COPY[spec.key]
           ? <div class="setting-field-desc">{PLAIN_COPY[spec.key].hint}</div>
           : spec.description && <div class="setting-field-desc">{spec.description}</div>}
+        {DANGER[spec.key] && <div class="setting-field-danger">{DANGER[spec.key]}</div>}
+        {error && <div class="setting-field-error" role="alert">{error}</div>}
       </div>
       <div class="setting-field-control">
         {inputEl}
