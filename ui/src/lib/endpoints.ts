@@ -1,4 +1,5 @@
 import { postJson, getJson, hemFetch } from "./api";
+import type { RecommendationsResponse } from "./recTypes";
 import type {
   CosyScorecardResponse,
   LwtLearningResponse,
@@ -417,3 +418,8 @@ export interface TuningSuggestionsResponse { weeks: number; suggestions: TuningS
 
 export const getTuningSuggestions = (weeks = 4) =>
   getJson<TuningSuggestionsResponse>(`/tuning/suggestions?weeks=${weeks}`);
+
+// Insights (#879 PR 2): the "O que fazer" list + week + house numbers. `end` is the
+// last day (YYYY-MM-DD, local) of the 7-day window; omitted = today.
+export const getRecommendations = (end?: string) =>
+  getJson<RecommendationsResponse>(`/insights/recommendations${end ? `?end=${encodeURIComponent(end)}` : ""}`);
