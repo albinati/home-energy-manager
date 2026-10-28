@@ -55,7 +55,7 @@
   font-weight: 700;
   box-shadow: var(--glow-accent);
 }
-.brand-dim { color: var(--text-mute); font-weight: 400; }
+
 /* Flexible gaps either side of the chrome period control (redesign P4c) —
  * they centre it between the brand and the tabs, and collapse the slot on
  * routes that don't render it. */
@@ -162,7 +162,6 @@
 
 /* Admin-locked route + control placeholders */
 .admin-locked h1 { font-size: var(--font-xl); }
-.heating-controls--locked { opacity: 0.85; }
 
 /* Footer */
 .footer {
@@ -248,9 +247,17 @@
     min-width: 0;
   }
   .topnav .nav-link.nav-link--text[href="/"] { display: none; }
-  /* Ajustes collapses to its icon so Journal stays reachable inside 390 px. */
+  /* Ajustes collapses to its icon so the whole row fits inside 390 px. */
   .topnav .nav-label { display: none; }
   .topnav .admin-badge-extra { display: none; }
 }
 
 @media (max-width: 640px) { .nav-clock { font-size: var(--font-xs); } }
+
+/* Narrow phones (390 px, admin: brand, Insights, Ajustes icon, clock, Admin,
+ * theme): the clock is the first thing to go so the Admin pill and the theme
+ * toggle are never cut at the right edge. */
+@media (max-width: 420px) {
+  .nav-clock { display: none; }
+  .topnav-inner { padding-left: var(--space-2); padding-right: var(--space-2); gap: var(--space-1); }
+}

@@ -36,7 +36,6 @@
   --cheap: #10b981;
   --standard: #6b7280;
   --peak: #f59e0b;
-  --peak-export: #ef4444;
   /* text ON a filled tariff band (>= 4.5:1 against its fill, per theme) */
   --on-cheap: #04120c;
   --on-standard: #ffffff;
@@ -150,7 +149,6 @@
   --cheap: #059669;
   --standard: #94a3b8;
   --peak: #d97706;
-  --peak-export: #dc2626;
   --on-cheap: #04120c;
   --on-standard: #0f172a;
   --on-peak: #1c1103;

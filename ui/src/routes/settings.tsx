@@ -252,6 +252,8 @@ export default function Settings() {
         </div>
       </details>
 
+      <p class="settings-journal-link"><Link href="/report">Registro de ações →</Link></p>
+
       <BatchBar
         pendingCount={pendingCount}
         busy={busy}

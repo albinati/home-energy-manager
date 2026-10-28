@@ -11,8 +11,8 @@ import { groupByDay, hhmm, relTime } from "../../lib/format";
 const RANGES = [
   { hours: 6, label: "6h" },
   { hours: 24, label: "24h" },
-  { hours: 72, label: "3 days" },
-  { hours: 168, label: "7 days" },
+  { hours: 72, label: "3 dias" },
+  { hours: 168, label: "7 dias" },
 ];
 
 // db.get_device_reading_log caps every response at this many newest rows; a
@@ -100,7 +100,7 @@ export function SensorJournal({ device, setDevice, hours, setHours }: SensorJour
   return (
     <div class="sensor-journal">
       {devices.error && (
-        <p class="report-error">Couldn't load sensor devices: {devices.error.message}</p>
+        <p class="report-error">Não foi possível carregar os sensores: {devices.error.message}</p>
       )}
       {deviceList.length > 0 && (
         <div class="sensor-devices">
@@ -113,7 +113,7 @@ export function SensorJournal({ device, setDevice, hours, setHours }: SensorJour
                 type="button"
                 class={`sensor-device${active ? " active" : ""}`}
                 aria-pressed={active}
-                title={manyDevices ? "Filter the log to this device" : d.device_key}
+                title={manyDevices ? "Filtrar o registro por este dispositivo" : d.device_key}
                 onClick={() => setDevice(active ? null : d.device_key)}
               >
                 <span class="sensor-device-room">
@@ -124,7 +124,7 @@ export function SensorJournal({ device, setDevice, hours, setHours }: SensorJour
                   {d.latest ? metricBits(d.latest).join(" · ") : "—"}
                 </span>
                 <span class="sensor-device-meta">
-                  {relTime(seenAt)} · {d.n_readings.toLocaleString()} readings
+                  {relTime(seenAt)} · {d.n_readings.toLocaleString()} leituras
                   {d.source ? ` · ${d.source}` : ""}
                 </span>
               </button>
@@ -135,8 +135,8 @@ export function SensorJournal({ device, setDevice, hours, setHours }: SensorJour
 
       <div class="report-filters">
         <p class="muted sensor-count">
-          {log.data ? `${log.data.n_rows.toLocaleString()} readings` : " "}
-          {device ? " · filtered" : ""}
+          {log.data ? `${log.data.n_rows.toLocaleString()} leituras` : " "}
+          {device ? " · filtrado" : ""}
         </p>
         <div class="report-range">
           {RANGES.map((r) => (
@@ -148,19 +148,19 @@ export function SensorJournal({ device, setDevice, hours, setHours }: SensorJour
 
       {truncated && (
         <p class="muted sensor-truncated">
-          Showing the newest {LOG_ROW_CAP.toLocaleString()} readings — older rows
-          in this window are cut off. Narrow the range or filter to one device
-          for full coverage.
+          Mostrando as {LOG_ROW_CAP.toLocaleString()} leituras mais recentes — as mais
+          antigas deste período foram cortadas. Reduza o período ou filtre por um
+          dispositivo para ver tudo.
         </p>
       )}
 
-      {log.loading && !log.data && <Spinner label="Loading sensor readings…" />}
-      {log.error && <p class="report-error">Couldn't load the sensor log: {log.error.message}</p>}
+      {log.loading && !log.data && <Spinner label="Carregando leituras…" />}
+      {log.error && <p class="report-error">Não foi possível carregar o registro dos sensores: {log.error.message}</p>}
       {!log.loading && !log.error && rows.length === 0 && (
         <p class="muted report-empty">
           {noDeviceEver
-            ? "No sensor has reported yet — readings appear here as soon as a device POSTs to /api/v1/sensors/indoor."
-            : "No readings in this window."}
+            ? "Nenhum sensor enviou dados ainda — as leituras aparecem aqui assim que um dispositivo enviar."
+            : "Nenhuma leitura neste período."}
         </p>
       )}
 
@@ -177,18 +177,18 @@ export function SensorJournal({ device, setDevice, hours, setHours }: SensorJour
                   <span class="report-dot sensor-dot--log" />
                   <span class="report-device">{deviceTitle(r)}</span>
                   <span class="report-action">
-                    {metricBits(r).join(" · ") || "no metrics"}
+                    {metricBits(r).join(" · ") || "sem métricas"}
                     {extras && <span class="report-hint"> · {extras}</span>}
                   </span>
                   <span class="report-meta">
                     {quality && (
-                      <Pill tone="warn" title="Quality flag reported by the device itself">
+                      <Pill tone="warn" title="Alerta de qualidade informado pelo próprio dispositivo">
                         {quality}
                       </Pill>
                     )}
                     {!r.captured_at && (
-                      <span class="report-trigger" title="Device sent no timestamp; showing server receipt time">
-                        server time
+                      <span class="report-trigger" title="O dispositivo não enviou horário; mostrando o horário de recebimento">
+                        hora do servidor
                       </span>
                     )}
                     {r.source && <span class="report-trigger">{r.source}</span>}

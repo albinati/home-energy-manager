@@ -90,28 +90,4 @@ export function relTime(iso: string | null | undefined): string {
   }
 }
 
-export function slotKindLabel(kind: string | null | undefined): string {
-  switch ((kind || "").toLowerCase()) {
-    case "negative": return "Negative price";
-    case "cheap": return "Cheap";
-    case "solar_charge": return "Solar charge";
-    case "solar_preheat": return "Solar pre-heat";
-    case "standard": return "Standard";
-    case "peak": return "Peak";
-    case "peak_export": return "Peak export";
-    case "idle": return "Idle";
-    default: return kind || "—";
-  }
-}
 
-export function slotKindColorVar(kind: string | null | undefined): string {
-  switch ((kind || "").toLowerCase()) {
-    case "negative": return "var(--neg-price)";
-    case "cheap":
-    case "solar_charge":
-    case "solar_preheat": return "var(--cheap)";
-    case "peak": return "var(--peak)";
-    case "peak_export": return "var(--peak-export)";
-    default: return "var(--standard)";
-  }
-}

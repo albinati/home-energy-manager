@@ -65,3 +65,5 @@
   .setting-field { grid-template-columns: 1fr; }
   .settings-mode-link { margin-left: 0; }
 }
+
+.settings-journal-link { margin: var(--space-4) 0; font-size: var(--font-sm); }
