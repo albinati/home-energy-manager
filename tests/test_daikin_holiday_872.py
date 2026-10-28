@@ -212,7 +212,7 @@ def test_exit_transition_powers_on_then_replans(monkeypatch) -> None:
     assert calls == [
         ("set_power", True),
         ("set_tank_power", True),
-        ("mpc", {"bypass_cooldown": True, "trigger_reason": "holiday_end"}),
+        ("mpc", {"force_write_devices": True, "bypass_cooldown": True, "trigger_reason": "holiday_end"}),
     ]
     logs = db.get_action_logs(device="daikin", action="holiday_mode")
     assert logs[0]["params"]["event"] == "exited"
@@ -257,8 +257,7 @@ def test_enter_from_inactive(monkeypatch) -> None:
 
 def test_transition_kill_switch_and_missing_keys(monkeypatch) -> None:
     runner, calls = _patch_runner(monkeypatch)
-    db.set_kv("daikin_holiday_active", json.dumps({"climate": True, "tank": True}))
-    # payload without the keys: no signal
+    # no stored state: missing keys and kill switch are silent no-ops
     assert runner._holiday_transition_tick([DaikinDevice(id="gw", name="x")]) is None
     monkeypatch.setattr(config, "DAIKIN_HOLIDAY_DETECT_ENABLED", False)
     assert runner._holiday_transition_tick([_mk_dev(climate_on=False, tank_on=False)]) is None

@@ -2009,6 +2009,7 @@ def solve_lp(
     plan = LpPlan(
         ok=status == "Optimal",
         status=status,
+        daikin_state=daikin_state,
         objective_pence=0.0,
         peak_threshold_pence=peak_thr,
         cheap_threshold_pence=cheap_thr,

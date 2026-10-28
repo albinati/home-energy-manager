@@ -2161,73 +2161,116 @@ def _maybe_fire_import_overshoot(now_utc: datetime) -> None:
 
 
 def _holiday_transition_tick(devices: list[Any], *, trigger: str = "heartbeat") -> str | None:
-    """#872 — detect Daikin holiday entry/exit on the CACHED payload (zero API reads).
+    """#872 - detect Daikin holiday entry/exit on the CACHED payload (zero API reads).
 
-    Persists ``kv_state daikin_holiday_active`` ({climate, tank}); on a change writes
-    ``action_log`` ``holiday_mode`` + ONE notification. On EXIT: when control is active
-    and not read-only, power the unit back on if the cached ``onOffMode`` is still off
+    Persists ``kv_state daikin_holiday_active`` ({climate, tank}, compared PER POINT);
+    on a change writes ``action_log`` ``holiday_mode`` (+ per-point delta) and ONE
+    notification per event kind. On EXIT of any point: when control is active and not
+    read-only, power THAT point back on if its cached ``onOffMode`` is still off
     (``leavingWaterOffset`` is read-only with the zone off, so LWT rows would 400
-    forever), then re-solve (`holiday_end`). Returns "entered" / "exited" / None.
-    Never raises.
+    forever), then re-solve ONCE (`holiday_end`, dispatching Fox + Daikin). If the signal
+    disappears (kill switch off / payload without the keys) while a holiday is stored,
+    an ``exited`` event is written and the state cleared so nothing sticks "active".
+    Returns "entered" / "exited" / None. Never raises.
     """
     try:
-        if not config.DAIKIN_HOLIDAY_DETECT_ENABLED or not devices:
-            return None
-        dev = devices[0]
-        climate = getattr(dev, "holiday_active", None)
-        tank = getattr(dev, "tank_holiday_active", None)
-        if climate is None and tank is None:
-            return None  # payload carries no holiday keys: no signal, no transition
-        cur_any = bool(climate) or bool(tank)
+        prev: dict[str, Any] = {}
         prev_raw = db.get_kv("daikin_holiday_active")
-        prev_any: bool | None = None
         if prev_raw:
             try:
                 _p = json.loads(prev_raw)
-                prev_any = bool(_p.get("climate")) or bool(_p.get("tank"))
+                prev = _p if isinstance(_p, dict) else {}
             except Exception:
-                prev_any = None
+                prev = {}
+        prev_active = bool(prev.get("climate")) or bool(prev.get("tank"))
+
+        dev = devices[0] if devices else None
+        signal = (
+            config.DAIKIN_HOLIDAY_DETECT_ENABLED
+            and dev is not None
+            and (
+                getattr(dev, "holiday_active", None) is not None
+                or getattr(dev, "tank_holiday_active", None) is not None
+            )
+        )
+        if not signal:
+            # Cold cache (no devices) is not evidence; kill switch off / keys gone is.
+            if prev_active and (not config.DAIKIN_HOLIDAY_DETECT_ENABLED or dev is not None):
+                db.log_action(
+                    device="daikin",
+                    action="holiday_mode",
+                    params={
+                        "event": "exited", "climate": False, "tank": False, "window": None,
+                        "reason": "detect_disabled" if not config.DAIKIN_HOLIDAY_DETECT_ENABLED else "no_signal",
+                    },
+                    result="ok",
+                    trigger=trigger,
+                )
+                db.set_kv("daikin_holiday_active", "")
+                return "exited"
+            return None
+
+        cur = {
+            "climate": getattr(dev, "holiday_active", None),
+            "tank": getattr(dev, "tank_holiday_active", None),
+        }
+        entered = [k for k in ("climate", "tank") if cur[k] is True and prev.get(k) is not True]
+        exited = [k for k in ("climate", "tank") if cur[k] is False and prev.get(k) is True]
         db.set_kv(
             "daikin_holiday_active",
-            json.dumps({"climate": bool(climate), "tank": bool(tank)}),
+            json.dumps({k: (cur[k] if cur[k] is not None else prev.get(k)) for k in ("climate", "tank")}),
         )
-        if prev_any is None and not cur_any:
+        if not entered and not exited:
             return None
-        if bool(prev_any) == cur_any:
-            return None
-        event = "entered" if cur_any else "exited"
         window = getattr(dev, "holiday_window", None)
-        db.log_action(
-            device="daikin",
-            action="holiday_mode",
-            params={"event": event, "climate": bool(climate), "tank": bool(tank), "window": window},
-            result="ok",
-            trigger=trigger,
+        active_ctl = (
+            (config.DAIKIN_CONTROL_MODE or "").strip().lower() == "active"
+            and not config.OPENCLAW_READ_ONLY
         )
         try:
             from ..notifier import notify_action_confirmation
+        except Exception:  # pragma: no cover
+            notify_action_confirmation = None  # type: ignore[assignment]
 
+        def _notify(msg: str) -> None:
+            try:
+                if notify_action_confirmation:
+                    notify_action_confirmation(msg)
+            except Exception as exc:  # pragma: no cover - notify must not break the tick
+                logger.debug("holiday notify failed: %s", exc)
+
+        for event, pts in (("entered", entered), ("exited", exited)):
+            if not pts:
+                continue
+            db.log_action(
+                device="daikin",
+                action="holiday_mode",
+                params={
+                    "event": event, "climate": bool(cur["climate"]), "tank": bool(cur["tank"]),
+                    "changed": pts, "window": window,
+                },
+                result="ok",
+                trigger=trigger,
+            )
             if event == "entered":
-                notify_action_confirmation(
-                    "Daikin holiday mode detected — HEM stops writing to the unit and plans zero heat-pump draw until it ends."
+                _notify(
+                    "Daikin holiday mode detected - HEM stops writing to the unit and plans zero heat-pump draw until it ends."
                 )
+            elif active_ctl:
+                _notify("Daikin holiday mode ended - HEM resumes control and re-plans the recovery.")
             else:
-                notify_action_confirmation(
-                    "Daikin holiday mode ended — HEM resumes control and re-plans the recovery."
+                _notify(
+                    "Daikin holiday mode ended - the firmware resumed; HEM is observing only "
+                    "(no power-on, no dispatch in passive/read-only)."
                 )
-        except Exception as exc:  # pragma: no cover — notify must not break the tick
-            logger.debug("holiday notify failed: %s", exc)
-        if event == "exited":
-            if (
-                (config.DAIKIN_CONTROL_MODE or "").strip().lower() == "active"
-                and not config.OPENCLAW_READ_ONLY
-            ):
+        if exited:
+            if active_ctl:
                 powered: dict[str, str] = {}
                 for label, is_on, fn in (
                     ("climate", getattr(dev, "is_on", None), daikin_service.set_power),
                     ("tank", getattr(dev, "tank_on", None), daikin_service.set_tank_power),
                 ):
-                    if is_on is False:
+                    if label in exited and is_on is False:
                         try:
                             fn(True, actor="heartbeat")
                             powered[label] = "ok"
@@ -2243,12 +2286,14 @@ def _holiday_transition_tick(devices: list[Any], *, trigger: str = "heartbeat") 
                         trigger=trigger,
                     )
             try:
+                # force_write_devices: Fox upload + Daikin rows, so the battery is
+                # prepared for the recovery (LP_MPC_WRITE_DEVICES is off by default).
                 bulletproof_mpc_job(
-                    bypass_cooldown=True, trigger_reason="holiday_end",
+                    force_write_devices=True, bypass_cooldown=True, trigger_reason="holiday_end",
                 )
             except Exception as exc:
                 logger.warning("holiday_end MPC trigger failed: %s", exc)
-        return event
+        return "exited" if exited else "entered"
     except Exception as exc:
         logger.debug("holiday transition tick failed (non-fatal): %s", exc)
         return None

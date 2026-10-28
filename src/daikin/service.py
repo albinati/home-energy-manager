@@ -595,7 +595,7 @@ def holiday_state(max_age_seconds: float | None = None) -> dict:
     if not config.DAIKIN_HOLIDAY_DETECT_ENABLED:
         return out
     try:
-        res = get_cached_devices(allow_refresh=False)
+        res = get_cached_devices(allow_refresh=False, actor="holiday_state")
     except Exception:
         return out
     age = res.age_seconds

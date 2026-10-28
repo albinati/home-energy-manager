@@ -492,6 +492,8 @@ def _holiday_day(a: datetime, b: datetime) -> bool:
     record the heartbeat writes — a house cooling on purpose is not a comfort or
     tank-floor failure. Never raises.
     """
+    if not config.DAIKIN_HOLIDAY_DETECT_ENABLED:
+        return False  # no `exited` is written while detection is off; never stick True
     try:
         rows = db.get_action_logs(
             device="daikin", action="holiday_mode",

@@ -87,10 +87,7 @@ def detect_user_override(
 
     # #872 — holiday switches onOffMode off (and freezes the offset) exactly like a
     # user gesture would; it is the firmware, not the owner, so never an override.
-    if config.DAIKIN_HOLIDAY_DETECT_ENABLED and (
-        getattr(dev, "holiday_active", None) is True
-        or getattr(dev, "tank_holiday_active", None) is True
-    ):
+    if holiday_blocks_params(dev, params):
         return False, None
 
     tank_tol = float(config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C)

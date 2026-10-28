@@ -155,8 +155,9 @@ payload (zero extra quota, lag up to `DAIKIN_HEARTBEAT_REFRESH_SECONDS`).
   `None`, no gate fires (bit-for-bit pre-#872).
 - **Gates** (each point's own flag): `service._passive_guard` (`DaikinError("[holiday] ...")`),
   `apply_scheduled_daikin_params` (row logged `holiday_skip`, `error_msg="holiday_mode"`, only when
-  the params touch a flagged point), the reconciler (rows stay PENDING; ONE `holiday_mode_skip` per
-  dispatch; tank drift / divergence / warmup-settle / neg-boost / shower-drawdown / morning-cold
+  the params touch a flagged point), the reconciler (rows stay PENDING inside their window, one
+  `holiday_mode_skip` per held row; a row whose window ends during holiday completes silently with
+  `error_msg="holiday_mode"`, no "window missed" warning; tank drift / divergence / warmup-settle / neg-boost / shower-drawdown / morning-cold
   checks and the LWT drift check are skipped per point), `write_daikin_from_lp_plan` (both points
   off: clear leftovers + write nothing; one point off: rows are written and the reconciler holds that
   point's rows), cold/warm backstops + `emergency_tick` (counters HOLD), `detect_user_override`
@@ -169,10 +170,15 @@ payload (zero extra quota, lag up to `DAIKIN_HEARTBEAT_REFRESH_SECONDS`).
   (so no comfort/ceiling/emergency slack), no shower floors, no DHW block. One point: only that
   draw is pinned to 0 (W3 off when the climate zone is off).
 - **Transitions** (`runner._holiday_transition_tick`, right after the cached refresh): `kv_state`
-  `daikin_holiday_active`; on change `action_log` `holiday_mode` `{event: entered|exited, climate,
-  tank, window}` + one notification. On EXIT: with control active and not read-only, cached
-  `onOffMode` still off -> `set_power(True)` / `set_tank_power(True)` (`holiday_exit_power_on`), then
-  `bulletproof_mpc_job(bypass_cooldown=True, trigger_reason="holiday_end")` (always).
+  `daikin_holiday_active` ({climate, tank}, compared PER POINT); on change `action_log` `holiday_mode`
+  `{event: entered|exited, climate, tank, changed, window}` + one notification per event kind. On EXIT of
+  ANY point: with control active and not read-only, that point's cached `onOffMode` still off ->
+  `set_power(True)` / `set_tank_power(True)` (`holiday_exit_power_on`), then ONE
+  `bulletproof_mpc_job(force_write_devices=True, bypass_cooldown=True, trigger_reason="holiday_end")`
+  (always; dispatches BOTH devices - Fox upload + Daikin rows - so the battery is prepared for the
+  recovery). Passive/read-only: no power-on, and the notification says HEM is only observing. If the
+  signal vanishes while a holiday is stored (kill switch off, payload without the keys) an `exited`
+  event is written (`reason`) and the state cleared, so the scorecard flag never sticks.
 - **Surfaces**: `space_heating_gate_state()["daikin_holiday"]`, `/api/v1/daikin/status` `holiday`,
   MCP status `holiday`, brief `Mode:` says `holiday`; the Cosy scorecard payload carries `holiday`
   (from the `holiday_mode` events) and skips the tank-floor `notify_risk` on those days.

@@ -124,9 +124,9 @@ _LWT_DRIFT_NOTIFIED: bool = False
 # 2026-06-07 — dedup for the legionella tank stand-off skip log (one telemetry
 # row per suppressed action_schedule row per process, not per 5-min tick).
 _LEGIONELLA_STANDOFF_LOGGED: set[int] = set()
-# #872 — held-row id sets already logged as `holiday_mode_skip` (one log per dispatch:
-# a new dispatch writes new row ids, so a new key).
-_HOLIDAY_SKIP_LOGGED: set[tuple[int, ...]] = set()
+# #872 - row ids already logged as `holiday_mode_skip` (one log per held row, like the
+# legionella stand-off; a new dispatch writes new row ids).
+_HOLIDAY_SKIP_LOGGED: set[int] = set()
 
 
 def _holiday_on(dev: Any, point: str) -> bool:
@@ -727,6 +727,12 @@ def _reconcile_daikin_actions(
             continue
 
         if now_utc >= end:
+            if status == "pending" and holiday_blocks_params(dev, params):
+                # #872: held by holiday mode the whole window - complete quietly, no
+                # "window missed" warning (the firmware owned the unit).
+                logger.debug("action_schedule[%s] %s window ended during holiday", aid, atype)
+                db.mark_action(aid, "completed", error_msg="holiday_mode")
+                continue
             if status == "pending":
                 # Pending past end-time = silently skipped (heartbeat missed
                 # the window). Visibly warn so this class of bug surfaces next
@@ -1139,10 +1145,11 @@ def _reconcile_daikin_actions(
     # RESTORE_PRESERVE_LEAD_MINUTES guard is the primary fix, this is the
     # belt-and-braces backstop for any drift mechanism we haven't yet
     # imagined.
-    if _holiday_held:
-        key = tuple(sorted(_holiday_held))
-        if key not in _HOLIDAY_SKIP_LOGGED:
-            _HOLIDAY_SKIP_LOGGED.add(key)
+    _new_held = [r for r in _holiday_held if r not in _HOLIDAY_SKIP_LOGGED]
+    if _new_held:
+        _HOLIDAY_SKIP_LOGGED.update(_new_held)
+        key = tuple(sorted(_new_held))
+        if True:
             try:
                 db.log_action(
                     device="daikin",
