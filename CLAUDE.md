@@ -180,13 +180,21 @@ payload (zero extra quota, lag up to `DAIKIN_HEARTBEAT_REFRESH_SECONDS`).
   signal vanishes while a holiday is stored (kill switch off, payload without the keys) an `exited`
   event is written (`reason`) and the state cleared, so the scorecard flag never sticks.
 - **Telemetry integral while OFF (#880)**: `daikin_telemetry` rows now carry nullable `is_on` /
-  `tank_on` / `holiday_active` / `tank_holiday_active` (written by `_persist_daikin_telemetry_live`).
+  `tank_on` / `holiday_active` / `tank_holiday_active` (written by `_persist_daikin_telemetry_live`
+  with an `isinstance(bool)` guard; `estimate` rows inherit them from the live seed).
   `compute_daikin_2hourly_telemetry` zeroes the space draw when both ends of an interval are known
-  climate-off (holiday or `is_on=0`) and the DHW draw when known tank-off; a bucket whose every
-  interval was fully off is written 0 kWh with `source='telemetry_integral_off'` (measured off, not
-  "no data"). Same overwrite rules as `telemetry_integral`; `onecta_cache` stays authoritative; NULL
-  (historical) rows keep the weather-curve model bit-for-bit. Consumers that gate on
-  `startswith("onecta")` (LWT learning) exclude it automatically.
+  climate-off (holiday or `is_on=0`) and the DHW draw when known tank-off; an on->off boundary
+  interval (one end known-on, the other known-off) integrates HALF the draw (residual: the switch-off
+  instant inside it is unknown); NULL<->off keeps the model. A bucket whose every interval was fully
+  off is written 0 kWh with `source='telemetry_integral_off'` (measured off, not "no data"; slot
+  dicts gained an `off` key). Same overwrite rules as `telemetry_integral`; `onecta_cache` stays
+  authoritative, and a metered 0 against an off bucket is kept (`onecta_agrees_off`). NULL
+  (historical) rows keep the weather-curve model bit-for-bit. The integral acts on the PERSISTED flags
+  regardless of `DAIKIN_HOLIDAY_DETECT_ENABLED` (a measurement of on/off state, not a control gate).
+  **Learners:** holiday / unit-off days are excluded from live tau (`select_decay_episodes`), UA-coast
+  and pump-off-delta fits (`lwt_learning.exclude_unit_off`: `telemetry_integral_off` buckets plus local
+  days covered by a `holiday_mode` entered..exited window, helper `thermal_learning.holiday_days`);
+  unoccupied nights have no internal gains and would bias tau short. Analyse them offline.
 - **Surfaces**: `space_heating_gate_state()["daikin_holiday"]`, `/api/v1/daikin/status` `holiday`,
   MCP status `holiday`, brief `Mode:` says `holiday`; the Cosy scorecard payload carries `holiday`
   (from the `holiday_mode` events) and skips the tank-floor `notify_risk` on those days.
@@ -930,6 +938,8 @@ Tomorrow when local time >= 16:00 and tomorrow has scheduled rows).
   `plan_updated_at_utc` as the plan token, `written_at_utc` stays the first write);
   `offset_written` is recorded after the quota-cap trim (NULL for dropped windows).
   Pruned after `LWT_LEARNING_RETENTION_DAYS` (120).
+- **Holiday / unit-off days (#880)**: excluded from live tau, UA-coast and pump-off-delta fits (and the
+  joint fit's rows); analyse them offline. See the Daikin holiday section.
 - **Reading the estimates (#843)**: coast-only data identifies **τ = C/UA only**.
   `ua_est_w_per_k` / `ua_est_night_w_per_k` (API + payload: `ua_from_tau_scaled_*`,
   `ua_est_circular: true`) is `C × decay rate` with C = τ × UA_pin (#841), so it returns ≈ the

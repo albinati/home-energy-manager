@@ -1574,7 +1574,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                strftime('%Y-%m-%dT%H:%M:%fZ', fetched_at, 'unixepoch') AS fetched_at_iso,
                fetched_at AS fetched_at_epoch,
                source, tank_temp_c, indoor_temp_c, outdoor_temp_c,
-               tank_target_c, lwt_actual_c, mode, weather_regulation
+               tank_target_c, lwt_actual_c, mode, weather_regulation,
+               is_on, tank_on, holiday_active, tank_holiday_active
            FROM daikin_telemetry"""
     )
 

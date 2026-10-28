@@ -173,10 +173,10 @@ def _persist_daikin_telemetry_live(devices: list[DaikinDevice]) -> None:
             "mode": d0.operation_mode,
             "weather_regulation": 1 if d0.weather_regulation_enabled else 0,
             # #880: None stays NULL (unknown) so the integral keeps the model.
-            "is_on": getattr(d0, "is_on", None),
-            "tank_on": getattr(d0, "tank_on", None),
-            "holiday_active": getattr(d0, "holiday_active", None),
-            "tank_holiday_active": getattr(d0, "tank_holiday_active", None),
+            **{
+                k: (getattr(d0, k, None) if isinstance(getattr(d0, k, None), bool) else None)
+                for k in ("is_on", "tank_on", "holiday_active", "tank_holiday_active")
+            },
         })
     except Exception as e:
         logger.debug("daikin_telemetry live persistence failed: %s", e)
@@ -548,6 +548,10 @@ def get_lp_state_cached_or_estimated(
             "tank_temp_c": est.tank_temp_c,
             "indoor_temp_c": est.indoor_temp_c,
             "outdoor_temp_c": est.outdoor_temp_c,
+            # #880: an estimate row inherits the live seed's on/off + holiday flags, so
+            # it cannot flip a run of known-off intervals back to the weather-curve model.
+            **{k: latest_live.get(k) for k in
+               ("is_on", "tank_on", "holiday_active", "tank_holiday_active")},
         })
         logger.info(
             "Daikin LP state: estimator fallback "
@@ -833,6 +837,7 @@ def sync_daikin_daily(date_obj) -> dict | None:
                 # the gap to its neighbours. Cheap and good enough for an
                 # historic estimate.
                 total_kwh = 0.0
+                all_off = all(_sample_climate_off(r) for r in rows)  # #880
                 for i, r in enumerate(rows):
                     out = r.get("outdoor_temp_c")
                     if out is None or _sample_climate_off(r):  # #880
@@ -849,6 +854,9 @@ def sync_daikin_daily(date_obj) -> dict | None:
                 if total_kwh > 0:
                     kwh = round(total_kwh, 3)
                     source = "telemetry_integral"
+                elif all_off:
+                    kwh = 0.0  # #880: measured OFF all day, not "no data"
+                    source = "telemetry_integral_off"
         except Exception as exc:
             logger.debug("sync_daikin_daily telemetry-integral path failed for %s: %s", iso, exc)
 
@@ -913,6 +921,26 @@ def _sample_climate_off(r: dict) -> bool:
 def _sample_tank_off(r: dict) -> bool:
     """#880: same for the DHW tank (tank holiday or tank onOffMode=off)."""
     return r.get("tank_holiday_active") == 1 or r.get("tank_on") == 0
+
+
+def _sample_climate_on(r: dict) -> bool:
+    """#880: the sample KNOWS the climate zone was running (not off, flag present)."""
+    return not _sample_climate_off(r) and (r.get("is_on") == 1 or r.get("holiday_active") == 0)
+
+
+def _sample_tank_on(r: dict) -> bool:
+    return not _sample_tank_off(r) and (r.get("tank_on") == 1 or r.get("tank_holiday_active") == 0)
+
+
+def _off_factor(a_off: bool, b_off: bool, a_on: bool, b_on: bool) -> float:
+    """1.0 = model as before; 0.0 = both ends known off; 0.5 = on->off / off->on
+    boundary interval (the unit switched off somewhere inside it). NULL<->off keeps
+    the model (unknown end), so historical rows stay bit-for-bit."""
+    if a_off and b_off:
+        return 0.0
+    if (a_off and b_on) or (a_on and b_off):
+        return 0.5
+    return 1.0
 
 
 def compute_daikin_2hourly_telemetry(
@@ -999,8 +1027,12 @@ def compute_daikin_2hourly_telemetry(
 
         # #880: both ends of the interval report the climate zone / tank OFF
         # (holiday or onOffMode=off) -> that draw is a measured 0, not the model.
-        climate_off = _sample_climate_off(a) and _sample_climate_off(b)
-        tank_off = _sample_tank_off(a) and _sample_tank_off(b)
+        climate_f = _off_factor(_sample_climate_off(a), _sample_climate_off(b),
+                                _sample_climate_on(a), _sample_climate_on(b))
+        tank_f = _off_factor(_sample_tank_off(a), _sample_tank_off(b),
+                             _sample_tank_on(a), _sample_tank_on(b))
+        climate_off = climate_f == 0.0
+        tank_off = tank_f == 0.0
 
         # Space heating: physics function already returns 0 above the
         # weather-curve cutoff, so it naturally handles "summer day,
@@ -1013,7 +1045,7 @@ def compute_daikin_2hourly_telemetry(
             mode_off = (mode_a in ("off", "standby")) and (mode_b in ("off", "standby"))
             if not mode_off and not climate_off:
                 space_kw = float(get_daikin_heating_kw(mid_outdoor))
-                space_kwh = space_kw * dt_h
+                space_kwh = space_kw * dt_h * (0.5 if climate_f == 0.5 else 1.0)
 
         # DHW: positive tank-temp ramp + standing-loss replacement (the heat
         # pump fights losses even when the observed tank temp is flat).
@@ -1042,7 +1074,7 @@ def compute_daikin_2hourly_telemetry(
                 # LWT is higher than space heat, so COP is worse).
                 space_cop = cop_at_temperature(cop_curve, mid_outdoor) if mid_outdoor is not None else 3.0
                 dhw_cop = max(1.5, space_cop * dhw_penalty)
-                dhw_kwh = thermal_kwh / dhw_cop
+                dhw_kwh = thermal_kwh / dhw_cop * (0.5 if tank_f == 0.5 else 1.0)
 
         mid_epoch = (float(a["fetched_at"]) + float(b["fetched_at"])) / 2.0
         bi = _bucket_of(mid_epoch)
@@ -1126,7 +1158,11 @@ def sync_daikin_2hourly_telemetry(date_obj) -> dict:
             reason = "refresh_telemetry"
         elif ex["source"] == "onecta_cache":
             onecta_int = ex["kwh_total"]
-            if onecta_int == 0 and tele_total > 0.2:
+            if slot.get("off") and onecta_int == 0:
+                # #880: the metered counter agrees the unit was off; keep the measured
+                # provenance (a metered zero must stay `onecta_cache`).
+                reason = "onecta_agrees_off"
+            elif onecta_int == 0 and tele_total > 0.2:
                 write = True
                 reason = "onecta_zero_telemetry_positive"
             elif abs(onecta_int - tele_total) < 0.5:

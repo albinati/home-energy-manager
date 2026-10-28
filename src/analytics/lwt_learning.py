@@ -153,6 +153,31 @@ def fill_realised(day: date, tz: ZoneInfo | None = None) -> int:
     return n
 
 
+def exclude_unit_off(
+    rows: list[dict[str, Any]], tz: ZoneInfo, days: set[date] | None = None,
+) -> list[dict[str, Any]]:
+    """#880 - drop rows from the LIVE coast / pump-off fits when the unit was OFF:
+    slots whose heating figure is ``telemetry_integral_off`` and every slot on a
+    local day covered by an Onecta holiday window (``thermal_learning.holiday_days``).
+    Unoccupied nights have no internal gains and would bias tau/UA; analyse offline."""
+    if days is None:
+        ts_ = [t for t in (_ts(r) for r in rows) if t is not None]
+        if ts_:
+            from .thermal_learning import holiday_days
+            days = holiday_days(min(ts_).astimezone(tz).date(), max(ts_).astimezone(tz).date(), tz)
+        else:
+            days = set()
+    out = []
+    for r in rows:
+        if str(r.get("heating_kwh_source") or "") == "telemetry_integral_off":
+            continue
+        t = _ts(r)
+        if days and t is not None and t.astimezone(tz).date() in days:
+            continue
+        out.append(r)
+    return out
+
+
 def _is_coast(r: dict[str, Any]) -> bool:
     """A coast slot = the pump really stayed (nearly) off: measured heating
     ``None`` or <= COAST_HEATING_KWH_EPS, AND (negative device offset OR measured
@@ -897,6 +922,7 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
         c = float(get_building_thermal_mass_kwh_per_k())
     except Exception:
         c = 16.5
+    rows = exclude_unit_off(rows, tz)  # #880: live fits skip unit-off / holiday days
     ua, n_coast = estimate_ua_w_per_k(rows, c, tz=tz)
     ua_night, n_coast_night = estimate_ua_w_per_k(rows, c, night_only=True, tz=tz)
     n_heat = sum(1 for r in rows if r.get("heating_kwh") is not None
@@ -1204,7 +1230,7 @@ def _joint_for_day(day: date, tz: ZoneInfo) -> dict[str, Any]:
     try:
         start = day_slots_utc(day - timedelta(days=JOINT_WINDOW_DAYS - 1), tz)[0]
         end = day_slots_utc(day, tz)[-1] + timedelta(minutes=SLOT_MIN)
-        rows = db.get_lwt_learning_rows(_z(start), _z(end))
+        rows = exclude_unit_off(db.get_lwt_learning_rows(_z(start), _z(end)), tz)  # #880
         try:
             from .thermal_learning import get_building_tau_hours
             tau = float(get_building_tau_hours())
