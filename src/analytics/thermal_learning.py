@@ -215,6 +215,60 @@ def sanitize_phantom_heating(
     return out, n_zeroed
 
 
+def holiday_days(start: date, end: date, tz: ZoneInfo | None = None) -> set[date]:
+    """#880 - local days in [start, end] touched by an Onecta holiday window
+    (``holiday_mode`` ``entered`` ... ``exited`` events in ``action_log``, #872).
+
+    The live thermal / LWT learners EXCLUDE these days: the unit is OFF and the
+    house is unoccupied (no internal gains), so the cooling is not a clean decay
+    sample for the occupied house. Holiday nights are analysed offline. An open
+    window (entered, never exited) runs to ``end``. Never raises (-> empty set).
+    """
+    import json
+
+    from .. import db
+
+    try:
+        tz = tz or ZoneInfo(str(getattr(config, "BULLETPROOF_TIMEZONE", "UTC")))
+        a = datetime.combine(start, time(0, 0), tzinfo=tz).astimezone(UTC)
+        b = datetime.combine(end + timedelta(days=1), time(0, 0), tzinfo=tz).astimezone(UTC)
+        rows = db.get_action_logs(
+            device="daikin", action="holiday_mode",
+            since=(a - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ"), limit=500,
+        )
+        evs: list[tuple[datetime, str]] = []
+        for r in rows:
+            prm = r.get("params")
+            if isinstance(prm, str):
+                prm = json.loads(prm)
+            ts = datetime.fromisoformat(str(r["timestamp"]).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            evs.append((ts, str((prm or {}).get("event"))))
+        evs.sort(key=lambda x: x[0])
+        windows: list[tuple[datetime, datetime]] = []
+        opened: datetime | None = None
+        for ts, ev in evs:
+            if ev == "entered" and opened is None:
+                opened = ts
+            elif ev == "exited" and opened is not None:
+                windows.append((opened, ts))
+                opened = None
+        if opened is not None:
+            windows.append((opened, b))
+        out: set[date] = set()
+        d = start
+        while d <= end:
+            ds = datetime.combine(d, time(0, 0), tzinfo=tz).astimezone(UTC)
+            de = datetime.combine(d + timedelta(days=1), time(0, 0), tzinfo=tz).astimezone(UTC)
+            if any(ws < de and we > ds for ws, we in windows):
+                out.add(d)
+            d += timedelta(days=1)
+        return out
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def _blocked_intervals(
     consumption_rows: list[dict[str, Any]],
     offset_windows: list[tuple[str, str]],
@@ -242,7 +296,9 @@ def _blocked_intervals(
             continue
         heating = float(r.get("kwh_heating") or 0.0)
         dhw = float(r.get("kwh_dhw") or 0.0)
-        if heating > heating_contam_kwh or dhw > dhw_contam_kwh:
+        # #880: a bucket MEASURED off (unit off / holiday) is not a clean decay sample.
+        unit_off = str(r.get("source") or "") == "telemetry_integral_off"
+        if unit_off or heating > heating_contam_kwh or dhw > dhw_contam_kwh:
             ws, we = _bucket_window_utc(d, b, tz)
             windows.append((ws, we + tail))
     for s, e in offset_windows:
@@ -310,6 +366,7 @@ def select_decay_episodes(
     heating_contam_kwh: float = 0.1,
     dhw_contam_kwh: float = 0.8,
     bin_minutes: int = 30,
+    excluded_days: set[date] | None = None,
 ) -> list[DecayEpisode]:
     """PURE selector: overnight, gap-free, composition-stable, heating-free
     (with settle tail), cool-enough decay segments from raw sensor readings.
@@ -322,6 +379,13 @@ def select_decay_episodes(
         heating_contam_kwh=heating_contam_kwh, dhw_contam_kwh=dhw_contam_kwh,
         settle_hours=settle_hours,
     )
+    # #880: holiday / unit-off local days are excluded wholesale.
+    for d_ in sorted(excluded_days or ()):
+        blocked.append((
+            datetime.combine(d_, time(0, 0), tzinfo=tz).astimezone(UTC),
+            datetime.combine(d_ + timedelta(days=1), time(0, 0), tzinfo=tz).astimezone(UTC),
+        ))
+    blocked.sort()
     outdoor_series = sorted(outdoor_series)
     outdoor_times = [ts for ts, _ in outdoor_series]
 
@@ -621,6 +685,7 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
         min_delta_t_c=float(getattr(config, "THERMAL_TAU_MIN_DELTA_T_C", 5.0)),
         heating_contam_kwh=float(getattr(config, "THERMAL_HEATING_CONTAM_KWH", 0.1)),
         dhw_contam_kwh=float(getattr(config, "THERMAL_DHW_CONTAM_KWH", 0.8)),
+        excluded_days=holiday_days(tau_start_day, end_day, tz),
     )
     tau_fit = fit_tau(
         episodes,
