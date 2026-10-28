@@ -19,22 +19,22 @@ interface BatchBarProps {
 export function BatchBar({ pendingCount, busy, stage, onSimulate, onDiscardAll }: BatchBarProps) {
   const visible = pendingCount > 0 || stage !== "edit";
   return (
-    <div class={`batch-bar${visible ? " is-visible" : ""}`} role="region" aria-label="Pending changes">
+    <div class={`batch-bar${visible ? " is-visible" : ""}`} role="region" aria-label="Alterações pendentes">
       <div class="batch-bar-inner">
-        <div class="batch-stages" aria-label="Apply flow">
-          <Stage n={1} label="Edit" sub={pendingCount === 0 ? "no changes" : `${pendingCount} change${pendingCount === 1 ? "" : "s"}`}
+        <div class="batch-stages" aria-label="Etapas">
+          <Stage n={1} label="Editar" sub={pendingCount === 0 ? "sem alterações" : `${pendingCount} alteraç${pendingCount === 1 ? "ão" : "ões"}`}
                  active={stage === "edit"} done={stage !== "edit"} />
           <span class="batch-stages-arrow"><Icon name="chevron" size={12} /></span>
-          <Stage n={2} label="Simulate" sub="dry-run the diff" active={stage === "simulate"} done={stage === "apply"} />
+          <Stage n={2} label="Simular" sub="ver o que muda" active={stage === "simulate"} done={stage === "apply"} />
           <span class="batch-stages-arrow"><Icon name="chevron" size={12} /></span>
-          <Stage n={3} label="Apply" sub="write to runtime_settings" active={stage === "apply"} done={false} />
+          <Stage n={3} label="Aplicar" sub="gravar os ajustes" active={stage === "apply"} done={false} />
         </div>
         <div class="batch-bar-actions">
           <button type="button" class="btn btn--ghost" onClick={onDiscardAll} disabled={busy || pendingCount === 0}>
-            Discard all
+            Descartar tudo
           </button>
           <button type="button" class="btn btn--primary" onClick={onSimulate} disabled={busy || pendingCount === 0}>
-            {busy ? "Working…" : "Simulate"}
+            {busy ? "Aguarde…" : "Simular"}
           </button>
         </div>
       </div>
