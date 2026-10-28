@@ -6,7 +6,7 @@ import {
   fmt, pp, mergeRuns, dayAxis, frac, hourTicks, waterSegments, tariffSegments, gridLabel, heatingCell,
   batteryRunway, buildStatus, tierOf, billingVerdict, cycleLabel, nextHeating, aguaTile, casaTile, bateriaTile,
   peakCoverage, powerSource, spendVerdict, spendLine, bandRows, nextCharge, vacationHelp, holidayFlags,
-  isAwayPreset, localHHMM,
+  isAwayPreset, localHHMM, sgbp, hourWord,
 } from "./logic.ts";
 
 const TZ = "Europe/London";
@@ -115,7 +115,9 @@ test("heating lane: pre-heat >= 30 min counts, coast, hold from the plan, holida
   assert.deepEqual(heatingCell(w[3], heating, false), { mode: "boost", text: "aquece +3" });
   assert.deepEqual(heatingCell(w[4], heating, false), { mode: "off", text: "desligado" });
   assert.deepEqual(heatingCell(w[5], heating, false), { mode: "hold", text: "mantém ~21" });   // predicted, not config
-  assert.deepEqual(heatingCell(w[2], heating, false), { mode: "hold", text: "mantém" });         // no prediction -> no number
+  assert.deepEqual(heatingCell(w[2], heating, false), { mode: "hold", text: "mantém ≥ 21" });    // no prediction -> the floor that applies
+  assert.equal(heatingCell(w[0], heating, false).text, "mantém ≥ 20");                           // night band -> night floor
+  assert.equal(heatingCell(w[4], { ...heating, windows: [], peak_coast_delta_c: 1 }, false).text, "mantém ≥ 20");  // peak -> setpoint - delta
   assert.deepEqual(heatingCell(w[3], heating, true), { mode: "off", text: "desligado" });
   assert.equal(heatingCell(w[3], { error: "x" }, false), null);
 });
@@ -171,7 +173,7 @@ const fronts = (rowOver = {}) => ({
 
 test("status sentence: normal day with a real peak-coverage basis", () => {
   const s = buildStatus({ now: cockpit(), fronts: fronts() });
-  assert.equal(s, "Tudo normal. Agora: faixa barato (12,5p) · casa na bateria · próximo evento 16:00 pico, bateria segura a casa até 19:00.");
+  assert.equal(s, "Tudo normal. Agora: faixa barata (12,5p) · casa na bateria · próximo evento 16:00 pico, bateria segura a casa até 19:00.");
 });
 
 test("peak coverage is never invented", () => {
@@ -196,7 +198,7 @@ test("peak coverage is never invented", () => {
 test("status sentence: vacation derives the battery wording from the plan", () => {
   const vac = { active: true, return_at: "2026-11-01T12:00:00+00:00" };
   const solarOnly = buildStatus({ now: cockpit({ vacation: vac, daikin: { holiday: { climate: true, tank: true } } }), fronts: fronts() });
-  assert.equal(solarOnly, "Fora até dom 12:00 · Daikin em holiday · bateria só com sol");
+  assert.equal(solarOnly, "Fora até dom 12:00 · Daikin em modo férias · bateria só com sol");
   const withGrid = { ...fronts(), battery: { ...fronts().battery, windows: [
     { kind: "grid_charge", start_utc: utc("22:00"), end_utc: utc("24:00"), start_local: "22:00", end_local: "24:00", charge_kwh: 3 },
   ] } };
@@ -208,11 +210,11 @@ test("status sentence: vacation derives the battery wording from the plan", () =
 test("holiday is per management point; vacation preset alone never blanks heating/water", () => {
   const climateOnly = cockpit({ daikin: { holiday: { climate: true, tank: false } } });
   assert.deepEqual(holidayFlags(climateOnly), { climate: true, tank: false });
-  assert.equal(buildStatus({ now: climateOnly, fronts: fronts() }), "Daikin em holiday (aquecimento) · sem aquecimento");
+  assert.equal(buildStatus({ now: climateOnly, fronts: fronts() }), "Daikin em modo férias (aquecimento) · sem aquecimento");
   const tankOnly = cockpit({ daikin: { holiday: { climate: false, tank: true } } });
-  assert.equal(buildStatus({ now: tankOnly, fronts: fronts() }), "Daikin em holiday (água quente) · sem água quente");
-  assert.equal(aguaTile(tankOnly, { tank: { tank_now_c: 40, windows: [], showers: [] } }).meaning, "Tanque desligado (holiday)");
-  assert.notEqual(casaTile(tankOnly, { heating: { setpoint_c: 21, night_floor_c: 20 } }).meaning, "Aquecimento desligado (holiday)");
+  assert.equal(buildStatus({ now: tankOnly, fronts: fronts() }), "Daikin em modo férias (água quente) · sem água quente");
+  assert.equal(aguaTile(tankOnly, { tank: { tank_now_c: 40, windows: [], showers: [] } }).meaning, "Tanque desligado (modo férias)");
+  assert.notEqual(casaTile(tankOnly, { heating: { setpoint_c: 21, night_floor_c: 20 } }).meaning, "Aquecimento desligado (modo férias)");
   // away preset without any Daikin holiday flag: heating keeps its plan
   const away = cockpit({ vacation: { active: true, holiday_enabled: false } });
   assert.deepEqual(holidayFlags(away), { climate: false, tank: false });
@@ -289,7 +291,10 @@ test("água tile: judged per shower on the predicted tank", () => {
   assert.match(mixed.meaning, /até as 22:00\) · pode faltar às 22:00/);
   // first shower predicted short: never "Aquecendo", never a claim
   const short = aguaTile(cockpit(), t([sh("20:00", "22:00", 45, 41)]));
-  assert.match(short.meaning, /^Pode faltar para o banho das 20:00 \(prevista 41 °C, ≥ 45\)$/);
+  assert.equal(short.meaning, "Pode faltar para o banho das 20:00 (prevista 41,0 °C, mínimo 45)");
+  assert.equal(aguaTile(cockpit(), t([sh("20:00", "22:00", 45, 44.6)])).meaning, "Pode faltar para o banho das 20:00 (prevista 44,6 °C, mínimo 45)");
+  // no prediction: judged (and printed) on the live reading
+  assert.equal(aguaTile(cockpit({ state: { tank_c: 43.2 } }), t([sh("20:00", "22:00", 45, null)], 43.2)).meaning, "Pode faltar para o banho das 20:00 (agora 43,2 °C, mínimo 45)");
   assert.equal(aguaTile(cockpit(), t([])).meaning, "Sem banho previsto hoje");
   assert.equal(aguaTile(cockpit(), { tank: { error: "x" } }).meaning, "Água quente");
 });
@@ -306,15 +311,37 @@ test("bateria tile and next charge: kWh INTO the battery, away wording from the 
   assert.equal(bateriaTile(away, { tariff, battery: noGrid }).next, "Próximo: carrega com o sol");
 });
 
-test("vacation help line is derived, not hard-coded", () => {
+test("vacation help: plan-derived only while vacation is active; neutral in Normal", () => {
   const vac = { active: true, holiday_enabled: true, recovery_at: "2026-10-31T23:00:00+00:00" };
   const withGrid = { reserve_pct: 12, windows: [{ kind: "grid_charge", start_utc: utc("22:00"), end_utc: utc("24:00") }] };
-  const h = vacationHelp(vac, withGrid, NOWMS, TZ);
+  const h = vacationHelp(vac, withGrid, tariff, NOWMS, TZ);
   assert.match(h, /bateria carrega nas faixas baratas, piso 12 %/);
   assert.match(h, /aquecimento religado sáb 23:00/);
   assert.doesNotMatch(h, /12 h|só com sol/);
-  assert.match(vacationHelp({ holiday_enabled: false }, { reserve_pct: 10, windows: [] }, NOWMS, TZ),
-    /^Em férias: bateria só com sol, piso 10 %, aquecimento religado antes da chegada\.$/);
+  // cheap band still ahead and no grid window: sun only
+  assert.match(vacationHelp(vac, { reserve_pct: 10, windows: [] }, tariff, NOWMS, TZ), /bateria só com sol, piso 10 %/);
+  // late evening (no cheap band ahead today, tomorrow not in the payload): claim nothing
+  assert.match(vacationHelp(vac, { reserve_pct: 10, windows: [] }, tariff, Date.parse(utc("23:00")), TZ), /bateria segue o plano de férias, piso 10 %/);
+  // Normal mode: the CURRENT plan must not be presented as the vacation plan
+  const normal = vacationHelp({ active: false, holiday_enabled: true }, withGrid, tariff, NOWMS, TZ);
+  assert.equal(normal, "Em férias: Daikin em modo férias até a véspera da volta, bateria segue o plano de férias (a simulação mostra o detalhe), aquecimento religado antes da chegada.");
+  assert.doesNotMatch(normal, /só com sol|carrega nas faixas/);
+});
+
+test("late evening vacation status claims nothing about charging", () => {
+  const now = cockpit({ now_utc: utc("23:00"), vacation: { active: true, return_at: "2026-11-01T12:00:00+00:00" } });
+  assert.equal(buildStatus({ now, fronts: { tariff, battery: { reserve_pct: 10, windows: [], by_band: [] } } }),
+    "Fora até dom 12:00 · bateria segue o plano de férias");
+});
+
+test("negative money keeps its sign", () => {
+  assert.equal(sgbp(-12.4), "−£12,40");
+  assert.equal(sgbp(1.42), "£1,42");
+});
+
+test("ruler labels keep minutes when not on the hour", () => {
+  assert.equal(hourWord("04:30"), "04:30");
+  assert.equal(hourWord("04:00"), "04");
 });
 
 test("band list (phone): one row per band, each band names the tank window covering most of it", () => {

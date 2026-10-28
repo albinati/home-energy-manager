@@ -17,7 +17,7 @@ export function AdminButton() {
         type="button"
         class="admin-badge admin-badge--on"
         title="You have admin access — click to lock (return to viewer)"
-        onClick={() => lock()}
+        onClick={() => { if (window.confirm("Sair do modo admin?")) lock(); }}
       >
         <span class="admin-dot" aria-hidden="true" />
         Admin<span class="admin-badge-extra"> · Lock</span>

@@ -176,6 +176,7 @@
   width: 2px;
   margin-left: -1px;
   background: var(--text);
+  opacity: 0.5;   /* translucent: never hides a segment's text */
   border-radius: 1px;
   pointer-events: none;
 }
@@ -208,6 +209,7 @@
 
 @media (max-width: 720px) {
   .hs-lanes { display: none; }
+  .hs-caption-legend { display: none; }   /* the legend describes lanes, which phones do not show */
   .hs-bandlist { display: block; }
   .hs-card, .hs-tile { padding: var(--space-4); }
   .hs-num { font-size: calc(var(--font-display) * 0.85); }

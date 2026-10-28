@@ -75,7 +75,7 @@ export default function Landing() {
 
       {role.value === "admin" && (
         <ModeBox vacation={data.vacation} preset={data.modes?.optimization_preset}
-                 battery={f?.battery} nowMs={nowMs} tz={data.planner_tz}
+                 battery={f?.battery} tariff={f?.tariff} nowMs={nowMs} tz={data.planner_tz}
                  onChanged={() => { void now.refresh(); void fronts.refresh(); }} />
       )}
 

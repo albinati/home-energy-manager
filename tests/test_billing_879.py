@@ -66,13 +66,15 @@ def test_short_tariff_label():
     assert f("Cosy Octopus 12M Fixed", "COSY-FIX-12M-26-10-14") == "Cosy fixo"
 
 
-def _seed_compare(monkeypatch, rows, done, today_net=None):
+def _seed_compare(monkeypatch, rows, done, today_net=None, today_rows=None):
     from src.analytics import fair_compare
 
     monkeypatch.setattr(config, "OCTOPUS_BILLING_CYCLE_DAY", 21)
     monkeypatch.setattr(pf, "_period", lambda s, e: done if s != e else {"n_days": 1, "net_cost_gbp": today_net or 0.0})
     monkeypatch.setattr(pf, "_past_compare", lambda s, e: {"tariffs": rows})
-    monkeypatch.setattr(fair_compare, "cached_fair_comparison", lambda s, e, n=14: {"tariffs": []})
+    if today_rows is None:   # same catalogue, one day of cost
+        today_rows = [{**r, "net_pence": 100.0} for r in rows]
+    monkeypatch.setattr(fair_compare, "cached_fair_comparison", lambda s, e, n=14: {"tariffs": today_rows})
 
 
 def _rows(**net):
@@ -119,6 +121,48 @@ def test_billing_winner_needs_a_real_saving(monkeypatch):
     _seed_compare(monkeypatch, rows, {"n_days": 7, "net_cost_gbp": 10.4})
     w = pf.billing_section(date(2026, 10, 28))["winner"]
     assert w["is_current"] is False and w["label"] == "Agile"
+
+
+def test_billing_mismatched_catalogues_drop_the_tariff_and_flag_partial(monkeypatch):
+    """A tariff priced in only one cached part must not get a partial-cycle cost
+    against the current tariff's full cycle (false 'Agile custaria -£12')."""
+    past = _rows(COSY=("Cosy (your tariff)", 1200.0, True, False),
+                 FIXED=("British Gas Fixed", 1800.0, False, False))
+    today = [
+        {"product_code": "COSY", "display_name": "Cosy (your tariff)", "net_pence": 100.0, "is_current": True},
+        {"product_code": "AGILE", "display_name": "Agile Octopus", "net_pence": 5.0, "is_current": False},
+    ]
+    _seed_compare(monkeypatch, past, {"n_days": 7, "net_cost_gbp": 10.4}, today_rows=today)
+    b = pf.billing_section(date(2026, 10, 28))
+    assert b["partial"] is True
+    assert [c["tariff"] for c in b["compare"]] == []            # FIXED only in past, AGILE only in today
+    assert b["winner"]["is_current"] is True
+    # consistent parts -> not partial
+    _seed_compare(monkeypatch, past, {"n_days": 7, "net_cost_gbp": 10.4})
+    b2 = pf.billing_section(date(2026, 10, 28))
+    assert b2["partial"] is False and [c["tariff"] for c in b2["compare"]] == ["FIXED"]
+
+
+def test_spend_net_cost_missing_is_none(monkeypatch):
+    from src.analytics import pnl
+
+    monkeypatch.setattr(pnl, "compute_daily_pnl", lambda d: {"import_kwh": 2.0, "import_cost_gbp": 0.4})
+    s = pf.spend_section(date(2026, 10, 28), [], NOW, pf._tz())
+    assert s["realised_net_cost_gbp"] is None
+
+
+def test_heating_section_exposes_night_window(monkeypatch):
+    monkeypatch.setattr(config, "LP_W3_NIGHT_START_HOUR_LOCAL", 23, raising=False)
+    monkeypatch.setattr(config, "LP_W3_NIGHT_END_HOUR_LOCAL", 6, raising=False)
+    h = pf.heating_section(date(2026, 10, 28), [], pf._tz(), [])
+    assert (h["night_start_hour"], h["night_end_hour"]) == (23, 6)
+
+
+def test_inflight_locks_are_pruned(monkeypatch):
+    monkeypatch.setattr(pf, "tariff_section", lambda *a: {"windows": []})
+    pf._inflight[(str(config.DB_PATH), "2020-01-01")] = __import__("threading").Lock()
+    pf.plan_fronts(date(2026, 10, 28))
+    assert (str(config.DB_PATH), "2020-01-01") not in pf._inflight
 
 
 def test_billing_clamp_reports_since_and_uses_covered_days(monkeypatch):

@@ -3,7 +3,7 @@ import { Link } from "wouter-preact";
 import type { PlanFrontsResponse } from "../../../lib/types";
 import {
   dayAxis, frac, tariffSegments, gridLabel, heatingCell, waterSegments, hourWord, hourTicks, bandRows,
-  tierOf, TIER_WORD, pp, span, type HolidayFlags,
+  tierOf, FAIXA_WORD, pp, span, type HolidayFlags,
 } from "./logic";
 
 // A segment shows its text only when it is at least this wide; the full text is
@@ -51,7 +51,7 @@ export function BandStrip({ fronts, nowMs, holiday, tz }: {
     for (const { w, a } of wins) {
       if (seen.has(w.start_local)) continue;
       seen.add(w.start_local);
-      ticks.push({ f: a, label: hourWord(w.start_local).slice(0, 2) });
+      ticks.push({ f: a, label: hourWord(w.start_local) });
     }
   } else {
     for (const t of hourTicks(axis, tz, [0, 6, 12, 18])) ticks.push({ f: t.f, label: String(t.hour).padStart(2, "0") });
@@ -66,7 +66,7 @@ export function BandStrip({ fronts, nowMs, holiday, tz }: {
             <div class="hs-track" ref={trackRef}>
               {segs.map((s, i) => (
                 <span key={i} class={`hs-seg hs-seg--${s.tier}`} style={pos(s.start, s.end)}
-                      title={`${TIER_WORD[s.tier]} ${s.startLocal}–${s.endLocal}${s.label ? ` · ${s.label}` : ""}`}>
+                      title={`${FAIXA_WORD[s.tier]} ${s.startLocal}–${s.endLocal}${s.label ? ` · ${s.label}` : ""}`}>
                   {fits(s.start, s.end) ? s.label : ""}
                 </span>
               ))}
@@ -127,7 +127,7 @@ export function BandStrip({ fronts, nowMs, holiday, tz }: {
           <li key={i} class={`hs-bandrow${r.current ? " is-now" : ""}`} aria-current={r.current ? "true" : undefined}>
             <span class="hs-bandrow-head">
               <span class={`hs-chip hs-chip--${r.tier}`}>{span(r.startLocal, r.endLocal)}</span>
-              <span class="hs-bandrow-tier">{TIER_WORD[r.tier]}{r.price != null ? ` ${pp(r.price)}` : ""}</span>
+              <span class="hs-bandrow-tier">{FAIXA_WORD[r.tier]}{r.price != null ? ` ${pp(r.price)}` : ""}</span>
               {r.current && <span class="hs-bandrow-now">agora</span>}
             </span>
             <span class="hs-bandrow-body">
@@ -140,7 +140,7 @@ export function BandStrip({ fronts, nowMs, holiday, tz }: {
       </ul>
 
       <p class="hs-caption">
-        Azul = compra da rede · laranja = aquecendo (bomba de calor e tanque). Linha vertical = agora.{" "}
+        <span class="hs-caption-legend">Azul = compra da rede · laranja = aquecendo (bomba de calor e tanque). Linha vertical = agora.{" "}</span>
         <Link href="/insights" class="hs-link">Detalhes e histórico →</Link>
       </p>
     </div>

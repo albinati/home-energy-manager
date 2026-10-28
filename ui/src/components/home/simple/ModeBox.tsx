@@ -5,7 +5,7 @@ import {
 import { HemApiError } from "../../../lib/api";
 import { Modal } from "../../common/Modal";
 import { toast } from "../../../lib/toast";
-import type { ActionDiffResponse, CockpitVacation, PlanFrontsBattery, SimulateBatchResponse } from "../../../lib/types";
+import type { ActionDiffResponse, CockpitVacation, PlanFrontsBattery, PlanFrontsTariff, SimulateBatchResponse } from "../../../lib/types";
 import { toDatetimeLocal, isAwayPreset, vacationHelp } from "./logic";
 
 // "Modo da casa" (admin only): Normal | Férias até <datetime>, plus "Replanejar
@@ -20,10 +20,11 @@ const isSimIdError = (e: unknown): boolean =>
   e instanceof HemApiError && (e.status === 409 || e.status === 410) &&
   /Simulation(Expired|IdRequired|IdMismatch)/.test(e.body || "");
 
-export function ModeBox({ vacation, preset, battery, nowMs, tz, onChanged }: {
+export function ModeBox({ vacation, preset, battery, tariff, nowMs, tz, onChanged }: {
   vacation: CockpitVacation | null | undefined;
   preset: string | undefined;
   battery: PlanFrontsBattery | null | undefined;
+  tariff: PlanFrontsTariff | null | undefined;
   nowMs: number;
   tz?: string;
   onChanged: () => void;
@@ -111,7 +112,7 @@ export function ModeBox({ vacation, preset, battery, nowMs, tz, onChanged }: {
         <span class="grow" />
         <button type="button" class="btn btn--sm" disabled={busy} onClick={simulateReplan}>Replanejar agora</button>
       </div>
-      <p class="hs-help">{vacationHelp(vacation, battery, nowMs, tz)}</p>
+      <p class="hs-help">{vacationHelp(vacation, battery, tariff, nowMs, tz)}</p>
 
       <Modal
         open={confirm != null}

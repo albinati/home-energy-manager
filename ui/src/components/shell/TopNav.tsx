@@ -50,8 +50,8 @@ export function TopNav() {
             </Link>
           )}
           {isAdmin && (
-            <Link href="/settings" title="Ajustes" class={`nav-link nav-link--text${path === "/settings" ? " active" : ""}`}>
-              <Icon name="settings" size={14} />Ajustes
+            <Link href="/settings" title="Ajustes" aria-label="Ajustes" class={`nav-link nav-link--text${path === "/settings" ? " active" : ""}`}>
+              <Icon name="settings" size={14} /><span class="nav-label">Ajustes</span>
             </Link>
           )}
         </nav>

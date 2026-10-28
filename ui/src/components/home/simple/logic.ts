@@ -30,6 +30,10 @@ export function pp(n: number): string {
 export function gbp(n: number): string {
   return `£${fmt(Math.abs(n), 2)}`;
 }
+/** £ with a leading minus for negatives (credit): -12.4 -> "−£12,40". */
+export function sgbp(n: number): string {
+  return `${n < 0 ? "−" : ""}${gbp(n)}`;
+}
 export function signedGbp(n: number): string {
   return `${n < 0 ? "−" : "+"}${gbp(n)}`;
 }
@@ -67,6 +71,8 @@ export function localHHMM(iso: string, tz?: string): string {
 // --------------------------------------------------------------------- tiers
 export type Tier = "cheap" | "standard" | "peak";
 export const TIER_WORD: Record<Tier, string> = { cheap: "barato", standard: "dia", peak: "pico" };
+/** After the noun "faixa": feminine ("faixa barata"). */
+export const FAIXA_WORD: Record<Tier, string> = { cheap: "barata", standard: "dia", peak: "pico" };
 
 /** Band tier from the backend key/label (works for banded and for the dynamic
  *  cheap/standard/peak tiers; a negative-price tier reads as cheap). */
@@ -206,7 +212,12 @@ export function heatingCell(
   if (row && row.indoor_min_c != null && row.indoor_max_c != null) {
     return { mode: "hold", text: `mantém ~${num(Math.round((row.indoor_min_c + row.indoor_max_c) / 2))}` };
   }
-  return { mode: "hold", text: "mantém" };
+  // No prediction for this band: show the floor that applies (same three levels as the Casa tile).
+  const night = isNightStart(w.start_local, heating);
+  const floor = night ? heating.night_floor_c
+    : tierOf(w) === "peak" && heating.setpoint_c != null ? heating.setpoint_c - (heating.peak_coast_delta_c ?? 0)
+    : heating.setpoint_c;
+  return { mode: "hold", text: floor != null ? `mantém ≥ ${num(floor)}` : "mantém" };
 }
 
 // ------------------------------------------------------------- lane: água
@@ -316,6 +327,16 @@ export function weekdayTime(iso: string, tz?: string): string {
 function hasGridCharge(b: PlanFrontsBattery | null | undefined, nowMs: number): boolean {
   return !!b && !b.error && (b.windows ?? []).some((w) => w.kind === "grid_charge" && Date.parse(w.end_utc) > nowMs);
 }
+/** What charges the battery from here: the grid (a window is planned), the sun
+ *  (a cheap band is still ahead today and none is used), or unknown (late
+ *  evening: tomorrow's windows are not in this payload, so claim nothing). */
+export type ChargeBasis = "grid" | "sun" | "unknown";
+export function chargeBasis(b: PlanFrontsBattery | null | undefined, tariff: PlanFrontsTariff | null | undefined, nowMs: number): ChargeBasis {
+  if (!b || b.error) return "unknown";
+  if (hasGridCharge(b, nowMs)) return "grid";
+  const cheapAhead = (tariff?.windows ?? []).some((w) => tierOf(w) === "cheap" && Date.parse(w.start_utc) > nowMs);
+  return cheapAhead ? "sun" : "unknown";
+}
 
 // ---------------------------------------------------------- status sentence
 export interface StatusCtx { now: CockpitNow; fronts: PlanFrontsResponse | null }
@@ -327,14 +348,15 @@ export function buildStatus({ now, fronts }: StatusCtx): string {
   const hol = holidayFlags(now);
   const battery = fronts?.battery && !fronts.battery.error ? fronts.battery : null;
   const tariff = fronts?.tariff && !fronts.tariff.error ? fronts.tariff : null;
-  const holWord = hol.climate && hol.tank ? "Daikin em holiday"
-    : hol.climate ? "Daikin em holiday (aquecimento)"
-    : hol.tank ? "Daikin em holiday (água quente)" : null;
+  const holWord = hol.climate && hol.tank ? "Daikin em modo férias"
+    : hol.climate ? "Daikin em modo férias (aquecimento)"
+    : hol.tank ? "Daikin em modo férias (água quente)" : null;
   if (vac?.active) {
     const parts = [vac.return_at ? `Fora até ${weekdayTime(vac.return_at, tz)}` : "Fora de casa"];
     if (holWord) parts.push(holWord);
-    if (hasGridCharge(battery, nowMs)) parts.push("bateria carrega nas faixas baratas");
-    else if (battery) parts.push("bateria só com sol");
+    const basis = chargeBasis(battery, tariff, nowMs);
+    parts.push(basis === "grid" ? "bateria carrega nas faixas baratas"
+      : basis === "sun" ? "bateria só com sol" : "bateria segue o plano de férias");
     return parts.join(" · ");
   }
   if (holWord) {
@@ -345,7 +367,7 @@ export function buildStatus({ now, fronts }: StatusCtx): string {
   const cur = currentWindow(tariff, nowMs);
   const parts: string[] = [];
   if (cur) {
-    parts.push(`faixa ${TIER_WORD[tierOf(cur)]}${cur.price_p != null ? ` (${pp(cur.price_p)})` : ""}`);
+    parts.push(`faixa ${FAIXA_WORD[tierOf(cur)]}${cur.price_p != null ? ` (${pp(cur.price_p)})` : ""}`);
   }
   const src = powerSource(now.state);
   if (src) parts.push(`casa na ${src}`);
@@ -383,7 +405,7 @@ export function casaTile(now: CockpitNow, fronts: PlanFrontsResponse | null): Ti
     // Same three-level floor the planner uses: night / peak coast / setpoint.
     const floor = night ? h.night_floor_c : inPeak && setp != null ? setp - (h.peak_coast_delta_c ?? 0) : setp;
     const ceil = h.ceiling_c;
-    if (off) { meaning = "Aquecimento desligado (holiday)"; tone = "dim"; }
+    if (off) { meaning = "Aquecimento desligado (modo férias)"; tone = "dim"; }
     else if (floor != null && t < floor - 0.3) { meaning = `Frio · abaixo de ${num(floor)}`; tone = "warn"; }
     else if (ceil != null && t > ceil + 0.3) { meaning = `Quente · acima de ${num(ceil)}`; tone = "warn"; }
     else {
@@ -391,7 +413,7 @@ export function casaTile(now: CockpitNow, fronts: PlanFrontsResponse | null): Ti
       meaning = `Confortável · meta ${setp != null ? num(setp) : "—"}${h.night_floor_c != null ? `, mínimo ${num(h.night_floor_c)} à noite` : ""}`;
     }
   } else if (t != null) {
-    meaning = off ? "Aquecimento desligado (holiday)" : "Temperatura média da casa";
+    meaning = off ? "Aquecimento desligado (modo férias)" : "Temperatura média da casa";
   }
   return { value: t != null ? fmt(t) : null, unit: "°C", meaning, next: nextHeating(h, tariff, nowMs, off), tone };
 }
@@ -438,7 +460,7 @@ export function aguaTile(now: CockpitNow, fronts: PlanFrontsResponse | null): Ti
   let meaning = "Água quente";
   let tone: TileText["tone"] = "dim";
   if (off) {
-    meaning = "Tanque desligado (holiday)";
+    meaning = "Tanque desligado (modo férias)";
   } else if (tk) {
     const upcoming = (tk.showers ?? []).filter((s) => minutesOf(s.end_local) > nowMin)
       .sort((a, b) => minutesOf(a.start_local) - minutesOf(b.start_local));
@@ -460,7 +482,9 @@ export function aguaTile(now: CockpitNow, fronts: PlanFrontsResponse | null): Ti
         if (bad > lastOk) { meaning += ` · pode faltar às ${upcoming[bad].start_local}`; tone = "warn"; }
       } else if (bad === 0) {
         const s = upcoming[0];
-        meaning = `Pode faltar para o banho das ${s.start_local} (prevista ${s.predicted_tank_c != null ? num(Math.round(s.predicted_tank_c)) : "—"} °C, ≥ ${num(s.floor_c)})`;
+        const live = s.predicted_tank_c == null;
+        const val = s.predicted_tank_c ?? t;
+        meaning = `Pode faltar para o banho das ${s.start_local} (${live ? "agora" : "prevista"} ${val != null ? fmt(val, 1) : "—"} °C, mínimo ${num(s.floor_c)})`;
         tone = "warn";
       }
     }
@@ -533,7 +557,7 @@ export function bateriaTile(now: CockpitNow, fronts: PlanFrontsResponse | null):
   const away = isAway(now);
   let meaning = "Bateria";
   let tone: TileText["tone"] = "dim";
-  if (away && b && !hasGridCharge(b, nowMs)) {
+  if (away && b && chargeBasis(b, tariff, nowMs) === "sun") {
     meaning = `Só com sol${b.reserve_pct != null ? ` · piso ${num(b.reserve_pct)} %` : ""}`;
   } else if (b) {
     const r = batteryRunway(b, tariff, nowMs, now.planner_tz);
@@ -570,16 +594,23 @@ export function nextCharge(
   return nc ? `Próximo: faixa barata ${span(nc.start_local, nc.end_local)}${nc.price_p != null ? ` (${pp(nc.price_p)})` : ""}` : "";
 }
 
-/** Help line under the mode switch, built from the live plan (never hard-coded). */
+/** Help line under the mode switch. In Normal mode the current plan says nothing
+ *  about vacation, so the battery clause is neutral there; while vacation is
+ *  active it is derived from the live plan. */
 export function vacationHelp(vac: CockpitVacation | null | undefined, battery: PlanFrontsBattery | null | undefined,
-                             nowMs: number, tz?: string): string {
+                             tariff: PlanFrontsTariff | null | undefined, nowMs: number, tz?: string): string {
   const parts: string[] = [];
-  if (vac?.holiday_enabled !== false) parts.push("Daikin em holiday até a véspera da volta");
-  const reserve = battery && !battery.error && battery.reserve_pct != null ? `, piso ${num(battery.reserve_pct)} %` : "";
-  parts.push(hasGridCharge(battery, nowMs)
-    ? `bateria carrega nas faixas baratas${reserve}`
-    : `bateria só com sol${reserve}`);
-  parts.push(vac?.recovery_at ? `aquecimento religado ${weekdayTime(vac.recovery_at, tz)}` : "aquecimento religado antes da chegada");
+  if (vac?.holiday_enabled !== false) parts.push("Daikin em modo férias até a véspera da volta");
+  if (vac?.active) {
+    const reserve = battery && !battery.error && battery.reserve_pct != null ? `, piso ${num(battery.reserve_pct)} %` : "";
+    const basis = chargeBasis(battery, tariff, nowMs);
+    parts.push(basis === "grid" ? `bateria carrega nas faixas baratas${reserve}`
+      : basis === "sun" ? `bateria só com sol${reserve}` : `bateria segue o plano de férias${reserve}`);
+    parts.push(vac.recovery_at ? `aquecimento religado ${weekdayTime(vac.recovery_at, tz)}` : "aquecimento religado antes da chegada");
+  } else {
+    parts.push("bateria segue o plano de férias (a simulação mostra o detalhe)");
+    parts.push("aquecimento religado antes da chegada");
+  }
   return `Em férias: ${parts.join(", ")}.`;
 }
 

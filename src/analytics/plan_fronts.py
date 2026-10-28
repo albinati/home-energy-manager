@@ -776,7 +776,8 @@ def spend_section(day: date, windows: list[Any], now_utc: datetime, tz: ZoneInfo
         cost = float(pnl_d.get("import_cost_gbp") or 0.0)
         out["realised_import_kwh"] = round(kwh, 3)
         out["realised_import_cost_gbp"] = round(cost, 2)
-        out["realised_net_cost_gbp"] = round(float(pnl_d.get("realised_net_cost_gbp") or 0.0), 2)
+        _net = pnl_d.get("realised_net_cost_gbp")
+        out["realised_net_cost_gbp"] = None if _net is None else round(float(_net), 2)
         out["realised_avg_import_p"] = round(cost * 100.0 / kwh, 2) if kwh > 0 else None
     except Exception as exc:  # noqa: BLE001
         out["realised_error"] = f"{type(exc).__name__}: {exc}"
@@ -938,24 +939,32 @@ def _past_compare(start: date, end: date) -> dict[str, Any]:
     return res
 
 
-def _cycle_compare_rows(cycle_start: date, day: date) -> list[dict[str, Any]]:
+def _cycle_compare_rows(cycle_start: date, day: date) -> tuple[list[dict[str, Any]], bool]:
     """Per-tariff net £ over cycle_start..day = COMPLETED days (long-cached) + today
-    (single-day comparison, normal 900 s cache). Rows keyed by product_code."""
+    (single-day comparison, normal 900 s cache). Only product codes present in EVERY
+    part are kept (the catalogue can differ between the cached parts: a tariff priced
+    for one day against the current tariff's full cycle would be a false winner);
+    ``partial`` is True when the parts disagreed."""
     from . import fair_compare
 
     parts: list[dict[str, Any]] = []
     if day > cycle_start:
         parts.append(_past_compare(cycle_start, day - timedelta(days=1)))
     parts.append(fair_compare.cached_fair_comparison(day, day, 4))
+    code_sets = [{str(t.get("product_code")) for t in (res.get("tariffs") or [])} for res in parts]
+    common = set.intersection(*code_sets) if code_sets else set()
+    partial = any(cs != common for cs in code_sets)
     acc: dict[str, dict[str, Any]] = {}
     for res in parts:
         for t in res.get("tariffs") or []:
             code = str(t.get("product_code"))
+            if code not in common:
+                continue
             row = acc.setdefault(code, {**t, "net_pence": 0.0, "approximate": False})
             row["net_pence"] = float(row["net_pence"]) + float(t.get("net_pence") or 0.0)
             row["approximate"] = bool(row["approximate"]) or bool(t.get("approximate"))
             row["is_current"] = bool(row.get("is_current")) or bool(t.get("is_current"))
-    return list(acc.values())
+    return list(acc.values()), partial
 
 
 def billing_section(day: date) -> dict[str, Any]:
@@ -975,7 +984,7 @@ def billing_section(day: date) -> dict[str, Any]:
     since = clamp.isoformat() if clamp is not None and clamp > cycle_start else None
     forecast = billing_forecast_gbp(completed_gbp, int(done.get("n_days") or 0), today_gbp,
                                     days_total - days_elapsed)
-    rows_raw = _cycle_compare_rows(cycle_start, day)
+    rows_raw, partial = _cycle_compare_rows(cycle_start, day)
     current, rows = compare_rows({"tariffs": rows_raw})
     compare = []
     for r in rows:
@@ -1001,7 +1010,7 @@ def billing_section(day: date) -> dict[str, Any]:
     return {
         "cycle_start": cycle_start.isoformat(), "cycle_end": cycle_end.isoformat(),
         "days_elapsed": days_elapsed, "days_total": days_total,
-        "realised_gbp": realised, "forecast_cycle_gbp": forecast, "since": since,
+        "realised_gbp": realised, "forecast_cycle_gbp": forecast, "since": since, "partial": partial,
         "current_label": cur_label,
         "compare": compare, "winner": winner,
     }
@@ -1022,6 +1031,9 @@ def plan_fronts(day: date | None = None, *, now_utc: datetime | None = None,
     d = day or datetime.now(UTC).astimezone(tz).date()
     key = (str(config.DB_PATH), d.isoformat())
     with _inflight_guard:
+        floor = (d - timedelta(days=2)).isoformat()
+        for k in [k for k in _inflight if k[1] < floor]:   # prune locks of old days
+            del _inflight[k]
         lock = _inflight.setdefault(key, threading.Lock())
     with lock:
         return _plan_fronts_build(day, now_utc=None, use_cache=True)

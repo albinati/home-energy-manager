@@ -1,6 +1,6 @@
 import { Link } from "wouter-preact";
 import type { PlanFrontsBilling, PlanFrontsResponse } from "../../../lib/types";
-import { gbp, fmt, spendVerdict, spendLine, todayNet, cycleLabel, billingVerdict, type HolidayFlags } from "./logic";
+import { sgbp, fmt, spendVerdict, spendLine, todayNet, cycleLabel, billingVerdict, type HolidayFlags } from "./logic";
 import { BandStrip } from "./BandStrip";
 
 export function MoneyCard({ fronts, nowMs, holiday, tz }: {
@@ -17,7 +17,7 @@ export function MoneyCard({ fronts, nowMs, holiday, tz }: {
         <div class="hs-money-col">
           <h2 class="hs-eyebrow">Hoje</h2>
           <div class="hs-big">
-            <span class="hs-num hs-num--md">{today != null ? (today < 0 ? "−" : "") + gbp(today) : "—"}</span>
+            <span class="hs-num hs-num--md">{today != null ? sgbp(today) : "—"}</span>
             {v.word && <span class={`hs-verdict hs-verdict--${v.tone}`}>{approx ? "previsto: " : ""}{v.word}</span>}
           </div>
           <p class="hs-meaning">{spendLine(spend)}</p>
@@ -27,7 +27,7 @@ export function MoneyCard({ fronts, nowMs, holiday, tz }: {
           {billing ? (
             <>
               <div class="hs-big">
-                <span class="hs-num hs-num--md">{gbp(billing.realised_gbp)}</span>
+                <span class="hs-num hs-num--md">{sgbp(billing.realised_gbp)}</span>
                 <span class="hs-unit hs-unit--sm">
                   {billing.forecast_cycle_gbp != null ? `de ~£${fmt(billing.forecast_cycle_gbp, 0)}` : "até agora"}
                 </span>
