@@ -1623,3 +1623,20 @@ truth for color, typography, spacing, layout, motion, and the cockpit's
 non-negotiables (deep-dark, borderless, no-emoji, semantic color, system fonts,
 ~0.2s perf budget). Token values are authoritative in `ui/src/styles/tokens.css`;
 DESIGN.md is the rules + rationale. In QA, flag any UI code that deviates from it.
+
+---
+
+## Agent workflow — model routing (owner rule, 2026-10-28)
+
+When Claude Code works on this repo, the orchestrating model (Fable) **only plans,
+specifies, decides, reviews verdicts and merges**. It does not type code.
+
+| Task | Agent / model |
+|---|---|
+| Writing code, tests, docs for a story | `Agent(model="sonnet")` in a worktree, one branch per story, PR with `Closes #N` |
+| Adversarial review of a PR before merge | `Agent(model="opus")`, read-only (Plan or general-purpose), verdict MERGE / FIX-THEN-MERGE / DO-NOT-MERGE |
+| Reading, inventories, lookups (files, APIs, logs) | `Agent(subagent_type="Explore", model="haiku")` |
+| Orchestration, plan, decisions, memory | Fable (the main session) |
+
+Review fixes go back to the same Sonnet agent (context intact); merge only when the review
+is clean and CI is green. Never deploy to prod from an agent — the owner runs `rollout.sh`.
