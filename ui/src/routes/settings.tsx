@@ -10,7 +10,7 @@ import { HemApiError } from "../lib/api";
 import { Spinner } from "../components/common/Spinner";
 import { Icon } from "../components/common/Icon";
 import { Modal } from "../components/common/Modal";
-import { ModeSwitcher } from "../components/settings/ModeSwitcher";
+import { ModeSwitcher, toDatetimeLocal } from "../components/settings/ModeSwitcher";
 import { SettingField } from "../components/settings/SettingField";
 import { BatchBar } from "../components/settings/BatchBar";
 import { SettingsTabs } from "../components/settings/SettingsTabs";
@@ -174,6 +174,19 @@ export default function Settings() {
           pendingValue={pending.OPTIMIZATION_PRESET as string | undefined}
           onChange={(v) => onChange("OPTIMIZATION_PRESET", v)}
           onRevert={() => onRevert("OPTIMIZATION_PRESET")}
+          returnAt={
+            (pending.VACATION_RETURN_AT as string | undefined) ??
+            (specByKey.get("VACATION_RETURN_AT")?.value as string | undefined)
+          }
+          onReturnAtChange={(v) => {
+            // Normalised compare: an untouched value (server stores it lower-cased,
+            // with seconds/offset) must not become a pending change.
+            const server = specByKey.get("VACATION_RETURN_AT")?.value;
+            onChange(
+              "VACATION_RETURN_AT",
+              toDatetimeLocal(v) === toDatetimeLocal(server) ? server : v,
+            );
+          }}
         />
       )}
 

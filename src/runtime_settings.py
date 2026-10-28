@@ -309,11 +309,12 @@ SCHEMA: dict[str, SettingSpec] = {
         env_default=_str_env("OPTIMIZATION_PRESET", "normal"),
         enum=("normal", "guests", "vacation"),
         description=(
-            "Household mode — drives DHW demand model, battery dispatch, and "
-            "peak-export aggressiveness. normal = family at home; guests = "
-            "extra showers (DHW_GUEST_COUNT); vacation = DHW off + max "
-            "arbitrage, PV-only charging. Legacy values 'travel' and 'away' "
-            "are silently translated to 'vacation' on read."
+            "Household mode — drives DHW demand model and battery dispatch. "
+            "normal = family at home; guests = extra showers (DHW_GUEST_COUNT); "
+            "vacation = away until VACATION_RETURN_AT (REQUIRED, future): Daikin in "
+            "Onecta holiday mode, battery planned with normal economics, reduced "
+            "house load, scheduled recovery before the return. Legacy values "
+            "'travel' and 'away' are silently translated to 'vacation' on read."
         ),
     ),
     # --- PR B — explicit shower-demand model -------------------------------
@@ -499,6 +500,50 @@ SCHEMA: dict[str, SettingSpec] = {
             "says isHolidayModeActive, HEM behaves as passive for that management "
             "point (no writes/alerts) and the LP plans zero Daikin draw. false = "
             "kill switch (pre-#872 behaviour, no gate fires)."
+        ),
+    ),
+    # --- Vacation mode v2 (#873) --------------------------------------------
+    "VACATION_RETURN_AT": SettingSpec(
+        key="VACATION_RETURN_AT",
+        type_name="str",
+        env_default=_str_env("VACATION_RETURN_AT", ""),
+        description=(
+            "Vacation return time (#873): local ISO datetime in BULLETPROOF_TIMEZONE "
+            "(e.g. 2026-11-07T18:00). MANDATORY and in the future to set "
+            "OPTIMIZATION_PRESET=vacation. Cleared when the recovery runs."
+        ),
+    ),
+    "VACATION_RECOVERY_HOURS": SettingSpec(
+        key="VACATION_RECOVERY_HOURS",
+        type_name="int",
+        env_default=_int_env("VACATION_RECOVERY_HOURS", "12"),
+        min_value=0,
+        max_value=72,
+        description=(
+            "Hours before VACATION_RETURN_AT that the recovery job fires (Daikin holiday "
+            "off, power-on, preset normal, replan). Snapped back to the start of the "
+            "previous cheap band on a banded tariff."
+        ),
+    ),
+    "LP_VACATION_LOAD_SCALE": SettingSpec(
+        key="LP_VACATION_LOAD_SCALE",
+        type_name="float",
+        env_default=_float_env("LP_VACATION_LOAD_SCALE", "0.35"),
+        min_value=0.1,
+        max_value=1.0,
+        description=(
+            "Residual house-load multiplier while OPTIMIZATION_PRESET=vacation "
+            "(empty house measured 0.3-0.45 kW vs ~1 kW occupied). 1.0 elsewhere."
+        ),
+    ),
+    "VACATION_DAIKIN_HOLIDAY_ENABLED": SettingSpec(
+        key="VACATION_DAIKIN_HOLIDAY_ENABLED",
+        type_name="str",  # "true" / "false"
+        env_default=_str_env("VACATION_DAIKIN_HOLIDAY_ENABLED", "true"),
+        enum=("true", "false"),
+        description=(
+            "Kill switch (#873): false = vacation never writes the Onecta holiday window "
+            "and schedules no recovery job (pre-#873 behaviour)."
         ),
     ),
     "DHW_DYNAMIC_BOOST_HOLD_HOURS": SettingSpec(
@@ -1060,8 +1105,25 @@ def _validate_comfort_aggregate(v: Any) -> None:
     )
 
 
+def _validate_vacation_return_at(v: Any) -> None:
+    s = str(v).strip()
+    if not s:
+        return  # empty = unset (clearing is always allowed)
+    from datetime import datetime as _dt
+
+    if s[-1] in "zZ":  # the str layer lower-cases: "...t18:00:00z"
+        s = s[:-1] + "+00:00"
+    try:
+        _dt.fromisoformat(s)
+    except ValueError as e:
+        raise SettingValidationError(
+            f"VACATION_RETURN_AT: {v!r} must be a local ISO datetime like 2026-11-07T18:00"
+        ) from e
+
+
 _CUSTOM_VALIDATORS: dict[str, Callable[[Any], None]] = {
     "INDOOR_COMFORT_AGGREGATE": _validate_comfort_aggregate,
+    "VACATION_RETURN_AT": _validate_vacation_return_at,
 }
 
 

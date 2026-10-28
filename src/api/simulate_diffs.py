@@ -359,6 +359,13 @@ def diff_setting_change(key: str, value: Any) -> ActionDiff:
             flags.append("enables_daikin_writes")
         if str(value).lower() == "passive" and current == "active":
             flags.append("disables_daikin_writes")
+    if key == "OPTIMIZATION_PRESET":
+        # #873: vacation = Onecta holiday window + scheduled recovery; leaving it
+        # early runs the recovery immediately.
+        if str(value).lower() in ("vacation", "travel", "away"):
+            flags.append("starts_daikin_holiday_and_schedules_recovery")
+        elif str(current).lower() == "vacation":
+            flags.append("ends_vacation_and_runs_recovery_now")
     return ActionDiff(
         action=f"setting.{key}",
         before={key: current},

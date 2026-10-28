@@ -272,7 +272,7 @@ WHITELIST: dict[str, OverrideSpec] = {
         enum=("normal", "guests", "vacation"),
         description=(
             "Household mode — normal (baseline), guests (extra DHW), "
-            "vacation (DHW off + max arbitrage, PV-only charging)."
+            "vacation (away: DHW off, reduced load; PV-only battery only when LP_BATTERY_EXPORT_ENABLED)."
         ),
         group="mode", promotable=True,
     ),

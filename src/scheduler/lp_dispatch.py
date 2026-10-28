@@ -21,6 +21,7 @@ from .optimizer import (
     HalfHourSlot,
     _merge_fox_groups,
     _optimization_preset_away_like,
+    _vacation_pv_only_battery,
     _slot_fox_tuple,
 )
 
@@ -138,6 +139,9 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
                 _vacation = OperationPreset(config.OPTIMIZATION_PRESET) == OperationPreset.VACATION
             except (ValueError, AttributeError):
                 _vacation = False
+            # #873: only the export-enabled vacation keeps PV-only charging;
+            # otherwise the battery is planned with normal LP economics.
+            _vacation = _vacation and bool(getattr(config, "LP_BATTERY_EXPORT_ENABLED", True))
             if _vacation:
                 kind = "solar_charge"
             elif price <= 0 and getattr(config, "LP_NEGATIVE_BEATS_SOLAR_CHARGE", True):
@@ -336,7 +340,9 @@ def _label_positive_price_holds(plan: LpPlan, slots: list[HalfHourSlot]) -> None
     # (_optimization_preset_away_like → .strip().lower() + legacy alias handling
     # via OperationPreset._missing_) so a whitespace/mixed-case/"travel" preset
     # cannot leak A1 holds into vacation.
-    if _optimization_preset_away_like():
+    # #873: vacation v2 with export disabled plans grid charging normally, so
+    # the hold applies; only the export-enabled (PV-only) vacation excludes it.
+    if _vacation_pv_only_battery():
         return
 
     cap = float(config.BATTERY_CAPACITY_KWH)
@@ -1764,8 +1770,15 @@ def space_heating_gate_state() -> dict[str, Any]:
     except Exception:  # pragma: no cover - status read must not fail
         daikin_holiday = None
 
+    try:
+        from .. import vacation as _vac
+        vacation = _vac.status_block()
+    except Exception:  # pragma: no cover - status read must not fail
+        vacation = None
+
     return {
         "daikin_holiday": daikin_holiday,  # #872: {climate, tank, window, cache_age_seconds}
+        "vacation": vacation,  # #873: {active, return_at, recovery_at, daikin_holiday_until_sent}
         "preheat_enabled": preheat_enabled,
         "lwt_source": lwt_source,
         "coast_mode": _coast_mode(),

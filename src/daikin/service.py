@@ -691,6 +691,28 @@ def set_tank_power(on: bool, actor: str = "api") -> None:
     invalidate_after_write()
 
 
+def set_holiday_mode(
+    enabled: bool,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    actor: str = "api",
+) -> None:
+    """#873 — open/close the Onecta holiday window.
+
+    Same passive rule as the other writers (``DAIKIN_CONTROL_MODE=passive``
+    blocks). The holiday gate is deliberately NOT applied: disabling holiday
+    must work while holiday is active, otherwise it could never be turned off.
+    """
+    if config.DAIKIN_CONTROL_MODE == "passive":
+        raise DaikinError("DAIKIN_CONTROL_MODE=passive — cannot set holiday mode")
+    if should_block("daikin"):
+        raise DaikinError("Daikin daily quota exhausted — cannot set holiday mode")
+    client, devices = _require_client_and_devices(actor)
+    for dev in devices:
+        client.set_holiday_mode(dev, enabled, start_date, end_date)
+    invalidate_after_write()
+
+
 def set_tank_powerful(on: bool, actor: str = "api") -> None:
     _passive_guard("set tank powerful mode", "tank")
     if should_block("daikin"):

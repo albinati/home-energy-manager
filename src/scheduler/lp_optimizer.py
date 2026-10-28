@@ -1217,13 +1217,12 @@ def solve_lp(
         # do ENERGY_STRATEGY_MODE=strict_savings (removido em PR C). Em modo
         # vacation o LP planeja arbitragem normalmente; em normal/guests, o LP
         # não tem solução viável que envolve descarga pro grid.
-        if _vacation_mode:
-            # #806: with battery export disabled, vacation keeps PV-only
-            # charging but the battery still never feeds the grid.
-            if _battery_export_enabled:
-                prob += exp[i] <= pv_use[i] + dis[i]
-            else:
-                prob += exp[i] <= pv_use[i]
+        if _vacation_mode and _battery_export_enabled:
+            # Historical vacation semantics (Agile arbitrage), kept bit-for-bit
+            # ONLY when LP_BATTERY_EXPORT_ENABLED=true. #873: with export
+            # disabled vacation falls through to the normal branches below
+            # (cheap-band grid charging allowed, exp <= pv_use).
+            prob += exp[i] <= pv_use[i] + dis[i]
             # Vacation: bateria carrega só de PV (sem grid charging)
             prob += chg[i] <= pv_use[i]
         elif pre_neg_export[i]:

@@ -3409,6 +3409,15 @@ def start_background_scheduler() -> None:
 
         _background_scheduler.start()
 
+        # #873: APScheduler DateTriggers are in-memory - re-arm a stored vacation
+        # recovery (a past time fires ~30 s after boot).
+        try:
+            from .. import vacation as _vacation
+
+            _vacation.rearm_from_kv()
+        except Exception as e:
+            logger.warning("Vacation recovery re-arm failed: %s", e)
+
         if config.USE_BULLETPROOF_ENGINE:
             start_heartbeat_background()
             try:

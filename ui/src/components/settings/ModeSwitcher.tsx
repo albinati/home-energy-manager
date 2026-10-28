@@ -2,16 +2,18 @@ import type { SettingSpec } from "../../lib/types";
 import { Icon, type IconName } from "../common/Icon";
 import "./settings.css";
 
-// The three household modes drive the entire DHW + dispatch policy. The
-// segmented control is the page's single most consequential control — the
-// one sanctioned full-accent surface.
+// Household mode drives the entire DHW + dispatch policy. The Home/Settings
+// toggle offers normal | vacation only (#873); "guests" still exists in the
+// backend enum and stays reachable under Settings > Vacation & guests
+// (advanced). The segmented control is the page's single most consequential
+// control - the one sanctioned full-accent surface.
 
 // Exported: the Operate card (cockpit) renders the same modes and must show
-// the exact same labels/consequences — one source of truth for the copy.
+// the exact same labels/consequences - one source of truth for the copy.
 export const MODE_META: Record<string, { label: string; sub: string; icon: IconName }> = {
   normal: {
     label: "Normal",
-    sub: "Day-to-day. 4 showers/evening, standard arbitrage, DHW pinned to fixed schedule.",
+    sub: "Em casa: rotina normal, aquecimento e tanque planejados pelo LP.",
     icon: "efficiency",
   },
   guests: {
@@ -21,21 +23,38 @@ export const MODE_META: Record<string, { label: string; sub: string; icon: IconN
   },
   vacation: {
     label: "Vacation",
-    sub: "DHW off, PV-only charging, maximum peak-export arbitrage.",
+    sub: "Fora de casa: Daikin em holiday, bateria normal, carga reduzida.",
     icon: "export",
   },
 };
+
+// Modes offered by the primary toggles (Home + Settings header).
+export const PRIMARY_MODES = ["normal", "vacation"];
+
+// The stored return time is lower-cased by the settings layer ("2026-11-07t18:00",
+// possibly with seconds/offset); the datetime-local input wants "YYYY-MM-DDTHH:mm".
+// Compare values THROUGH this function on both sides so an untouched value never
+// reads as a change (a re-submit re-activates the vacation).
+export function toDatetimeLocal(v: unknown): string {
+  const s = String(v ?? "").trim();
+  return s ? s.replace(/t/i, "T").slice(0, 16) : "";
+}
 
 interface ModeSwitcherProps {
   spec: SettingSpec;
   pendingValue: string | undefined;
   onChange: (value: string) => void;
   onRevert: () => void;
+  // #873: vacation needs a return time (VACATION_RETURN_AT, local datetime).
+  returnAt?: string;
+  onReturnAtChange?: (value: string) => void;
 }
 
-export function ModeSwitcher({ spec, pendingValue, onChange, onRevert }: ModeSwitcherProps) {
-  const options = (spec.enum || ["normal", "guests", "vacation"]) as string[];
+export function ModeSwitcher({ spec, pendingValue, onChange, onRevert, returnAt, onReturnAtChange }: ModeSwitcherProps) {
   const current = (pendingValue ?? (spec.value as string)) as string;
+  // normal | vacation; a stored "guests" stays visible so the control never lies.
+  const all = (spec.enum || ["normal", "guests", "vacation"]) as string[];
+  const options = all.filter((o) => PRIMARY_MODES.includes(o) || o === current);
   const serverValue = spec.value as string;
   const dirty = pendingValue !== undefined && pendingValue !== serverValue;
   const meta = MODE_META[current] || { label: current, sub: "", icon: "settings" as IconName };
@@ -80,10 +99,17 @@ export function ModeSwitcher({ spec, pendingValue, onChange, onRevert }: ModeSwi
           );
         })}
       </div>
-      <div class="mode-switcher-footnote">
-        <span class="mode-switcher-footnote-icon"><Icon name="schedule" size={14} /></span>
-        Scheduling a mode for a date range (e.g. guests next weekend, vacation in July) isn't built yet — mode changes are immediate. Tracked separately.
-      </div>
+      {current === "vacation" && onReturnAtChange && (
+        <label class="mode-switcher-return">
+          <span class="mode-switcher-eyebrow">Volta em</span>
+          <input
+            type="datetime-local"
+            value={toDatetimeLocal(returnAt)}
+            onInput={(e) => onReturnAtChange((e.currentTarget as HTMLInputElement).value)}
+            aria-label="Vacation return date and time"
+          />
+        </label>
+      )}
     </section>
   );
 }

@@ -425,8 +425,10 @@ class Config:
     # and PROMPTS the user to enable the guests preset (never auto-applies — the
     # household knows if there are guests; auto-applying would chase the noisy
     # load like the rejected recency corrector). Fires at most once per episode.
+    # #873: code default now false (the Home toggle is normal|vacation only);
+    # set GUESTS_DETECT_ENABLED=true to bring the nightly suggestion back.
     GUESTS_DETECT_ENABLED: bool = os.getenv(
-        "GUESTS_DETECT_ENABLED", "true"
+        "GUESTS_DETECT_ENABLED", "false"
     ).strip().lower() in ("1", "true", "yes", "on")
     GUESTS_DETECT_WINDOW_DAYS: int = int(os.getenv("GUESTS_DETECT_WINDOW_DAYS", "4"))
     GUESTS_DETECT_RATIO: float = float(os.getenv("GUESTS_DETECT_RATIO", "1.15"))
@@ -2587,6 +2589,47 @@ class Config:
             self._rt_set("DAIKIN_HOLIDAY_DETECT_ENABLED", "true" if value else "false")
         else:
             self._rt_set("DAIKIN_HOLIDAY_DETECT_ENABLED", str(value).strip().lower())
+
+    # --- Vacation mode v2 (#873) --------------------------------------------
+    @property
+    def VACATION_RETURN_AT(self) -> str:
+        """Local ISO datetime (BULLETPROOF_TIMEZONE) the household is back; "" = unset."""
+        return str(self._rt_get("VACATION_RETURN_AT") or "")
+
+    @VACATION_RETURN_AT.setter
+    def VACATION_RETURN_AT(self, value: Any) -> None:
+        self._rt_set("VACATION_RETURN_AT", str(value or "").strip().lower())
+
+    @property
+    def VACATION_RECOVERY_HOURS(self) -> int:
+        return int(self._rt_get("VACATION_RECOVERY_HOURS"))
+
+    @VACATION_RECOVERY_HOURS.setter
+    def VACATION_RECOVERY_HOURS(self, value: Any) -> None:
+        self._rt_set("VACATION_RECOVERY_HOURS", int(value))
+
+    @property
+    def LP_VACATION_LOAD_SCALE(self) -> float:
+        return float(self._rt_get("LP_VACATION_LOAD_SCALE"))
+
+    @LP_VACATION_LOAD_SCALE.setter
+    def LP_VACATION_LOAD_SCALE(self, value: Any) -> None:
+        self._rt_set("LP_VACATION_LOAD_SCALE", float(value))
+
+    @property
+    def VACATION_DAIKIN_HOLIDAY_ENABLED(self) -> bool:
+        """Kill switch: false = no Onecta holiday write and no recovery job."""
+        v = self._rt_get("VACATION_DAIKIN_HOLIDAY_ENABLED")
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    @VACATION_DAIKIN_HOLIDAY_ENABLED.setter
+    def VACATION_DAIKIN_HOLIDAY_ENABLED(self, value: Any) -> None:
+        if isinstance(value, bool):
+            self._rt_set("VACATION_DAIKIN_HOLIDAY_ENABLED", "true" if value else "false")
+        else:
+            self._rt_set("VACATION_DAIKIN_HOLIDAY_ENABLED", str(value).strip().lower())
 
     @property
     def DHW_DYNAMIC_BOOST_HOLD_HOURS(self) -> int:
