@@ -983,6 +983,7 @@ async def cockpit_now():
         "mode": None,
     }
     dk_fresh: dict[str, Any] = {"fetched_at_utc": None, "age_s": None, "stale": None}
+    dk_holiday: dict | None = None
     try:
         # Off the event loop: allow_refresh=False never does HTTP itself, but
         # it takes the Daikin service RLock — which the viewer-boost job holds
@@ -992,6 +993,8 @@ async def cockpit_now():
         cached = await asyncio.to_thread(
             daikin_service.get_cached_devices, allow_refresh=False, actor="cockpit_now"
         )
+        # #879: holiday flags from THIS already-fetched result (no second lock entry).
+        dk_holiday = daikin_service.holiday_state_from(cached)
         if cached.devices:
             d = cached.devices[0]
             tank = getattr(d, "tank_temperature", None)
@@ -1055,6 +1058,7 @@ async def cockpit_now():
         "plan_date": None,
     }
     plan_fresh: dict[str, Any] = {"fetched_at_utc": None, "age_s": None, "stale": None}
+    fox_uploaded_at: str | None = None  # #879: Fox plan upload time only (never the Octopus fetch fallback)
     try:
         # Scheduler V3 groups are local-wall-clock windows, NOT UTC — the
         # shared #672 derivation handles the timezone + boundary rules (#674).
@@ -1063,6 +1067,7 @@ async def cockpit_now():
         plan_block["next_fox_mode"] = fox_fields["next_fox_mode"]
         plan_block["next_transition_utc"] = fox_fields["next_transition_utc"]
         uploaded_at = fox_fields["uploaded_at"]
+        fox_uploaded_at = uploaded_at
         if uploaded_at:
             plan_fresh = {
                 "fetched_at_utc": uploaded_at,
@@ -1167,9 +1172,9 @@ async def cockpit_now():
         # #873: {active, return_at, recovery_at, daikin_holiday_until_sent, holiday_enabled}
         "vacation": _vacation_status_safe(),
         # #879 Home footer + status line: Onecta holiday flags, vendor quota, plan times.
-        "daikin": {"holiday": _daikin_holiday_state()},
-        "quota": _cockpit_quota_safe(),
-        "plan": {"pushed_at_utc": plan_fresh.get("fetched_at_utc")},
+        "daikin": {"holiday": dk_holiday},
+        "quota": await asyncio.to_thread(_cockpit_quota_safe),
+        "plan": {"pushed_at_utc": fox_uploaded_at},
         "plan_date": plan_block["plan_date"],
         # Sign conventions for state.grid_kw / state.battery_kw / current_slot
         # prices. LLM consumers (notably OpenClaw) cannot see Pydantic Field

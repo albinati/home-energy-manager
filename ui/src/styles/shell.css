@@ -248,4 +248,7 @@
     min-width: 0;
   }
   .topnav .nav-link.nav-link--text[href="/"] { display: none; }
+  /* Journal is secondary (PR 4 moves it); keep the one-row phone chrome inside 390 px. */
+  .topnav .nav-link.nav-link--text[href="/report"] { display: none; }
+  .topnav .admin-badge-extra { display: none; }
 }

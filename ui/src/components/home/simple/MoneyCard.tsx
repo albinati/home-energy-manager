@@ -1,13 +1,15 @@
 import { Link } from "wouter-preact";
 import type { PlanFrontsBilling, PlanFrontsResponse } from "../../../lib/types";
-import { gbp, fmt, spendVerdict, spendLine, cycleLabel, billingVerdict } from "./logic";
+import { gbp, fmt, spendVerdict, spendLine, todayNet, cycleLabel, billingVerdict, type HolidayFlags } from "./logic";
 import { BandStrip } from "./BandStrip";
 
-export function MoneyCard({ fronts, nowMs, holiday }: { fronts: PlanFrontsResponse | null; nowMs: number; holiday: boolean }) {
+export function MoneyCard({ fronts, nowMs, holiday, tz }: {
+  fronts: PlanFrontsResponse | null; nowMs: number; holiday: HolidayFlags; tz?: string;
+}) {
   const spend = fronts?.spend && !fronts.spend.error ? fronts.spend : null;
   const billing = fronts?.billing && !fronts.billing.error ? fronts.billing : null;
   const v = spendVerdict(spend);
-  const today = spend?.realised_import_cost_gbp;
+  const today = todayNet(spend);
   const approx = spend?.score_basis === "forecast";
   return (
     <section class="hs-card hs-money" aria-label="Dinheiro">
@@ -15,8 +17,8 @@ export function MoneyCard({ fronts, nowMs, holiday }: { fronts: PlanFrontsRespon
         <div class="hs-money-col">
           <h2 class="hs-eyebrow">Hoje</h2>
           <div class="hs-big">
-            <span class="hs-num hs-num--md">{today != null ? gbp(today) : "—"}</span>
-            {v.word && <span class={`hs-verdict hs-verdict--${v.tone}`}>{approx ? "Previsto: " : ""}{v.word}</span>}
+            <span class="hs-num hs-num--md">{today != null ? (today < 0 ? "−" : "") + gbp(today) : "—"}</span>
+            {v.word && <span class={`hs-verdict hs-verdict--${v.tone}`}>{approx ? "previsto: " : ""}{v.word}</span>}
           </div>
           <p class="hs-meaning">{spendLine(spend)}</p>
         </div>
@@ -26,7 +28,9 @@ export function MoneyCard({ fronts, nowMs, holiday }: { fronts: PlanFrontsRespon
             <>
               <div class="hs-big">
                 <span class="hs-num hs-num--md">{gbp(billing.realised_gbp)}</span>
-                <span class="hs-unit hs-unit--sm">de ~£{fmt(billing.forecast_cycle_gbp, 0)}</span>
+                <span class="hs-unit hs-unit--sm">
+                  {billing.forecast_cycle_gbp != null ? `de ~£${fmt(billing.forecast_cycle_gbp, 0)}` : "até agora"}
+                </span>
               </div>
               <BillingVerdict b={billing} />
             </>
@@ -35,17 +39,20 @@ export function MoneyCard({ fronts, nowMs, holiday }: { fronts: PlanFrontsRespon
           )}
         </div>
       </div>
-      {fronts && <BandStrip fronts={fronts} nowMs={nowMs} holiday={holiday} />}
+      {fronts && <BandStrip fronts={fronts} nowMs={nowMs} holiday={holiday} tz={tz} />}
     </section>
   );
 }
 
 function BillingVerdict({ b }: { b: PlanFrontsBilling }) {
   const v = billingVerdict(b);
+  if (!v) return null;
   return (
     <p class="hs-meaning">
       <span class={v.good ? "hs-good" : "hs-warn"}>{v.lead}</span>
-      {v.others && <> · no ciclo: {v.others}</>}{" "}
+      {v.others.length > 0 && <> · no ciclo: {v.others.map((o, i) => (
+        <span key={i} class="hs-nowrap">{i > 0 ? " · " : ""}{o}</span>
+      ))}</>}{" "}
       <Link href="/insights" class="hs-link">ver →</Link>
     </p>
   );

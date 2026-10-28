@@ -1,12 +1,12 @@
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import {
   simulateBatch, applyBatch, simulateProposeOptimization, proposeOptimization,
 } from "../../../lib/endpoints";
 import { HemApiError } from "../../../lib/api";
 import { Modal } from "../../common/Modal";
 import { toast } from "../../../lib/toast";
-import type { ActionDiffResponse, CockpitVacation, SimulateBatchResponse } from "../../../lib/types";
-import { toDatetimeLocal } from "./logic";
+import type { ActionDiffResponse, CockpitVacation, PlanFrontsBattery, SimulateBatchResponse } from "../../../lib/types";
+import { toDatetimeLocal, isAwayPreset, vacationHelp } from "./logic";
 
 // "Modo da casa" (admin only): Normal | Férias até <datetime>, plus "Replanejar
 // agora". Every write is simulate -> confirm -> apply (X-Simulation-Id); the
@@ -20,14 +20,27 @@ const isSimIdError = (e: unknown): boolean =>
   e instanceof HemApiError && (e.status === 409 || e.status === 410) &&
   /Simulation(Expired|IdRequired|IdMismatch)/.test(e.body || "");
 
-export function ModeBox({ vacation, preset, onChanged }: {
+export function ModeBox({ vacation, preset, battery, nowMs, tz, onChanged }: {
   vacation: CockpitVacation | null | undefined;
   preset: string | undefined;
+  battery: PlanFrontsBattery | null | undefined;
+  nowMs: number;
+  tz?: string;
   onChanged: () => void;
 }) {
-  const away = !!vacation?.active || preset === "vacation";
+  const away = !!vacation?.active || isAwayPreset(preset);
+  const serverRet = toDatetimeLocal(vacation?.return_at);
   const [sel, setSel] = useState<"normal" | "vacation">(away ? "vacation" : "normal");
-  const [ret, setRet] = useState<string>(toDatetimeLocal(vacation?.return_at));
+  const [ret, setRet] = useState<string>(serverRet);
+  // Re-seed when the SERVER state changes (apply, another admin, recovery job);
+  // never while the user is mid-edit (draft differs from the last server value).
+  const [seed, setSeed] = useState({ away, serverRet });
+  useEffect(() => {
+    if (seed.away === away && seed.serverRet === serverRet) return;
+    setSeed({ away, serverRet });
+    setSel(away ? "vacation" : "normal");
+    setRet(serverRet);
+  }, [away, serverRet]);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
 
@@ -72,7 +85,7 @@ export function ModeBox({ vacation, preset, onChanged }: {
     onChanged();
   });
 
-  const dirty = sel !== (away ? "vacation" : "normal") || (sel === "vacation" && toDatetimeLocal(vacation?.return_at) !== ret);
+  const dirty = sel !== (away ? "vacation" : "normal") || (sel === "vacation" && serverRet !== ret);
   const canApply = dirty && (sel === "normal" || !!ret) && !busy;
 
   return (
@@ -98,10 +111,7 @@ export function ModeBox({ vacation, preset, onChanged }: {
         <span class="grow" />
         <button type="button" class="btn btn--sm" disabled={busy} onClick={simulateReplan}>Replanejar agora</button>
       </div>
-      <p class="hs-help">
-        Em férias: Daikin em holiday até a véspera da volta, bateria só com sol e piso 10 %,
-        aquecimento religado 12 h antes da chegada.
-      </p>
+      <p class="hs-help">{vacationHelp(vacation, battery, nowMs, tz)}</p>
 
       <Modal
         open={confirm != null}
@@ -119,11 +129,7 @@ export function ModeBox({ vacation, preset, onChanged }: {
       >
         {confirm?.kind === "mode" && (
           <>
-            <ul class="hs-diff">
-              {confirm.sim.sub_actions.map((d) => (
-                <li key={d.key}><code>{d.key}</code>: <strong>{String(d.before[d.key])}</strong> → <strong>{String(d.after[d.key])}</strong></li>
-              ))}
-            </ul>
+            <p>{confirm.sim.human_summary || "Sem resumo disponível."}</p>
             {confirm.sim.safety_flags.length > 0 && <p class="hs-warn">{confirm.sim.safety_flags.join(" · ")}</p>}
           </>
         )}

@@ -44,29 +44,119 @@ def test_billing_cycle_day_clamped():
 
 
 def test_billing_forecast_formula():
-    assert pf.billing_forecast_gbp(12.40, 8, 23) == round(12.40 + 12.40 / 8 * 23, 2)
-    assert pf.billing_forecast_gbp(0.0, 0, 30) == 0.0
-    assert pf.billing_forecast_gbp(5.0, 3, 0) == 5.0
+    # 7 completed days at 10.0, today partial 1.0 (< avg -> counts as an avg day), 23 days after today
+    avg = 10.0 / 7
+    assert pf.billing_forecast_gbp(10.0, 7, 1.0, 23) == round(10.0 + avg + avg * 23, 2)
+    # today already above the average -> its own value
+    assert pf.billing_forecast_gbp(10.0, 7, 3.0, 23) == round(10.0 + 3.0 + avg * 23, 2)
+    # day 1 of the cycle: no completed day -> no forecast
+    assert pf.billing_forecast_gbp(0.0, 0, 0.5, 30) is None
+    assert pf.billing_forecast_gbp(5.0, 3, 1.0, 0) == round(5.0 + 5.0 / 3, 2)
 
 
-def test_billing_section_shape(monkeypatch):
+def test_short_tariff_label():
+    f = pf.short_tariff_label
+    assert f("Cosy (your tariff)", "E-1R-COSY-22-12-08-H") == "Cosy"
+    assert f("Agile Octopus", "AGILE-24-10-01") == "Agile"
+    assert f("Octopus Flux", "FLUX-IMP-23-02-14") == "Flux"
+    assert f("Octopus Go", "GO-VAR-22-10-14") == "Go"
+    assert f("British Gas Fixed v58", "BG-FIXED") == "fixo"
+    assert f("Standard Variable (SVT)", "SVT") == "variável"
+    assert f("Intelligent Tracker", "TRACKER-1") == "Tracker"
+    assert f("Cosy Octopus 12M Fixed", "COSY-FIX-12M-26-10-14") == "Cosy fixo"
+
+
+def _seed_compare(monkeypatch, rows, done, today_net=None):
     from src.analytics import fair_compare
 
     monkeypatch.setattr(config, "OCTOPUS_BILLING_CYCLE_DAY", 21)
-    monkeypatch.setattr(pf, "_period", lambda s, e: {"n_days": 8, "net_cost_gbp": 12.4})
-    monkeypatch.setattr(fair_compare, "cached_fair_comparison", lambda s, e, n=14: {
-        "tariffs": [
-            {"product_code": "COSY", "display_name": "Cosy", "net_pence": 1240.0, "is_current": True},
-            {"product_code": "FIXED", "display_name": "Fixo", "net_pence": 1870.0, "is_current": False},
-            {"product_code": "AGILE", "display_name": "Agile", "net_pence": 1350.0, "is_current": False},
-        ]})
+    monkeypatch.setattr(pf, "_period", lambda s, e: done if s != e else {"n_days": 1, "net_cost_gbp": today_net or 0.0})
+    monkeypatch.setattr(pf, "_past_compare", lambda s, e: {"tariffs": rows})
+    monkeypatch.setattr(fair_compare, "cached_fair_comparison", lambda s, e, n=14: {"tariffs": []})
+
+
+def _rows(**net):
+    out = []
+    for code, (name, pence, cur, approx) in net.items():
+        out.append({"product_code": code, "display_name": name, "net_pence": pence,
+                    "is_current": cur, "approximate": approx})
+    return out
+
+
+def test_billing_section_shape(monkeypatch):
+    rows = _rows(COSY=("Cosy (your tariff)", 1240.0, True, False),
+                 FIXED=("British Gas Fixed", 1870.0, False, False),
+                 AGILE=("Agile Octopus", 1350.0, False, False))
+    _seed_compare(monkeypatch, rows, {"n_days": 7, "net_cost_gbp": 10.4}, today_net=2.0)
     b = pf.billing_section(date(2026, 10, 28))
     assert (b["cycle_start"], b["cycle_end"]) == ("2026-10-21", "2026-11-20")
     assert (b["days_elapsed"], b["days_total"]) == (8, 31)
     assert b["realised_gbp"] == 12.4
-    assert b["forecast_cycle_gbp"] == round(12.4 + 12.4 / 8 * 23, 2)
-    assert {c["tariff"]: c["delta_gbp"] for c in b["compare"]} == {"FIXED": 6.3, "AGILE": 1.1}
-    assert b["winner"]["tariff"] == "COSY" and b["winner"]["is_current"] is True
+    avg = 10.4 / 7
+    assert b["forecast_cycle_gbp"] == round(10.4 + max(2.0, avg) + avg * 23, 2)
+    by = {c["tariff"]: c for c in b["compare"]}
+    assert by["FIXED"]["delta_gbp"] == 6.3 and by["FIXED"]["short_label"] == "fixo"
+    assert by["AGILE"]["delta_gbp"] == 1.1 and by["AGILE"]["tie"] is False
+    assert b["current_label"] == "Cosy"
+    assert b["winner"]["is_current"] is True and b["since"] is None
+
+
+def test_billing_winner_needs_a_real_saving(monkeypatch):
+    # Agile is cheaper by only 0.5 -> tie, current stays the winner.
+    rows = _rows(COSY=("Cosy (your tariff)", 1240.0, True, False),
+                 AGILE=("Agile Octopus", 1190.0, False, False))
+    _seed_compare(monkeypatch, rows, {"n_days": 7, "net_cost_gbp": 10.4})
+    b = pf.billing_section(date(2026, 10, 28))
+    assert b["compare"][0]["tie"] is True and b["winner"]["is_current"] is True
+    # Cheaper by 3 pounds but only a proxy estimate -> still a tie.
+    rows = _rows(COSY=("Cosy (your tariff)", 1240.0, True, False),
+                 TRACKER=("Intelligent Tracker", 940.0, False, True))
+    _seed_compare(monkeypatch, rows, {"n_days": 7, "net_cost_gbp": 10.4})
+    assert pf.billing_section(date(2026, 10, 28))["winner"]["is_current"] is True
+    # Genuinely cheaper by >= 1 pound, exact -> that tariff wins.
+    rows = _rows(COSY=("Cosy (your tariff)", 1240.0, True, False),
+                 AGILE=("Agile Octopus", 1000.0, False, False))
+    _seed_compare(monkeypatch, rows, {"n_days": 7, "net_cost_gbp": 10.4})
+    w = pf.billing_section(date(2026, 10, 28))["winner"]
+    assert w["is_current"] is False and w["label"] == "Agile"
+
+
+def test_billing_clamp_reports_since_and_uses_covered_days(monkeypatch):
+    from src.analytics import pnl
+
+    rows = _rows(COSY=("Cosy (your tariff)", 600.0, True, False))
+    # PnL only covers 3 of the 7 completed days (tariff start clamp).
+    _seed_compare(monkeypatch, rows, {"n_days": 3, "net_cost_gbp": 6.0})
+    monkeypatch.setattr(pnl, "_agile_start_date", lambda: date(2026, 10, 25))
+    b = pf.billing_section(date(2026, 10, 28))
+    assert b["since"] == "2026-10-25"
+    assert b["forecast_cycle_gbp"] == round(6.0 + 2.0 + 2.0 * 23, 2)  # avg over the 3 covered days
+
+
+def test_billing_day_one_has_no_forecast(monkeypatch):
+    rows = _rows(COSY=("Cosy (your tariff)", 100.0, True, False))
+    _seed_compare(monkeypatch, rows, {"n_days": 0, "net_cost_gbp": 0.0}, today_net=0.4)
+    b = pf.billing_section(date(2026, 10, 21))
+    assert b["days_elapsed"] == 1 and b["forecast_cycle_gbp"] is None and b["realised_gbp"] == 0.4
+
+
+def test_plan_fronts_single_flight(monkeypatch):
+    import threading
+    import time
+
+    calls = []
+
+    def slow(*a, **k):
+        calls.append(1)
+        time.sleep(0.3)
+        return {"windows": []}
+
+    monkeypatch.setattr(pf, "tariff_section", slow)
+    out = []
+    ts = [threading.Thread(target=lambda: out.append(pf.plan_fronts(date(2026, 10, 28)))) for _ in range(4)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert len(calls) == 1 and len(out) == 4
 
 
 def test_billing_section_guarded(monkeypatch):

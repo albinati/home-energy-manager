@@ -20,7 +20,7 @@ export function AdminButton() {
         onClick={() => lock()}
       >
         <span class="admin-dot" aria-hidden="true" />
-        Admin · Lock
+        Admin<span class="admin-badge-extra"> · Lock</span>
       </button>
     );
   }

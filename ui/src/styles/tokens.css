@@ -37,6 +37,10 @@
   --standard: #6b7280;
   --peak: #f59e0b;
   --peak-export: #ef4444;
+  /* text ON a filled tariff band (>= 4.5:1 against its fill, per theme) */
+  --on-cheap: #04120c;
+  --on-standard: #ffffff;
+  --on-peak: #1c1103;
   /* paid-to-import / negative band on the price timeline + appliance chips.
    * Was a never-defined var(--neg, …) fallback in several files — now a real
    * token (same colour, no longer a silent literal). Distinct from
@@ -147,6 +151,9 @@
   --standard: #94a3b8;
   --peak: #d97706;
   --peak-export: #dc2626;
+  --on-cheap: #04120c;
+  --on-standard: #0f172a;
+  --on-peak: #1c1103;
   --neg: #0284c7;
   --cool: #0284c7;
 

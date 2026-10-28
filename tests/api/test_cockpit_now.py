@@ -268,3 +268,56 @@ def test_cockpit_now_indoor_from_sensor(monkeypatch, tmp_path):
     assert ind["rooms"][0]["room"] == "sala"
     assert body["state"]["indoor_c"] == 23.5          # sensor drives indoor_c
     assert body["freshness"]["indoor"]["stale"] is False
+
+
+def test_cockpit_now_does_not_block_event_loop_on_daikin_lock():
+    """#879 B1: the Daikin service lock (held up to ~15 s by a viewer-boost
+    refresh) must never stall the event loop through cockpit/now."""
+    import asyncio
+    import threading
+    import time
+
+    import httpx
+
+    from src.daikin import service as dk
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        with dk._lock:
+            held.set()
+            release.wait(5)
+
+    t = threading.Thread(target=_hold, daemon=True)
+    t.start()
+    assert held.wait(2)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            slow = asyncio.create_task(c.get("/api/v1/cockpit/now"))
+            await asyncio.sleep(0.3)
+            t0 = time.monotonic()
+            r = await c.get("/api/v1/health")
+            elapsed = time.monotonic() - t0
+            release.set()
+            await slow
+            return r.status_code, elapsed
+
+    try:
+        status, elapsed = asyncio.run(_run())
+    finally:
+        release.set()
+        t.join(2)
+    assert status == 200
+    assert elapsed < 1.0, f"event loop stalled {elapsed:.2f}s behind the Daikin lock"
+
+
+def test_cockpit_now_new_fields_content(client):
+    body = client.get("/api/v1/cockpit/now").json()
+    assert set(body["daikin"]) == {"holiday"}
+    q = body["quota"]
+    assert q is None or set(q) == {"fox", "daikin"}
+    # Fox plan upload time only; never the Octopus fetch fallback.
+    assert set(body["plan"]) == {"pushed_at_utc"}

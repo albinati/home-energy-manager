@@ -3,17 +3,18 @@ import { usePoll } from "../lib/poll";
 import { getCockpitNow, getPlanFronts, getStatusAlerts } from "../lib/endpoints";
 import { Icon } from "../components/common/Icon";
 import { Spinner } from "../components/common/Spinner";
-import { computeChips } from "../components/shell/AlertStrip";
+import { computeChips, type Chip } from "../components/shell/AlertStrip";
 import { StatusLine } from "../components/home/simple/StatusLine";
 import { Tile } from "../components/home/simple/Tile";
 import { MoneyCard } from "../components/home/simple/MoneyCard";
 import { ModeBox } from "../components/home/simple/ModeBox";
 import {
-  buildStatus, casaTile, aguaTile, bateriaTile, isHoliday, footerLine,
+  buildStatus, casaTile, aguaTile, bateriaTile, holidayFlags, footerLine,
 } from "../components/home/simple/logic";
 import { publishFreshness, publishCockpitConn } from "../lib/freshness";
 import { buildSha } from "../lib/api";
 import { role } from "../lib/auth";
+import { plannerTz } from "../lib/plannerTz";
 import "../styles/home-simple.css";
 
 // Dev-only fixture switch (`?mock=1`); eliminated from the production bundle.
@@ -34,6 +35,7 @@ export default function Landing() {
   useEffect(() => { publishFreshness(now.data?.freshness); }, [now.data]);
   useEffect(() => { publishCockpitConn({ failCount: now.failCount, lastFetchAt: now.lastFetchAt }); }, [now.failCount, now.lastFetchAt]);
   useEffect(() => () => { publishFreshness(null); publishCockpitConn(null); }, []);
+  useEffect(() => { plannerTz.value = now.data?.planner_tz; }, [now.data?.planner_tz]);
 
   if (now.loading && !now.data) {
     return <div class="hs"><Spinner label="Carregando…" /></div>;
@@ -50,8 +52,11 @@ export default function Landing() {
   const data = now.data;
   const f = fronts.data;
   const nowMs = Date.parse(data.now_utc);
-  const holiday = isHoliday(data) || !!data.vacation?.active;
-  const chips = computeChips(alerts.data, alerts.error);
+  const holiday = holidayFlags(data);
+  // An unreachable /status/alerts must not read as "Tudo normal".
+  const chips: Chip[] = alerts.error && !alerts.data
+    ? [{ key: "alerts-unavailable", tone: "warn", label: "Status indisponível", detail: alerts.error.message }]
+    : computeChips(alerts.data, alerts.error);
   const sha = buildSha();
   const planRunAt = f?.battery && !f.battery.error ? f.battery.plan_run_at : null;
 
@@ -66,10 +71,11 @@ export default function Landing() {
         <Tile icon={<Icon name="battery" size={14} />} title="Bateria" t={bateriaTile(data, f)} />
       </div>
 
-      <MoneyCard fronts={f} nowMs={nowMs} holiday={holiday} />
+      <MoneyCard fronts={f} nowMs={nowMs} holiday={holiday} tz={data.planner_tz} />
 
       {role.value === "admin" && (
         <ModeBox vacation={data.vacation} preset={data.modes?.optimization_preset}
+                 battery={f?.battery} nowMs={nowMs} tz={data.planner_tz}
                  onChanged={() => { void now.refresh(); void fronts.refresh(); }} />
       )}
 

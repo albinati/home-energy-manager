@@ -5,19 +5,26 @@ import { AdminButton } from "./AdminButton";
 import { PeriodNavigator } from "./PeriodNavigator";
 import { Icon } from "../common/Icon";
 import { role } from "../../lib/auth";
+import { plannerTz } from "../../lib/plannerTz";
 
 // Period control only where the page follows it (Insights). Home has none (#879).
 const periodRoutes = ["/insights"];
 
-/** Local wall clock, HH:MM, ticking every 20 s. */
+/** House wall clock (planner timezone), HH:MM, ticking every 20 s. */
 function Clock() {
-  const fmt = () => new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const tz = plannerTz.value;
+  const fmt = () => {
+    const o = { hour: "2-digit", minute: "2-digit", hour12: false } as const;
+    try { return new Date().toLocaleTimeString("pt-BR", { ...o, timeZone: tz }); }
+    catch { return new Date().toLocaleTimeString("pt-BR", o); }
+  };
   const [t, setT] = useState(fmt);
   useEffect(() => {
+    setT(fmt());
     const id = setInterval(() => setT(fmt()), 20_000);
     return () => clearInterval(id);
-  }, []);
-  return <span class="nav-clock" aria-label="Hora local">{t}</span>;
+  }, [tz]);
+  return <span class="nav-clock" aria-label="Hora da casa">{t}</span>;
 }
 
 // Chrome (#879): brand · Casa · Insights · Ajustes (admin) · clock. The brand

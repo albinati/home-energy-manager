@@ -6,7 +6,7 @@ import type { Chip } from "../../shell/AlertStrip";
 export function StatusLine({ chips, text }: { chips: Chip[]; text: string }) {
   if (chips.length > 0) {
     return (
-      <p class="hs-status hs-status--alert" role="status">
+      <p class="hs-status hs-status--alert" aria-live="polite">
         {chips.map((c) => (
           <span key={c.key} class={`alert-chip alert-chip--${c.tone}`} title={c.detail}>
             <Icon name="warn" size={12} />
@@ -17,7 +17,7 @@ export function StatusLine({ chips, text }: { chips: Chip[]; text: string }) {
     );
   }
   return (
-    <p class="hs-status" role="status">
+    <p class="hs-status" aria-live="polite">
       <span class="hs-dot" aria-hidden="true" />
       {text}
     </p>
