@@ -128,6 +128,7 @@ from .routers import thermal as thermal_router
 from .routers import pv as pv_router
 from .routers import sensors as sensors_router
 from .routers import tuning as tuning_router
+from .routers import insights as insights_router
 from .routers import status as status_router
 from .routers import workbench as workbench_router
 
@@ -368,6 +369,7 @@ app.include_router(scorecard_router.router)
 app.include_router(thermal_router.router)
 app.include_router(sensors_router.router)
 app.include_router(tuning_router.router)
+app.include_router(insights_router.router)
 app.include_router(status_router.router)
 
 # Mount the FastMCP streamable-HTTP transport at /mcp, guarded by a bearer
