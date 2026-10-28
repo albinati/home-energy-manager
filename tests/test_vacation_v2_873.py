@@ -28,6 +28,10 @@ def _env(monkeypatch):
     monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London", raising=False)
     monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False, raising=False)
     monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    # no daemon threads / real sleeps: tests run the side effects inline
+    monkeypatch.setattr(vacation, "BACKGROUND", False)
+    monkeypatch.setattr(vacation, "_MPC_RETRY_WAIT_S", 0.0)
+    monkeypatch.setattr(vacation, "_HOLIDAY_POLL_WAIT_S", 0.0)
     yield
     type(config)._overrides.clear()
     rts.clear_cache()
@@ -41,6 +45,8 @@ class _World:
         self.risks: list[str] = []
         self.infos: list[str] = []
         self.holiday_fail = False
+        self.mpc_results: list[bool] = []   # popped per call; empty -> True
+        self.jobs: list[dict] = []
         self.kv_at_post: str | None = None
         self.devices = [SimpleNamespace(is_on=False, tank_on=True, tank_temperature=44.0)]
         from src import notifier
@@ -53,17 +59,26 @@ class _World:
         monkeypatch.setattr(svc, "force_refresh_devices", self._refresh)
         monkeypatch.setattr(svc, "get_cached_devices", self._refresh_cached)
         monkeypatch.setattr(runner, "bulletproof_mpc_job", self._mpc)
+        monkeypatch.setattr(
+            runner, "_background_scheduler",
+            SimpleNamespace(add_job=lambda fn, trig, **kw: self.jobs.append({"fn": fn, "trig": trig, **kw}),
+                            remove_job=lambda jid: None),
+        )
         monkeypatch.setattr(notifier, "notify_risk", lambda m, extra=None: self.risks.append(m))
         monkeypatch.setattr(notifier, "notify_action_confirmation", lambda m: self.infos.append(m))
 
     def _holiday(self, enabled, start_date=None, end_date=None, actor="api"):
         self.calls.append(("holiday", enabled, start_date, end_date))
+        if not enabled:
+            self.preset_at_off = config.OPTIMIZATION_PRESET
         self.kv_at_post = db.get_kv(vacation.KV_END_AT)
         if self.holiday_fail:
             raise DaikinError("HTTP 500: boom")
 
     def _refresh(self, actor, min_interval_seconds=None):
         self.calls.append(("read",))
+        if getattr(self, "device_seq", None):
+            return SimpleNamespace(devices=[self.device_seq.pop(0)])
         return SimpleNamespace(devices=self.devices)
 
     def _refresh_cached(self, allow_refresh=True, actor="x", **kw):
@@ -72,7 +87,7 @@ class _World:
 
     def _mpc(self, **kw):
         self.calls.append(("mpc", kw))
-        return True
+        return self.mpc_results.pop(0) if self.mpc_results else True
 
     def writes(self):
         return [c[0] if c[0] != "holiday" else ("holiday", c[1]) for c in self.calls if c[0] != "read"]
@@ -223,8 +238,13 @@ def test_recovery_time_is_return_minus_hours_and_snaps_on_banded(monkeypatch):
     monkeypatch.setattr(le, "band_windows_for_day", _wins)
     # target 06:00 UTC (06:00 GMT on 7 Nov) sits inside 04-07 -> snap to 04:00
     assert vacation.compute_recovery_at(ret) == _utc(2026, 11, 7, 4)
-    # target 10:00 (return 22:00) is in the day band -> previous cheap start 04:00
-    assert vacation.compute_recovery_at(_utc(2026, 11, 7, 22)) == _utc(2026, 11, 7, 4)
+    # target 10:00 is 6 h after the 04:00 start (> 3 h bound) -> NOT snapped
+    assert vacation.compute_recovery_at(_utc(2026, 11, 7, 22)) == _utc(2026, 11, 7, 10)
+    # target 14:30 is 1.5 h into the 13-16 band -> snap to 13:00
+    assert vacation.compute_recovery_at(_utc(2026, 11, 8, 2, 30)) == _utc(2026, 11, 7, 13)
+    # never snap into the past: a 04:00 start before now+60s keeps the raw target
+    now = _utc(2026, 11, 7, 5)
+    assert vacation.compute_recovery_at(ret, now) == _utc(2026, 11, 7, 6)
 
 
 # ---------------------------------------------------------------------------

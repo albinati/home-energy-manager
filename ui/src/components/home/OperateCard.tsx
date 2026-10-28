@@ -74,6 +74,7 @@ export function OperateCard({ appliances, applianceJobs, onChanged }: OperateCar
 
   const modeSpec = settings.data?.settings.find((s) => s.key === MODE_KEY);
   const currentMode = modeSpec ? String(modeSpec.value) : null;
+  const returnSpec = settings.data?.settings.find((s) => s.key === "VACATION_RETURN_AT");
   const allModes = (modeSpec?.enum ?? ["normal", "guests", "vacation"]) as string[];
   // normal | vacation only; a stored "guests" stays visible so the control never lies.
   const modes = allModes.filter((m) => PRIMARY_MODES.includes(m) || m === currentMode);
@@ -117,12 +118,14 @@ export function OperateCard({ appliances, applianceJobs, onChanged }: OperateCar
     });
 
   const chooseMode = (m: string) => {
-    if (!unlocked || m === currentMode) return;
+    if (!unlocked) return;
     if (m === "vacation") {
       // Return time first: the backend rejects vacation without a future one (422).
-      setVacationDraft("");
+      // Also reachable while already in vacation: edit the return time.
+      setVacationDraft(m === currentMode ? toDatetimeLocal(returnSpec?.value) : "");
       return;
     }
+    if (m === currentMode) return;
     setVacationDraft(null);
     simulateMode(m, { [MODE_KEY]: m });
   };

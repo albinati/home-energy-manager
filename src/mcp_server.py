@@ -2962,7 +2962,7 @@ def build_mcp() -> FastMCP:
             }
         prev_preset = _vac.current_preset()
         try:
-            canonical = rts.set_setting(key, value, actor="mcp")
+            canonical = _vac.persist_setting(key, value, actor="mcp")
         except rts.SettingValidationError as e:
             return {"ok": False, "error": str(e)}
         cron_status = None

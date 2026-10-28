@@ -2001,7 +2001,14 @@ def _run_optimizer_lp(
     _load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
     # guests preset lifts the residual base load (visitors raise base load, not
     # just DHW) — 1.0 no-op for normal/vacation. Applied on top of _load_scale.
-    _guests_scale = _guests_base_load_scale() * _vacation_base_load_scale()
+    _guests_scale = _guests_base_load_scale()
+    # #873: vacation load scale applies only to slots BEFORE the stored recovery time,
+    # so the plan solved the evening before provisions the arrival evening.
+    _vac_scale = _vacation_base_load_scale()
+    _vac_cut = None
+    if _vac_scale != 1.0:
+        from .. import vacation as _vacation_mod
+        _vac_cut = _vacation_mod.recovery_cutoff()
     # Phase-2 additive per-local-hour bias correction — applied to the residual
     # base load (so the committed base_load_json the error log measures includes
     # it → the loop closes). OFF unless LOAD_RECENT_BIAS_ENABLED; empty otherwise.
@@ -2025,7 +2032,8 @@ def _run_optimizer_lp(
         _dow = _local.weekday()
         _h = _local.hour
         _m = 30 if _local.minute >= 30 else 0
-        _b = db.lookup_residual_kwh(_prof, _dow, _h, _m) * _load_scale * _guests_scale
+        _vs = 1.0 if (_vac_cut is not None and s.start_utc >= _vac_cut) else _vac_scale
+        _b = db.lookup_residual_kwh(_prof, _dow, _h, _m) * _load_scale * _guests_scale * _vs
         if _load_bias:
             _b = max(0.0, _b + _load_bias.get(_h, 0.0))
         base_load.append(_b)
@@ -2033,7 +2041,7 @@ def _run_optimizer_lp(
         if _q != "p75":
             _n_hi_quantile += 1
         base_load_spread.append(
-            db.lookup_residual_quantile_kwh(_prof, _dow, _h, _m, _q) * _load_scale * _guests_scale
+            db.lookup_residual_quantile_kwh(_prof, _dow, _h, _m, _q) * _load_scale * _guests_scale * _vs
         )
     if _n_hi_quantile:
         logger.info(

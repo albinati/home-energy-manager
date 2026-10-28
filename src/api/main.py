@@ -2372,8 +2372,8 @@ async def settings_put(key: str, payload: dict, x_simulation_id: str | None = He
         raise HTTPException(status_code=422, detail=str(e)) from e
     try:
         if "VACATION_RETURN_AT" in vac_changes and key != "VACATION_RETURN_AT":
-            rts.set_setting("VACATION_RETURN_AT", vac_changes["VACATION_RETURN_AT"], actor="api")
-        canonical = rts.set_setting(key, payload["value"], actor="api")
+            _vac.persist_setting("VACATION_RETURN_AT", vac_changes["VACATION_RETURN_AT"], actor="api")
+        canonical = _vac.persist_setting(key, payload["value"], actor="api")
     except rts.SettingValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -2394,9 +2394,20 @@ async def settings_delete(key: str):
     """Clear the override row — the next read returns the env default. Same
     cron side effect as PUT when the key is cadence-related."""
     from .. import runtime_settings as rts
+    from .. import vacation as _vac
     if key not in rts.SCHEMA:
         raise HTTPException(status_code=404, detail=f"unknown setting {key!r}")
+    if key == "VACATION_RETURN_AT" and _vac.current_preset() == "vacation":
+        raise HTTPException(
+            status_code=422,
+            detail="cannot clear VACATION_RETURN_AT while OPTIMIZATION_PRESET=vacation; set the preset back to normal",
+        )
+    prev_preset = _vac.current_preset()
     removed = rts.delete_setting(key, actor="api")
+    if key in ("OPTIMIZATION_PRESET", "VACATION_RETURN_AT"):
+        # The env default re-asserts (normal): a stored trip must end like a cancel.
+        config.clear_override(key)
+        _vac.after_settings_applied(prev_preset, {key: None}, actor="api")
     cron_status = None
     if rts.SCHEMA[key].cron_reload:
         cron_status = reregister_cron_jobs(reason=f"settings_delete:{key}")
@@ -4276,7 +4287,13 @@ async def optimization_set_preset(req: SetPresetRequest, x_simulation_id: str | 
             _vac.set_preset("vacation", req.return_at, actor="api")
         except _vac.VacationReturnAtError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
+        except _vac.SettingValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+    elif req.preset in ("normal", "guests"):
+        # Persisted + override cleared (an in-memory override would shadow later PUTs).
+        _vac.set_preset(req.preset, actor="api")
     else:
+        # legacy "boost": old in-memory path
         _prev = _vac.current_preset()
         config.OPTIMIZATION_PRESET = req.preset
         _vac.after_settings_applied(_prev, {"OPTIMIZATION_PRESET": req.preset}, actor="api")
@@ -4899,7 +4916,7 @@ async def settings_batch_apply(
         except Exception:
             prior = None
         try:
-            canonical = rts.set_setting(key, value, actor="api_batch")
+            canonical = _vac.persist_setting(key, value, actor="api_batch")
             applied.append((key, prior))
             results.append({"key": key, "ok": True, "value": canonical})
         except Exception as exc:

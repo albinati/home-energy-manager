@@ -1111,6 +1111,8 @@ def _validate_vacation_return_at(v: Any) -> None:
         return  # empty = unset (clearing is always allowed)
     from datetime import datetime as _dt
 
+    if s[-1] in "zZ":  # the str layer lower-cases: "...t18:00:00z"
+        s = s[:-1] + "+00:00"
     try:
         _dt.fromisoformat(s)
     except ValueError as e:

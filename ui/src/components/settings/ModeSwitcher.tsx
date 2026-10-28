@@ -31,11 +31,13 @@ export const MODE_META: Record<string, { label: string; sub: string; icon: IconN
 // Modes offered by the primary toggles (Home + Settings header).
 export const PRIMARY_MODES = ["normal", "vacation"];
 
-// The stored return time is lower-cased by the settings layer ("2026-11-07t18:00");
-// the datetime-local input wants "YYYY-MM-DDTHH:mm".
+// The stored return time is lower-cased by the settings layer ("2026-11-07t18:00",
+// possibly with seconds/offset); the datetime-local input wants "YYYY-MM-DDTHH:mm".
+// Compare values THROUGH this function on both sides so an untouched value never
+// reads as a change (a re-submit re-activates the vacation).
 export function toDatetimeLocal(v: unknown): string {
   const s = String(v ?? "").trim();
-  return s ? s.slice(0, 16).replace(/t/, "T") : "";
+  return s ? s.replace(/t/i, "T").slice(0, 16) : "";
 }
 
 interface ModeSwitcherProps {

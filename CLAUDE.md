@@ -215,18 +215,29 @@ payload (zero extra quota, lag up to `DAIKIN_HEARTBEAT_REFRESH_SECONDS`).
   heating, a late one a cold arrival). If that is before today -> `endDate = startDate = today`
   (warned). Local day, so BST/GMT changes are right (23:30 UTC on 24 Oct 2026 is 25 Oct local).
 - **Recovery time** = `VACATION_RETURN_AT - VACATION_RECOVERY_HOURS` (runtime, default 12, 0..72),
-  snapped back to the START of the previous CHEAP band on a banded tariff
-  (`analytics.load_expected.band_windows_for_day`, key `band_cheap`); dynamic tariff: no snap. A time
-  already in the past fires ~60 s after activation (~30 s after boot when re-armed).
+  snapped back to the START of a CHEAP band on a banded tariff
+  (`analytics.load_expected.band_windows_for_day`, key `band_cheap`) - but ONLY when the target is
+  inside that band or within 3 h after its start (a longer snap would heat through the day/peak
+  bands), and never to a time before `now + 60 s`. Dynamic / unknown tariff: no snap. A time already
+  inside `now + 60 s` is clamped to `now + 60 s` (`recovery_immediate`: the holiday-ON POST is then
+  SKIPPED, it would only race the OFF); on boot a past time fires ~30 s later.
 - **Recovery = `vacation_end`** (`run_recovery`, DateTrigger job id `vacation_end`, re-armed from
-  `kv_state` by `start_background_scheduler` via `vacation.rearm_from_kv`; idempotent, single-flight,
-  every step logged in `action_log` `vacation_end` and never blocking the next): holiday OFF -> force
-  device read -> `set_power(True)` / `set_tank_power(True)` ONLY for a point whose cached `onOffMode`
-  is off -> read back (only when something was written) -> preset back to normal (or the current
-  guests/normal choice) + `VACATION_RETURN_AT` cleared -> `bulletproof_mpc_job(force_write_devices=True,
-  bypass_cooldown=True, trigger_reason="vacation_end")` -> clear `kv_state` -> one Telegram with the
-  plan's predicted indoor at the return time (when the plan has one) and the tank C. The #872
-  heartbeat holiday-exit tick may also fire its own `holiday_end` replan; both are idempotent.
+  `kv_state` by `start_background_scheduler` via `vacation.rearm_from_kv` - ALWAYS, also with the kill
+  switch off; idempotent, single-flight; every step logged in `action_log` `vacation_end`, never
+  blocking the next). It first WAITS for an in-flight activation (`_activation_lock`, held from
+  `begin_activation` to `finish_activation`) so holiday-OFF can never overtake holiday-ON. Sequence:
+  (1) preset back to normal (or the current guests/normal choice) + `VACATION_RETURN_AT` cleared -
+  FIRST, so a concurrent #872 heartbeat `holiday_end` solve already plans a normal house; (2) holiday OFF
+  (always allowed, also with the kill switch off); (3) force device read, polled up to 3 x 30 s until the
+  holiday flags clear (Onecta lags; else the #872 gate rejects the power-on and the MPC plans
+  `daikin_state=off`; attempts in `steps.holiday_poll`); (4) `set_power(True)` / `set_tank_power(True)`
+  ONLY for a point whose cached `onOffMode` is off; (5) read back (only when something was written);
+  (6) `bulletproof_mpc_job(force_write_devices=True, bypass_cooldown=True, trigger_reason="vacation_end")`
+  - the job RETURNS False (no raise) when the dispatch lock is busy / scheduler paused / backend not lp,
+  so it is retried up to 5 x 20 s and a final False is recorded as `failed` ("houve falhas" in the
+  Telegram; same retry for `vacation_start`); (7) clear `kv_state`; (8) one Telegram with the plan's
+  predicted indoor at the return time (when it has one) and the tank C. The #872 heartbeat exit tick may
+  still fire its own `holiday_end` replan; harmless (preset already normal).
 - **Cancel early.** Leaving vacation (preset -> normal) while `vacation_end_at` is stored runs the SAME
   recovery immediately (`trigger=cancel`) and clears `kv_state`.
 - **While away.** Daikin is passive-like through the #872 detection (`DAIKIN_CONTROL_MODE` is NOT
@@ -238,8 +249,22 @@ payload (zero extra quota, lag up to `DAIKIN_HEARTBEAT_REFRESH_SECONDS`).
   `LP_VACATION_LOAD_SCALE` (runtime, default 0.35, 0.1..1.0: an empty house measured 0.3-0.45 kW vs
   ~1 kW occupied; `optimizer._vacation_base_load_scale()`, mirrored in `lp_simulation`; exactly 1.0
   outside vacation). Peak-import penalty unchanged.
-- **Kill switch** `VACATION_DAIKIN_HOLIDAY_ENABLED` (runtime, default true): false -> no Onecta write, no
-  `kv_state`, no recovery job (the bare pre-#873 preset; the return-time requirement still applies).
+- **Kill switch** `VACATION_DAIKIN_HOLIDAY_ENABLED` (runtime, default true): false -> NEW vacations write no
+  Onecta holiday, no `kv_state`, no recovery job (the bare pre-#873 preset; the return-time requirement
+  still applies). It does NOT strand a stored trip: a stored recovery is still re-armed at boot and
+  still resets the preset / turns holiday off.
+- **Requires `DAIKIN_CONTROL_MODE=active`** (and not `OPENCLAW_READ_ONLY`): in passive every Daikin step
+  fails by design (the service guard) and the recovery reports "houve falhas"; read-only skips them.
+- **Threading.** `begin_activation` (validate, persist `kv_state`, arm the job) is SYNCHRONOUS in the
+  request; only `finish_activation` (POST + replan + Telegram) and the cancel-early recovery run in a
+  daemon thread (`vacation.BACKGROUND`, tests flip it). A failed `begin_activation` (e.g. a DB error)
+  returns `vacation: {"status": "error"}` + `notify_risk`; no job armed (`inactive`/`error`) also raises
+  a `notify_risk`. Every entry point clears a pinned in-memory `config` override of the preset /
+  return-time keys (`vacation.persist_setting`, legacy normal/guests now persist too) and
+  `DELETE /settings/OPTIMIZATION_PRESET` runs the same cancel hook (`DELETE VACATION_RETURN_AT` during
+  vacation is a 422). `VACATION_RETURN_AT` accepts a trailing `Z`/offset.
+- **Load scale cutoff.** `LP_VACATION_LOAD_SCALE` applies only to slots BEFORE the stored recovery time
+  (`vacation.recovery_cutoff()`), so the plan solved the evening before provisions the arrival evening.
 - **Guests demoted.** `GUESTS_DETECT_ENABLED` code default is now false. The Home Operate card and the
   Settings ModeSwitcher show `normal | vacation` only (vacation takes a `datetime-local` return time;
   the date-range footnote is gone); `guests` stays in the enum and in Settings > "Vacation & guests"

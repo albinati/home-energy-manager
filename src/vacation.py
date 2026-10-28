@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -42,6 +43,20 @@ JOB_ID = "vacation_end"
 _MIN_LEAD = timedelta(seconds=60)
 
 _recovery_lock = threading.Lock()
+# Held from begin_activation until finish_activation ends: a recovery / cancel that
+# arrives while the holiday-ON POST is still in flight WAITS for it (else holiday-OFF
+# could land first and the unit would stay in holiday with the preset back to normal).
+_activation_lock = threading.Lock()
+_ACTIVATION_WAIT_S = 180.0
+
+# After-write helpers are background threads in production; tests flip this off.
+BACKGROUND = True
+
+_MPC_ATTEMPTS = 5            # bulletproof_mpc_job returns False when the dispatch lock is busy
+_MPC_RETRY_WAIT_S = 20.0
+_HOLIDAY_POLL_ATTEMPTS = 3   # Onecta lags after holiday-off
+_HOLIDAY_POLL_WAIT_S = 30.0
+_SNAP_MAX_AFTER = timedelta(hours=3)
 
 
 class VacationReturnAtError(SettingValidationError):
@@ -88,11 +103,16 @@ def parse_return_at(raw: Any, tz: ZoneInfo | None = None) -> datetime | None:
     s = str(raw or "").strip()
     if not s:
         return None
+    if s[-1] in "zZ":  # the settings layer lower-cases strings: "...t18:00:00z"
+        s = s[:-1] + "+00:00"
     try:
         dt = datetime.fromisoformat(s)
     except ValueError:
         return None
     if dt.tzinfo is None:
+        # Naive local time: resolve in BULLETPROOF_TIMEZONE (fold=0: an ambiguous
+        # autumn hour reads as the first occurrence; a nonexistent spring-forward
+        # hour is shifted forward by zoneinfo).
         dt = dt.replace(tzinfo=tz or _tz())
     return dt.astimezone(UTC)
 
@@ -134,10 +154,11 @@ def check_preset_changes(changes: dict[str, Any], now: datetime | None = None) -
 # Timing: recovery fire time and the firmware fallback window
 # ---------------------------------------------------------------------------
 
-def _snap_to_cheap_band_start(target: datetime) -> datetime:
-    """Start of the latest CHEAP band at or before ``target`` on a banded tariff.
-
-    Dynamic tariff (or any failure / no cheap window known): ``target`` unchanged.
+def _snap_to_cheap_band_start(target: datetime, now: datetime | None = None) -> datetime:
+    """Start of the latest CHEAP band at or before ``target`` on a banded tariff -
+    but ONLY when the target is inside that band or within 3 h after its start
+    (a longer snap would heat through the day/peak bands for hours), and never to
+    a time before ``now + 60 s``. Dynamic tariff / failure / no match: unchanged.
     """
     try:
         from .analytics.load_expected import band_windows_for_day
@@ -150,16 +171,31 @@ def _snap_to_cheap_band_start(target: datetime) -> datetime:
             if kind != "banded":
                 return target
             cands.extend(w.start_utc for w in wins if w.key == "band_cheap" and w.start_utc <= target)
-        return max(cands) if cands else target
+        if not cands:
+            return target
+        start = max(cands)
+        if target - start > _SNAP_MAX_AFTER:
+            return target
+        if now is not None and start < now + _MIN_LEAD:
+            return target
+        return start
     except Exception as exc:  # noqa: BLE001 - snapping is an optimisation
         logger.debug("vacation: cheap-band snap failed (%s); using raw target", exc)
         return target
 
 
-def compute_recovery_at(return_at_utc: datetime) -> datetime:
-    """``return_at - VACATION_RECOVERY_HOURS``, snapped to the previous cheap-band start."""
+def compute_recovery_at(return_at_utc: datetime, now: datetime | None = None) -> datetime:
+    """``return_at - VACATION_RECOVERY_HOURS``, snapped (bounded) to a cheap-band start."""
     hours = max(0, int(config.VACATION_RECOVERY_HOURS))
-    return _snap_to_cheap_band_start(return_at_utc - timedelta(hours=hours))
+    return _snap_to_cheap_band_start(return_at_utc - timedelta(hours=hours), now)
+
+
+def recovery_cutoff() -> datetime | None:
+    """Stored recovery fire time (UTC) or None - the LP load scale stops applying there."""
+    try:
+        return _parse_iso_utc(db.get_kv(KV_END_AT))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def holiday_dates(recovery_at_utc: datetime, now_utc: datetime) -> tuple[str, str, bool]:
@@ -291,9 +327,8 @@ def rearm_from_kv() -> str | None:
         recovery_at = _parse_iso_utc(db.get_kv(KV_END_AT))
         if recovery_at is None:
             return None
-        if not config.VACATION_DAIKIN_HOLIDAY_ENABLED:
-            logger.info("vacation: kill switch off - stored recovery not re-armed")
-            return "disabled"
+        # The kill switch gates NEW activations and the holiday-ON POST only: a trip
+        # already stored must still end (preset reset at minimum).
         return arm_recovery_job(recovery_at)
     except Exception as exc:  # noqa: BLE001
         logger.warning("vacation: re-arm failed: %s", exc)
@@ -314,7 +349,7 @@ def begin_activation(*, actor: str = "api", now: datetime | None = None) -> dict
         _log("vacation_start", {"reason": "kill_switch_off", "actor": actor}, result="skipped")
         return None
     return_at = require_return_at(now=now)
-    recovery_at = compute_recovery_at(return_at)
+    recovery_at = compute_recovery_at(return_at, now)
     immediate = recovery_at <= now + _MIN_LEAD
     if immediate:
         recovery_at = now + _MIN_LEAD
@@ -336,18 +371,74 @@ def begin_activation(*, actor: str = "api", now: datetime | None = None) -> dict
         "holiday_post": None,
         "holiday_until_sent": None,
     }
-    # ORDER: kv FIRST (a failed POST must still leave a scheduled recovery) ...
-    db.set_kv(KV_END_AT, _iso(recovery_at))
-    _save_state(plan)
-    plan["job"] = arm_recovery_job(recovery_at)
+    # Held until finish_activation ends (S1); a recovery arriving meanwhile waits.
+    if not _activation_lock.acquire(timeout=_ACTIVATION_WAIT_S):
+        logger.warning("vacation: previous activation still in flight - continuing")
+        plan["lock"] = False
+    else:
+        plan["lock"] = True
+    try:
+        # ORDER: kv FIRST (a failed POST must still leave a scheduled recovery) ...
+        db.set_kv(KV_END_AT, _iso(recovery_at))
+        _save_state({k: v for k, v in plan.items() if k != "lock"})
+        plan["job"] = arm_recovery_job(recovery_at)
+    except Exception:
+        _release_activation(plan)
+        raise
     return plan
+
+
+def _release_activation(plan: dict[str, Any]) -> None:
+    if plan.pop("lock", False):
+        try:
+            _activation_lock.release()
+        except RuntimeError:
+            pass
+
+
+def _run_mpc(reason: str) -> str:
+    """``bulletproof_mpc_job`` RETURNS False (no raise) when the dispatch lock is busy,
+    the scheduler is paused or the backend is not lp. Retry (bounded) and report it."""
+    from .scheduler import runner
+
+    last = "not run"
+    for attempt in range(1, _MPC_ATTEMPTS + 1):
+        try:
+            ok = runner.bulletproof_mpc_job(
+                force_write_devices=True, bypass_cooldown=True, trigger_reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            last = f"raised: {exc}"
+        else:
+            if ok:
+                return "ok" if attempt == 1 else f"ok (attempt {attempt})"
+            last = "returned False (busy / paused / non-lp)"
+        logger.warning("vacation: MPC %s attempt %d/%d: %s", reason, attempt, _MPC_ATTEMPTS, last)
+        if attempt < _MPC_ATTEMPTS:
+            time.sleep(_MPC_RETRY_WAIT_S)
+    return f"failed: {last} after {_MPC_ATTEMPTS} attempts"
 
 
 def finish_activation(plan: dict[str, Any]) -> dict[str, Any]:
     """Second half: POST the Onecta window, replan, one Telegram. Never raises."""
+    try:
+        return _finish_activation(plan)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("vacation_start failed")
+        _notify_risk(f"Ativação das férias falhou: {exc}")
+        return {"status": "error", "error": str(exc)}
+    finally:
+        _release_activation(plan)
+
+
+def _finish_activation(plan: dict[str, Any]) -> dict[str, Any]:
     results: dict[str, Any] = {}
     if config.OPENCLAW_READ_ONLY:
         results["holiday_post"] = "skipped_read_only"
+    elif plan.get("recovery_immediate"):
+        # Recovery fires within a minute: a holiday-ON now would only race the OFF.
+        results["holiday_post"] = "skipped_immediate"
     else:
         try:
             daikin_service.set_holiday_mode(
@@ -363,24 +454,24 @@ def finish_activation(plan: dict[str, Any]) -> dict[str, Any]:
                 f"A recuperação segue agendada para {_fmt_local(_parse_iso_utc(plan['recovery_at']))}. ({exc})"
             )
     plan["holiday_post"] = results["holiday_post"]
+    if plan.get("job") != "scheduled":
+        # Without a job nothing ends the trip: say so loudly.
+        results["job"] = plan.get("job")
+        _notify_risk(
+            f"Recuperação das férias NÃO foi agendada ({plan.get('job')}); "
+            "volte para 'normal' manualmente ou reinicie o serviço."
+        )
     try:
-        _save_state(plan)
+        persist = {k: v for k, v in plan.items() if k != "lock"}
+        _save_state(persist)
     except Exception:  # noqa: BLE001
         pass
     _log("vacation_start", {**{k: plan.get(k) for k in (
         "return_at", "recovery_at", "start_date", "end_date", "clamped", "job",
         "recovery_immediate", "actor")}, **results},
-         result="ok" if results["holiday_post"] in ("ok", "skipped_read_only") else "partial")
-    try:
-        from .scheduler.runner import bulletproof_mpc_job
-
-        bulletproof_mpc_job(
-            force_write_devices=True, bypass_cooldown=True, trigger_reason="vacation_start",
-        )
-        results["replan"] = "ok"
-    except Exception as exc:  # noqa: BLE001
-        results["replan"] = f"failed: {exc}"
-        logger.warning("vacation_start replan failed: %s", exc)
+         result="ok" if (results["holiday_post"] in ("ok", "skipped_read_only", "skipped_immediate")
+                         and plan.get("job") == "scheduled") else "partial")
+    results["replan"] = _run_mpc("vacation_start")
     until = plan.get("holiday_until_sent")
     _notify(
         f"Fora até {_fmt_local(_parse_iso_utc(plan['return_at']))}; "
@@ -450,12 +541,21 @@ def run_recovery(trigger: str = "scheduled") -> dict[str, Any]:
     if not _recovery_lock.acquire(blocking=False):
         return {"status": "busy"}
     try:
+        # A holiday-ON POST may still be in flight: wait for it (S1).
+        if _activation_lock.acquire(timeout=_ACTIVATION_WAIT_S):
+            _activation_lock.release()
+        else:
+            logger.warning("vacation_end: activation still in flight after %.0fs - going ahead", _ACTIVATION_WAIT_S)
         return _run_recovery_locked(trigger)
     except Exception as exc:  # noqa: BLE001
         logger.exception("vacation_end failed")
         return {"status": "error", "error": str(exc)}
     finally:
         _recovery_lock.release()
+
+
+def _has_failure(steps: dict[str, Any]) -> bool:
+    return any("failed" in str(v) for v in steps.values())
 
 
 def _run_recovery_locked(trigger: str) -> dict[str, Any]:
@@ -466,49 +566,9 @@ def _run_recovery_locked(trigger: str) -> dict[str, Any]:
     steps: dict[str, Any] = {}
     read_only = bool(config.OPENCLAW_READ_ONLY)
 
-    # 1. holiday off (errors logged, never block)
-    if read_only:
-        steps["holiday_off"] = "skipped_read_only"
-    else:
-        try:
-            daikin_service.set_holiday_mode(False, actor="vacation_end")
-            steps["holiday_off"] = "ok"
-        except Exception as exc:  # noqa: BLE001
-            steps["holiday_off"] = f"failed: {exc}"
-            logger.warning("vacation_end: holiday off failed: %s", exc)
-
-    # 2. read state (fresh: the holiday flag must clear before the writers' gate)
-    devices = _read_devices(force=True)
-    dev = devices[0] if devices else None
-    steps["read"] = "ok" if dev is not None else "no_devices"
-
-    # 3. power climate / tank on when the cache says off
-    powered: dict[str, str] = {}
-    if dev is not None and not read_only:
-        for label, is_on, fn in (
-            ("climate", getattr(dev, "is_on", None), daikin_service.set_power),
-            ("tank", getattr(dev, "tank_on", None), daikin_service.set_tank_power),
-        ):
-            if is_on is False:
-                try:
-                    fn(True, actor="vacation_end")
-                    powered[label] = "ok"
-                except Exception as exc:  # noqa: BLE001
-                    powered[label] = f"failed: {exc}"
-                    logger.warning("vacation_end: power-on (%s) failed: %s", label, exc)
-    steps["power_on"] = powered or "not_needed"
-
-    # 4. read back (only when something was written)
-    if powered:
-        back = _read_devices(force=True)
-        if back:
-            dev = back[0]
-            steps["read_back"] = {
-                "climate_on": getattr(dev, "is_on", None),
-                "tank_on": getattr(dev, "tank_on", None),
-            }
-
-    # 5. preset normal + clear the return time
+    # 1. preset normal + clear the return time FIRST: a concurrent #872 heartbeat
+    #    `holiday_end` solve (it fires as soon as the holiday flag drops) must already
+    #    see `normal`, not plan the house as still away.
     try:
         from . import runtime_settings as rts
 
@@ -524,17 +584,71 @@ def _run_recovery_locked(trigger: str) -> dict[str, Any]:
         steps["preset"] = f"failed: {exc}"
         logger.warning("vacation_end: preset reset failed: %s", exc)
 
-    # 6. replan with device writes (battery + Daikin rows for the recovery)
-    try:
-        from .scheduler.runner import bulletproof_mpc_job
+    # 2. holiday off (errors logged, never block). Disabling is always allowed, also
+    #    with the kill switch off (it only gates NEW holiday-ON writes).
+    if read_only:
+        steps["holiday_off"] = "skipped_read_only"
+    else:
+        try:
+            daikin_service.set_holiday_mode(False, actor="vacation_end")
+            steps["holiday_off"] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            steps["holiday_off"] = f"failed: {exc}"
+            logger.warning("vacation_end: holiday off failed: %s", exc)
 
-        bulletproof_mpc_job(
-            force_write_devices=True, bypass_cooldown=True, trigger_reason="vacation_end",
-        )
-        steps["mpc"] = "ok"
-    except Exception as exc:  # noqa: BLE001
-        steps["mpc"] = f"failed: {exc}"
-        logger.warning("vacation_end: MPC failed: %s", exc)
+    # 3. read state; Onecta lags after holiday-off, so poll (bounded) until the
+    #    holiday flag clears - else the #872 gate rejects the power-on and the MPC
+    #    would plan `daikin_state=off`.
+    dev = None
+    attempts: list[str] = []
+    for n in range(1, _HOLIDAY_POLL_ATTEMPTS + 1):
+        devices = _read_devices(force=True)
+        dev = devices[0] if devices else None
+        flags = (getattr(dev, "holiday_active", None), getattr(dev, "tank_holiday_active", None))
+        attempts.append(f"{n}:{'no_devices' if dev is None else flags}")
+        if dev is None or (flags[0] is not True and flags[1] is not True):
+            break
+        if n < _HOLIDAY_POLL_ATTEMPTS and not read_only:
+            time.sleep(_HOLIDAY_POLL_WAIT_S)
+        else:
+            break
+    steps["read"] = "ok" if dev is not None else "no_devices"
+    steps["holiday_poll"] = attempts
+    if dev is not None and (
+        getattr(dev, "holiday_active", None) is True or getattr(dev, "tank_holiday_active", None) is True
+    ) and not read_only:
+        steps["holiday_poll_warning"] = "failed: holiday flag still active after polling"
+        logger.warning("vacation_end: Daikin still reports holiday after %d reads", len(attempts))
+
+    # 4. power climate / tank on when the cache says off
+    powered: dict[str, str] = {}
+    if dev is not None and not read_only:
+        for label, is_on, fn in (
+            ("climate", getattr(dev, "is_on", None), daikin_service.set_power),
+            ("tank", getattr(dev, "tank_on", None), daikin_service.set_tank_power),
+        ):
+            if is_on is False:
+                try:
+                    fn(True, actor="vacation_end")
+                    powered[label] = "ok"
+                except Exception as exc:  # noqa: BLE001
+                    powered[label] = f"failed: {exc}"
+                    logger.warning("vacation_end: power-on (%s) failed: %s", label, exc)
+    steps["power_on"] = powered or "not_needed"
+
+    # 5. read back (only when something was written)
+    if powered:
+        back = _read_devices(force=True)
+        if back:
+            dev = back[0]
+            steps["read_back"] = {
+                "climate_on": getattr(dev, "is_on", None),
+                "tank_on": getattr(dev, "tank_on", None),
+            }
+
+    # 6. replan with device writes (battery + Daikin rows for the recovery).
+    #    Retried: the job RETURNS False when the dispatch lock is busy.
+    steps["mpc"] = _run_mpc("vacation_end")
 
     # 7. clear the stored recovery (last: a crash above re-runs on boot, idempotently)
     db.set_kv(KV_END_AT, "")
@@ -554,10 +668,10 @@ def _run_recovery_locked(trigger: str) -> dict[str, Any]:
         + (f"{indoor:.1f} C" if indoor is not None else "n/d")
         + "; tanque: "
         + (f"{float(tank):.0f} C" if tank is not None else "n/d")
-        + ("." if all(not str(v).startswith("failed") for v in steps.values()) else " (houve falhas, ver action_log).")
+        + ("." if not _has_failure(steps) else " (houve falhas, ver action_log).")
     )
     _log("vacation_end", {"trigger": trigger, "steps": steps},
-         result="ok" if not any(str(v).startswith("failed") for v in steps.values()) else "partial",
+         result="ok" if not _has_failure(steps) else "partial",
          trigger=trigger)
     return {"status": "done", "trigger": trigger, "steps": steps}
 
@@ -566,7 +680,9 @@ def _run_recovery_locked(trigger: str) -> dict[str, Any]:
 # Entry points used by the API / MCP layers
 # ---------------------------------------------------------------------------
 
-def _spawn(fn, *args, background: bool, name: str, **kwargs) -> None:
+def _spawn(fn, *args, background: bool | None, name: str, **kwargs) -> None:
+    if background is None:
+        background = BACKGROUND
     if background:
         threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True, name=name).start()
     else:
@@ -578,7 +694,7 @@ def after_settings_applied(
     changes: dict[str, Any],
     *,
     actor: str = "api",
-    background: bool = True,
+    background: bool | None = None,
 ) -> dict[str, Any] | None:
     """Side effects after a preset / return-time change was persisted.
 
@@ -589,7 +705,17 @@ def after_settings_applied(
     prev = normalize_preset(prev_preset)
     new = current_preset()
     if new == "vacation" and (prev != "vacation" or "VACATION_RETURN_AT" in changes):
-        plan = begin_activation(actor=actor)
+        try:
+            plan = begin_activation(actor=actor)
+        except VacationReturnAtError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - e.g. a kv write failure
+            logger.exception("vacation: activation failed")
+            _notify_risk(
+                f"Ativação das férias falhou ({exc}): preset=vacation sem recuperação agendada; "
+                "volte para 'normal' ou tente de novo."
+            )
+            return {"status": "error", "error": str(exc)}
         if plan is None:
             return {"status": "disabled"}
         _spawn(finish_activation, plan, background=background, name="vacation-start")
@@ -606,7 +732,7 @@ def set_preset(
     return_at: str | None = None,
     *,
     actor: str = "api",
-    background: bool = True,
+    background: bool | None = None,
 ) -> dict[str, Any]:
     """Persisted preset change for the MCP tool / legacy endpoint (settings-API parity).
 
@@ -627,3 +753,13 @@ def set_preset(
     rts.set_setting("OPTIMIZATION_PRESET", p, actor=actor)
     info = after_settings_applied(prev, changes, actor=actor, background=background)
     return {"preset": p, "vacation": info}
+
+
+def persist_setting(key: str, value: Any, *, actor: str = "api") -> Any:
+    """``rts.set_setting`` that first drops an in-memory ``config`` override of the
+    preset / return-time keys (an override shadows the DB for the process lifetime)."""
+    from . import runtime_settings as rts
+
+    if key in ("OPTIMIZATION_PRESET", "VACATION_RETURN_AT"):
+        config.clear_override(key)
+    return rts.set_setting(key, value, actor=actor)

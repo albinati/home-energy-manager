@@ -75,7 +75,11 @@ def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
             vacation_scale = float(getattr(config, "LP_VACATION_LOAD_SCALE", 1.0))
     except (ValueError, AttributeError):
         vacation_scale = 1.0
-    load_scale = load_scale * guests_scale * vacation_scale
+    load_scale = load_scale * guests_scale
+    vac_cut = None
+    if vacation_scale != 1.0:
+        from .. import vacation as _vacation_mod
+        vac_cut = _vacation_mod.recovery_cutoff()
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     # Mirror the optimizer's Phase-2 bias correction so Simulate can't diverge
     # from the real LP. Gated — empty (no-op) unless LOAD_RECENT_BIAS_ENABLED.
@@ -90,6 +94,8 @@ def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
         local = s.astimezone(tz)
         m = 30 if local.minute >= 30 else 0
         v = db.lookup_residual_kwh(prof, local.weekday(), local.hour, m) * load_scale
+        if vacation_scale != 1.0 and not (vac_cut is not None and s >= vac_cut):
+            v = v * vacation_scale
         if load_bias:
             v = max(0.0, v + load_bias.get(local.hour, 0.0))
         out.append(v)
