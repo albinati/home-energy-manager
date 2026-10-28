@@ -16,6 +16,7 @@ from .daikin_bulletproof import (
     apply_scheduled_daikin_params,
     daikin_device_matches_params,
     detect_user_override,
+    holiday_blocks_params,
     user_gesture_still_in_effect,
 )
 from .foxess.client import FoxESSClient, FoxESSError, scheduler_groups_from_stored_json
@@ -123,6 +124,16 @@ _LWT_DRIFT_NOTIFIED: bool = False
 # 2026-06-07 — dedup for the legionella tank stand-off skip log (one telemetry
 # row per suppressed action_schedule row per process, not per 5-min tick).
 _LEGIONELLA_STANDOFF_LOGGED: set[int] = set()
+# #872 - row ids already logged as `holiday_mode_skip` (one log per held row, like the
+# legionella stand-off; a new dispatch writes new row ids).
+_HOLIDAY_SKIP_LOGGED: set[int] = set()
+
+
+def _holiday_on(dev: Any, point: str) -> bool:
+    """#872 — device snapshot says the management point is in holiday (kill-switch aware)."""
+    if not config.DAIKIN_HOLIDAY_DETECT_ENABLED:
+        return False
+    return getattr(dev, "tank_holiday_active" if point == "tank" else "holiday_active", None) is True
 
 # #742 review — settle attempts per lift row in THIS process. Bounds the
 # retry when Onecta refuses the lowered setpoint (unverified firmware corner):
@@ -692,6 +703,7 @@ def _reconcile_daikin_actions(
     # them so the cloud has propagation time before our next read/write.
     # Idle ticks (all rows pre-fire-skipped) take zero extra time.
     _applied_in_this_tick = False
+    _holiday_held: list[int] = []
     for act in sorted(actions, key=lambda a: (a["start_time"], int(a["id"]))):
         try:
             start = _parse_utc(act["start_time"])
@@ -715,6 +727,12 @@ def _reconcile_daikin_actions(
             continue
 
         if now_utc >= end:
+            if status == "pending" and holiday_blocks_params(dev, params):
+                # #872: held by holiday mode the whole window - complete quietly, no
+                # "window missed" warning (the firmware owned the unit).
+                logger.debug("action_schedule[%s] %s window ended during holiday", aid, atype)
+                db.mark_action(aid, "completed", error_msg="holiday_mode")
+                continue
             if status == "pending":
                 # Pending past end-time = silently skipped (heartbeat missed
                 # the window). Visibly warn so this class of bug surfaces next
@@ -756,6 +774,13 @@ def _reconcile_daikin_actions(
                     )
                 except Exception as _exc:
                     logger.debug("legionella stand-off log failed (non-fatal): %s", _exc)
+            continue
+
+        # #872 — holiday mode: the firmware owns the unit (onOffMode off, offset
+        # read-only). Hold the row PENDING (like the legionella stand-off) so it
+        # resumes the moment the flag drops; never counted as a failure.
+        if holiday_blocks_params(dev, params):
+            _holiday_held.append(aid)
             continue
 
         if status == "pending" and start <= now_utc < end:
@@ -1120,36 +1145,66 @@ def _reconcile_daikin_actions(
     # RESTORE_PRESERVE_LEAD_MINUTES guard is the primary fix, this is the
     # belt-and-braces backstop for any drift mechanism we haven't yet
     # imagined.
-    _check_tank_power_drift(actions, client, dev, now_utc, trigger=trigger)
+    _new_held = [r for r in _holiday_held if r not in _HOLIDAY_SKIP_LOGGED]
+    if _new_held:
+        _HOLIDAY_SKIP_LOGGED.update(_new_held)
+        key = tuple(sorted(_new_held))
+        if True:
+            try:
+                db.log_action(
+                    device="daikin",
+                    action="holiday_mode_skip",
+                    params={
+                        "row_ids": list(key),
+                        "climate": _holiday_on(dev, "climate"),
+                        "tank": _holiday_on(dev, "tank"),
+                    },
+                    result="skipped",
+                    trigger=trigger,
+                )
+            except Exception as _exc:
+                logger.debug("holiday skip log failed (non-fatal): %s", _exc)
+    _hol_tank = _holiday_on(dev, "tank")
+    _hol_climate = _holiday_on(dev, "climate")
+    # Drift/divergence checks compare a unit the firmware has switched off on
+    # purpose against the plan: they would alert/write on every tick of the trip.
+    if not _hol_tank:
+        _check_tank_power_drift(actions, client, dev, now_utc, trigger=trigger)
     # #742 — finish an HP target-lift (#737) at the row's GOAL, not the cliff:
     # the cliff command exists only to START the heat pump from inside the
     # reheat deadband; once the tank reaches the goal, re-command the goal so
     # the firmware's thermostat stops there instead of paying for the last
     # ~3 °C of unrequested margin.
-    _check_warmup_lift_settle(actions, client, dev, now_utc, trigger=trigger)
+    if not _hol_tank:
+        _check_warmup_lift_settle(actions, client, dev, now_utc, trigger=trigger)
     # #461 — LWT-offset drift: when HEM owns the offset (pre-heat enabled) but
     # the live device holds a non-zero offset no plan slot justifies, reset it
     # to 0 once the user's grace window has passed. Catches a manual offset with
     # no paired restore.
-    _check_lwt_offset_drift(actions, client, dev, now_utc, trigger=trigger)
+    if not _hol_climate:
+        _check_lwt_offset_drift(actions, client, dev, now_utc, trigger=trigger)
     # 2026-06-28 — sustain DHW Powerful through a negative-price boost window.
     # The boost row fires once at window start; Daikin auto-clears Powerful,
     # leaving the tank coasting for the rest of a paid window. Re-assert it.
-    _check_negative_boost_powerful(actions, client, dev, now_utc, trigger=trigger)
+    if not _hol_tank:
+        _check_negative_boost_powerful(actions, client, dev, now_utc, trigger=trigger)
     # Early setback on evening shower drawdown — once the household's showers
     # drain the tank, pull the setback forward so the firmware doesn't reheat
     # the freshly-drawn tank at peak price from the battery. Persist-once per
     # day; dhw_policy regenerations honour the same key (K1+K2 lockstep).
-    _check_dhw_shower_drawdown(actions, dev, now_utc, trigger=trigger)
+    if not _hol_tank:
+        _check_dhw_shower_drawdown(actions, dev, now_utc, trigger=trigger)
     # 2026-07-28 — the live tank SETPOINT vs the plan row that owns now. The
     # drift check above only watches tank_power; a manual 37 → 30 on 2026-07-27
     # sat unnoticed for 14 h because the covering row was already `completed`
     # (pre-fire noop) and so the reconciler never revisited it. Alert only.
-    _check_tank_target_divergence(dev, now_utc, trigger=trigger)
+    if not _hol_tank:
+        _check_tank_target_divergence(dev, now_utc, trigger=trigger)
     # 2026-07-28 — pre-shower cold-tank warning. The fixed schedule's only
     # recovery is the afternoon warmup, hours after the morning shower, so
     # without this the first signal is a cold shower.
-    _check_morning_tank_cold(actions, dev, now_utc, trigger=trigger)
+    if not _hol_tank:
+        _check_morning_tank_cold(actions, dev, now_utc, trigger=trigger)
     # PR J diverter removed 2026-05-23 (K2-cleanup) — superseded by K1's
     # dhw_policy fixed schedule. The diverter's "lift tank during PV
     # abundance" goal is now redundant: tank lives at NORMAL=45 °C via
@@ -1643,6 +1698,9 @@ def _check_tank_power_drift(
     # restore. The Daikin firmware still runs the weekly legionella
     # cycle autonomously.
     if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
+        return
+    # #872 — holiday mode powers the tank off on purpose (firmware-owned).
+    if _holiday_on(dev, "tank"):
         return
     tank_on = getattr(dev, "tank_on", None)
     if tank_on is None:

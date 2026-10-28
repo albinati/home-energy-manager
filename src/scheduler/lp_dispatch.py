@@ -1758,7 +1758,14 @@ def space_heating_gate_state() -> dict[str, Any]:
         logger.debug("space_heating_gate_state: outdoor telemetry read failed", exc_info=True)
     suppressed_by_outdoor = current_outdoor is not None and current_outdoor >= cutoff
 
+    try:
+        from ..daikin import service as _daikin_svc
+        daikin_holiday = _daikin_svc.holiday_state()
+    except Exception:  # pragma: no cover - status read must not fail
+        daikin_holiday = None
+
     return {
+        "daikin_holiday": daikin_holiday,  # #872: {climate, tank, window, cache_age_seconds}
         "preheat_enabled": preheat_enabled,
         "lwt_source": lwt_source,
         "coast_mode": _coast_mode(),
@@ -2239,6 +2246,16 @@ def _restore_lwt_rows(
     return n
 
 
+def _daikin_holiday_all() -> bool:
+    """#872 — True when BOTH management points are in holiday (nothing to write)."""
+    try:
+        from ..daikin import service as _ds
+        st = _ds.holiday_state()
+        return st.get("climate") is True and st.get("tank") is True
+    except Exception:  # pragma: no cover — defensive
+        return False
+
+
 def write_daikin_from_lp_plan(
     plan_date: str,
     plan: LpPlan,
@@ -2252,7 +2269,11 @@ def write_daikin_from_lp_plan(
     cleared are re-inserted. See :func:`_write_daikin_from_lp_plan_impl`.
     """
     snapshot: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
-    if config.DAIKIN_CONTROL_MODE != "passive" and config.DAIKIN_LWT_PREHEAT_ENABLED:
+    if (
+        config.DAIKIN_CONTROL_MODE != "passive"
+        and config.DAIKIN_LWT_PREHEAT_ENABLED
+        and not _daikin_holiday_all()
+    ):
         try:
             snapshot = _snapshot_pending_lwt_rows(plan)
         except Exception:  # pragma: no cover — snapshot is best-effort
@@ -2317,6 +2338,21 @@ def _write_daikin_from_lp_plan_impl(
         else:
             db.clear_actions_for_date(plan_date, device="daikin")
         logger.info("write_daikin_from_lp_plan: skipped (DAIKIN_CONTROL_MODE=passive)")
+        return 0
+
+    # #872 — holiday mode (both points): the unit is off and firmware-owned, so write
+    # no Daikin rows and clear leftovers (the holiday_end MPC re-plans on exit). With
+    # only ONE point in holiday the rows are still written; the reconciler holds the
+    # held point's rows PENDING (`holiday_mode_skip`) while the other point proceeds.
+    if _daikin_holiday_all():
+        if plan.slot_starts_utc:
+            window_start_iso = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
+            window_end = plan.slot_starts_utc[-1] + timedelta(minutes=30)
+            window_end_iso = window_end.isoformat().replace("+00:00", "Z")
+            db.clear_actions_in_range(window_start_iso, window_end_iso, device="daikin")
+        else:
+            db.clear_actions_for_date(plan_date, device="daikin")
+        logger.info("write_daikin_from_lp_plan: skipped (Daikin holiday mode)")
         return 0
 
     # #714 — LP-OWNED regime. Gated on ``plan.dhw_lp_owned`` (the plan's own record of

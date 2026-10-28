@@ -43,6 +43,12 @@ class DaikinDevice:
     lwt_offset_range: SetpointRange = field(default_factory=SetpointRange)
     room_temp_range: SetpointRange = field(default_factory=SetpointRange)
     tank_temp_range: SetpointRange = field(default_factory=SetpointRange)
+    # #872 — live holiday state per management point (isHolidayModeActive). None when the
+    # payload lacks the key. `holiday_window` is the `holidayMode` characteristic:
+    # INFORMATIONAL only (it did not reflect an accepted write) — never gate on it.
+    holiday_active: bool | None = None
+    tank_holiday_active: bool | None = None
+    holiday_window: dict | None = None
     climate_mp_id: str = "climateControlMainZone"
     dhw_mp_id: str = "domesticHotWaterTank"
     raw: dict = field(default_factory=dict)

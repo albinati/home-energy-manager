@@ -2382,6 +2382,14 @@ async def settings_delete(key: str):
     return {"key": key, "removed": removed, "cron_status": cron_status}
 
 
+def _daikin_holiday_state() -> dict | None:
+    """#872 — holiday flags from the cached payload (no API read); None on any error."""
+    try:
+        return daikin_service.holiday_state()
+    except Exception:  # pragma: no cover — status must render
+        return None
+
+
 @app.get("/api/v1/daikin/status", response_model=list[DaikinStatusResponse])
 async def daikin_status(request: Request, refresh: bool = False):
     """Get status of all Daikin devices.
@@ -2423,6 +2431,7 @@ async def daikin_status(request: Request, refresh: bool = False):
                 tank_temp=s.tank_temp,
                 tank_target=s.tank_target,
                 weather_regulation=s.weather_regulation,
+                holiday=_daikin_holiday_state(),
                 control_mode=config.DAIKIN_CONTROL_MODE,
                 state_summary=_daikin_state_summary(s, config.DAIKIN_CONTROL_MODE),
             ))

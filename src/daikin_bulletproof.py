@@ -48,6 +48,25 @@ def daikin_device_matches_params(dev: DaikinDevice, params: dict[str, Any]) -> b
     return True
 
 
+_CLIMATE_PARAM_KEYS = ("lwt_offset", "climate_on", "room_temp", "operation_mode")
+_TANK_PARAM_KEYS = ("tank_power", "tank_temp", "tank_powerful")
+
+
+def holiday_blocks_params(dev: DaikinDevice, params: dict[str, Any]) -> bool:
+    """#872 — True when the params touch a management point that is in holiday mode.
+
+    Reads the flags off the device snapshot (parsed from the cached payload); the
+    kill switch ``DAIKIN_HOLIDAY_DETECT_ENABLED`` turns the whole gate off.
+    """
+    if not config.DAIKIN_HOLIDAY_DETECT_ENABLED:
+        return False
+    if getattr(dev, "holiday_active", None) is True and any(k in params for k in _CLIMATE_PARAM_KEYS):
+        return True
+    if getattr(dev, "tank_holiday_active", None) is True and any(k in params for k in _TANK_PARAM_KEYS):
+        return True
+    return False
+
+
 def detect_user_override(
     dev: DaikinDevice,
     params: dict[str, Any],
@@ -64,6 +83,11 @@ def detect_user_override(
     """
     elapsed = (now_utc - row_started_utc).total_seconds()
     if elapsed < float(config.DAIKIN_OVERRIDE_GRACE_SECONDS):
+        return False, None
+
+    # #872 — holiday switches onOffMode off (and freezes the offset) exactly like a
+    # user gesture would; it is the firmware, not the owner, so never an override.
+    if holiday_blocks_params(dev, params):
         return False, None
 
     tank_tol = float(config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C)
@@ -160,6 +184,16 @@ def apply_scheduled_daikin_params(
             result="passive_skip",
             trigger=trigger,
             error_msg="DAIKIN_CONTROL_MODE=passive",
+        )
+        return False
+    if holiday_blocks_params(dev, p):
+        db.log_action(
+            device="daikin",
+            action="scheduled_apply",
+            params=p,
+            result="holiday_skip",
+            trigger=trigger,
+            error_msg="holiday_mode",
         )
         return False
     if skip_if_matches and daikin_device_matches_params(dev, p):

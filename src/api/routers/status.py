@@ -30,6 +30,7 @@ from fastapi import APIRouter
 from ... import db
 from ...analytics.actuation_health import evaluate_actuation_health
 from ...config import config
+from ...daikin import service as daikin_service
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +254,7 @@ def _actuation_block() -> dict[str, Any]:
         tank_stale_hours=float(getattr(config, "DAIKIN_TANK_STALE_HOURS", 30) or 0),
         failed_threshold=int(getattr(config, "DAIKIN_FAILED_ALERT_THRESHOLD", 3) or 3),
         dhw_mode=getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal",
+        holiday=daikin_service.holiday_state(),
     )
 
 

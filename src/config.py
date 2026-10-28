@@ -2574,6 +2574,21 @@ class Config:
             self._rt_set("DHW_DYNAMIC_WINDOW_ENABLED", str(value).strip().lower())
 
     @property
+    def DAIKIN_HOLIDAY_DETECT_ENABLED(self) -> bool:
+        """#872 — kill switch for Daikin holiday-mode detection (runtime, default true)."""
+        v = self._rt_get("DAIKIN_HOLIDAY_DETECT_ENABLED")
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    @DAIKIN_HOLIDAY_DETECT_ENABLED.setter
+    def DAIKIN_HOLIDAY_DETECT_ENABLED(self, value: Any) -> None:
+        if isinstance(value, bool):
+            self._rt_set("DAIKIN_HOLIDAY_DETECT_ENABLED", "true" if value else "false")
+        else:
+            self._rt_set("DAIKIN_HOLIDAY_DETECT_ENABLED", str(value).strip().lower())
+
+    @property
     def DHW_DYNAMIC_BOOST_HOLD_HOURS(self) -> int:
         return int(self._rt_get("DHW_DYNAMIC_BOOST_HOLD_HOURS"))
 

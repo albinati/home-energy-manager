@@ -58,6 +58,13 @@ class DaikinStatusResponse(BaseModel):
     tank_temp: float | None = None
     tank_target: float | None = None
     weather_regulation: bool
+    holiday: dict | None = Field(
+        default=None,
+        description=(
+            "#872 Onecta holiday mode from the cached payload: {climate, tank, window, "
+            "cache_age_seconds}; climate/tank = isHolidayModeActive per management point."
+        ),
+    )
     control_mode: str = Field(
         default="passive",
         description="DAIKIN_CONTROL_MODE: 'passive' (service never writes) or 'active' (legacy v9 control).",
