@@ -160,7 +160,9 @@ def test_fall_back_day_emits_correct_local_hours():
     """On UK fall-back (last Sunday of October 2026 = 2026-10-25),
     01:00 → 00:00 local repeated. Verify warmup/setback hours."""
     fall_back = date(2026, 10, 25)
-    rows = dhw_policy.generate_daily_tank_schedule(fall_back, mode="normal")
+    # allow_past: 2026-10-25 is a fixed calendar fact (UK fall-back), not "tomorrow" —
+    # the writer-side past-date guard must not empty the schedule once that day has gone.
+    rows = dhw_policy.generate_daily_tank_schedule(fall_back, mode="normal", allow_past=True)
     warmup = next(r for r in rows if r["action_type"] == "tank_warmup")
     setback = next(r for r in rows if r["action_type"] == "tank_setback")
 
