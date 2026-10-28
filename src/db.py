@@ -350,6 +350,23 @@ CREATE TABLE IF NOT EXISTS tuning_suggestions (
     payload_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tuning_suggestions_week ON tuning_suggestions(week_start, built_at_utc);
+
+-- #876 closed-loop auto-tune change ledger (story 1: ledger only; see src/auto_tune.py).
+CREATE TABLE IF NOT EXISTS auto_tune_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT NOT NULL,
+    source TEXT NOT NULL,
+    applied_at TEXT NOT NULL,
+    baseline_json TEXT,
+    status TEXT NOT NULL,
+    evaluated_at TEXT,
+    evidence_json TEXT,
+    frozen_until TEXT,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auto_tune_changes_key ON auto_tune_changes(key, applied_at);
 """
 
 
@@ -10124,3 +10141,131 @@ def list_tuning_suggestions(weeks: int = 4) -> list[dict]:
             d["payload"] = {}
         out.append(d)
     return out
+
+
+# --- #876 auto-tune change ledger ---------------------------------------------
+
+_AUTO_TUNE_FIELDS = ("old_value", "new_value", "source", "applied_at", "baseline_json",
+                     "status", "evaluated_at", "evidence_json", "frozen_until", "note")
+
+
+def _auto_tune_row(r: Any) -> dict[str, Any]:
+    d = dict(r)
+    for src, dst in (("baseline_json", "baseline"), ("evidence_json", "evidence")):
+        try:
+            d[dst] = json.loads(d.get(src) or "null") or {}
+        except (TypeError, ValueError):
+            d[dst] = {}
+    return d
+
+
+def _utc_z(ts: datetime | None = None) -> str:
+    return (ts or datetime.now(UTC)).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def insert_auto_tune_change(
+    *,
+    key: str,
+    new_value: Any,
+    source: str,
+    status: str,
+    old_value: Any = None,
+    applied_at: str | None = None,
+    baseline: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
+    frozen_until: str | None = None,
+    note: str | None = None,
+    evaluated_at: str | None = None,
+) -> int:
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """INSERT INTO auto_tune_changes
+                   (key, old_value, new_value, source, applied_at, baseline_json, status,
+                    evaluated_at, evidence_json, frozen_until, note)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (key, None if old_value is None else str(old_value), str(new_value), source,
+                 applied_at or _utc_z(), json.dumps(baseline or {}, default=str), status,
+                 evaluated_at, json.dumps(evidence, default=str) if evidence is not None else None,
+                 frozen_until, note),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+
+def get_auto_tune_changes(limit: int = 20, key: str | None = None,
+                          status: str | None = None) -> list[dict[str, Any]]:
+    """Newest-first ledger rows (``baseline`` / ``evidence`` parsed)."""
+    q, args = "SELECT * FROM auto_tune_changes WHERE 1=1", []
+    if key:
+        q += " AND key = ?"
+        args.append(key)
+    if status:
+        q += " AND status = ?"
+        args.append(status)
+    q += " ORDER BY applied_at DESC, id DESC LIMIT ?"
+    args.append(max(1, int(limit)))
+    with _lock:
+        conn = get_connection()
+        try:
+            return [_auto_tune_row(r) for r in conn.execute(q, args).fetchall()]
+        finally:
+            conn.close()
+
+
+def get_auto_tune_change(change_id: int) -> dict[str, Any] | None:
+    with _lock:
+        conn = get_connection()
+        try:
+            r = conn.execute("SELECT * FROM auto_tune_changes WHERE id = ?", (int(change_id),)).fetchone()
+            return _auto_tune_row(r) if r else None
+        finally:
+            conn.close()
+
+
+def get_active_auto_tune_change() -> dict[str, Any] | None:
+    """The single ``evaluating`` row, or None."""
+    rows = get_auto_tune_changes(1, status="evaluating")
+    return rows[0] if rows else None
+
+
+def update_auto_tune_change(change_id: int, **fields: Any) -> bool:
+    """Update columns of one ledger row. ``baseline`` / ``evidence`` dicts are
+    serialised into their ``*_json`` columns."""
+    sets, args = [], []
+    for k, v in fields.items():
+        if k in ("baseline", "evidence"):
+            k, v = f"{k}_json", json.dumps(v, default=str)
+        if k not in _AUTO_TUNE_FIELDS:
+            raise ValueError(f"unknown auto_tune_changes column: {k}")
+        sets.append(f"{k} = ?")
+        args.append(v)
+    if not sets:
+        return False
+    args.append(int(change_id))
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(f"UPDATE auto_tune_changes SET {', '.join(sets)} WHERE id = ?", args)
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def auto_tune_frozen_until(key: str, now: datetime | None = None) -> str | None:
+    """Latest ``frozen_until`` among the key's rows, only if still in the future."""
+    now_z = _utc_z(now)
+    with _lock:
+        conn = get_connection()
+        try:
+            r = conn.execute(
+                "SELECT MAX(frozen_until) FROM auto_tune_changes WHERE key = ? AND frozen_until > ?",
+                (key, now_z),
+            ).fetchone()
+            return r[0] if r and r[0] else None
+        finally:
+            conn.close()

@@ -351,22 +351,37 @@ def external_comfort_signal(week_start: date) -> dict[str, Any] | None:
 
 def weekly_job(now: datetime | None = None) -> dict[str, Any] | None:
     """Sunday 08:45 local: log the trailing-7-day summary; apply the proposal
-    ONLY when ``COMFORT_FEEDBACK_AUTO_TUNE`` is true. Never raises."""
+    ONLY via the #876 ledger (``AUTO_TUNE_ENABLED``) or, with the ledger off, the
+    legacy ``COMFORT_FEEDBACK_AUTO_TUNE`` flag. Never raises."""
     try:
         today = (now or datetime.now(UTC)).astimezone(_tz()).date()
         summ = weekly_summary(today - timedelta(days=6))
         db.log_action(device="comfort", action="weekly_summary", params=summ,
                       result="success", trigger="cron")
         prop = summ["proposal"]
-        if prop and getattr(config, "COMFORT_FEEDBACK_AUTO_TUNE", False):
+        if prop:
+            from .. import auto_tune
             from .. import runtime_settings as rs
 
-            cur = float(rs.get_setting(prop["key"]))
-            new = max(cur - STEP_C, min(cur + STEP_C, float(prop["suggested"])))
-            rs.set_setting(prop["key"], new, actor="comfort_feedback_auto_tune")
-            db.log_action(device="comfort", action="auto_tune",
-                          params={**prop, "applied": new}, result="success", trigger="cron",
-                          actor="comfort_feedback_auto_tune")
+            if auto_tune.enabled():
+                # #876: the ledger owns the change (one at a time, drift cap, judge).
+                cur = float(rs.get_setting(prop["key"]))
+                new = max(cur - STEP_C, min(cur + STEP_C, float(prop["suggested"])))
+                res = auto_tune.propose_change(prop["key"], new, "comfort_feedback",
+                                               note=str(prop.get("reason") or ""))
+                db.log_action(device="comfort", action="auto_tune",
+                              params={**prop, "applied": new if res.get("applied") else None,
+                                      "ledger": res},
+                              result="success" if res.get("applied") else "skipped",
+                              trigger="cron", actor="auto_tune:comfort_feedback")
+            elif getattr(config, "COMFORT_FEEDBACK_AUTO_TUNE", False):
+                # Ledger off: the legacy key keeps its bit-for-bit behaviour.
+                cur = float(rs.get_setting(prop["key"]))
+                new = max(cur - STEP_C, min(cur + STEP_C, float(prop["suggested"])))
+                rs.set_setting(prop["key"], new, actor="comfort_feedback_auto_tune")
+                db.log_action(device="comfort", action="auto_tune",
+                              params={**prop, "applied": new}, result="success", trigger="cron",
+                              actor="comfort_feedback_auto_tune")
         return summ
     except Exception:  # noqa: BLE001
         logger.warning("comfort weekly job failed", exc_info=True)

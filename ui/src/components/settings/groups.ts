@@ -149,6 +149,17 @@ export const ADVANCED_GROUPS: GroupSpec[] = [
     ],
   },
   {
+    id: "auto-tune",
+    title: "Ajuste automático (registro)",
+    subtitle: "Mudanças automáticas de configuração ficam num registro; uma mudança sua sempre vale e congela a chave. Desligado por padrão.",
+    keys: [
+      "AUTO_TUNE_ENABLED",
+      "AUTO_TUNE_ALLOWLIST",
+      "AUTO_TUNE_MANUAL_FREEZE_DAYS",
+      "AUTO_TUNE_ROLLBACK_FREEZE_DAYS",
+    ],
+  },
+  {
     id: "schedule",
     title: "Horários e agendador",
     subtitle: "Quando rodam o plano e a telemetria. A mudança vale no próximo reinício do serviço (ou ao gravar a chave sozinha).",

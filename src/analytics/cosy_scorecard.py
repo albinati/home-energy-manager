@@ -587,6 +587,8 @@ def build_scorecard(day: date, *, tz: ZoneInfo | None = None) -> dict[str, Any]:
     payload["tank"] = _section("tank", _tank, day, tz)
     payload["lwt"] = _section("lwt", _lwt, day, tz, a, b, windows)
     payload["ops"] = _section("ops", _ops, a, b)
+    from .. import auto_tune  # #876: active change (as of build time) so a bad day is attributable
+    payload["auto_tune"] = _section("auto_tune", auto_tune.scorecard_section)
 
     money: dict[str, Any] = {}
     try:

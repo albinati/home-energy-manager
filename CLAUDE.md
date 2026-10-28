@@ -843,6 +843,64 @@ the Settings simulate->confirm->apply flow). Story-3 plug point:
 `payload.external_comfort`, ranking untouched). Skips when < `TUNING_REVIEW_MIN_DAYS`
 (3) replayable days, or when `DAIKIN_CONTROL_MODE=passive` / `LP_W3_TIN_ENABLED=false` (W3 knobs would be inert; forward mode uses the LIVE process config, recorded as `payload.context`). `DHW_DYNAMIC_BOOST_HOLD_HOURS` is NOT swept (its only reader is the persisted nightly window decision, never re-resolved by a replay). Replays seed W3 from `lp_inputs_snapshot.indoor_initial_c` and chain `plan.indoor_temp_c`. Single-flight has no TTL (variants share `config._overrides`); the per-day budget (~9 min) stops the run (status `partial`, persisted in the payload).
 
+### Closed-loop auto-tune (#876) — story 1: ledger
+
+`src/auto_tune.py` is the ONE place for ledger semantics. Story 1 ships the ledger,
+manual-always-wins, API/MCP and the kill switch; there is NO automatic apply path of
+its own and NO judge yet (stories 2-3). Table `auto_tune_changes` (`key, old_value,
+new_value, source tuning_review|comfort_feedback|learned_param|plan_pattern|manual,
+applied_at, baseline_json, status evaluating|kept|rolled_back|superseded_manual|manual,
+evaluated_at, evidence_json, frozen_until, note`; index `(key, applied_at)`). DB helpers
+in `db.py`: `insert/get/update_auto_tune_change(s)`, `get_active_auto_tune_change`,
+`auto_tune_frozen_until`.
+
+- **Kill switch** `AUTO_TUNE_ENABLED` (runtime, code default **false**). Off = no automatic
+  change is ever applied (`propose_change` -> `disabled`), bit-for-bit today's behaviour.
+  The only thing that still happens when off: the owner's changes to allowlisted/ledger
+  keys are RECORDED as `manual` rows (history for the drift cap / Settings surface).
+- **Allowlist** `AUTO_TUNE_ALLOWLIST` (runtime, comma list, stored lower-case, matched
+  case-insensitively; default = the 10 keys of the epic). **Hard `DENYLIST`** (constant, wins
+  over the allowlist): `LP_W3_EMERGENCY_FLOOR_C, DHW_TEMP_MIN_FLOOR_C, DAIKIN_CONTROL_MODE,
+  OPENCLAW_READ_ONLY, MIN_SOC_RESERVE_PERCENT, OPTIMIZATION_PRESET, VACATION_RETURN_AT,
+  REQUIRE_SIMULATION_ID`, prefix `AUTO_TUNE_`, substring `LEGIONELLA` (the `DHW_LEGIONELLA_*`
+  keys ARE runtime settings; the stand-off keys are env-only).
+- **`propose_change(key, value, source, note=, now=)`** applies via
+  `set_setting(actor="auto_tune:<source>")`, stores `baseline_json` (`baseline_metrics`: 7-day
+  net GBP/day, hours-below-floor/day, shower-shortfall days, peak import kWh/day from
+  `cosy_scorecard_daily`; `{}` when none), opens an `evaluating` row, logs `action_log`
+  `auto_tune_apply` (device `auto_tune`). Refusals (`{applied: False, reason}`), checked in
+  this order: `disabled | denylisted | not_allowlisted | invalid | unchanged | busy (one
+  evaluating row) | frozen | step_too_large | drift_cap | away` (+ `ledger_error`: the insert
+  failed after the write, the setting was restored). Step = `auto_tune.STEPS` (SettingSpec has no
+  step; fallback (max-min)/20), enum keys accept any one other value. Drift cap =
+  `auto_tune.MAX_DRIFT` (comfort 1.5 C, DHW 3 C, else step x 3) from the owner's newest `manual`
+  value, or the value before the first automated change. `away` = `kv_state vacation_end_at` set
+  or `daikin_holiday_active` with any point true.
+- **Manual always wins.** `runtime_settings.set_setting` / `delete_setting` call
+  `auto_tune.on_manual_change` (never raises). Actors `auto_tune:*` and the internal writers
+  (`vacation_end`, `comfort_feedback_auto_tune`, `api_batch_rollback`, `workbench_promote_rollback`)
+  are skipped; every other actor (`api`, `mcp`, `api_batch`, `workbench_promote`,
+  `snapshot_restore`) is the owner. For a key on the allowlist or with ledger rows: a `manual` row with
+  `frozen_until = now + AUTO_TUNE_MANUAL_FREEZE_DAYS` (14), and any `evaluating` row of the key ->
+  `superseded_manual` (`evidence {reason: manual_change, actor}`), never rolled back.
+- **Verbs**: `rollback(id, reason=, evidence=, actor=)` (`set_setting` old value as
+  `auto_tune:rollback`, row `rolled_back`, `frozen_until = now + AUTO_TUNE_ROLLBACK_FREEZE_DAYS` (28),
+  `action_log auto_tune_rollback`, one `notify_risk` deduped `auto_tune_rollback_<id>`; only
+  `evaluating`/`kept` automated rows), `keep(id, evidence)`, `freeze(id | key=, days=)`,
+  `ledger_state(key)`, `ledger_summary()`.
+- **Comfort feedback (#833)** now goes through `propose_change(source="comfort_feedback")` when
+  `AUTO_TUNE_ENABLED`; with the ledger off, `COMFORT_FEEDBACK_AUTO_TUNE=true` keeps its old direct
+  write bit-for-bit (no ledger row, internal actor).
+- **API** (`src/api/routers/auto_tune.py`): `GET /api/v1/tuning/ledger?limit=&key=` (viewer),
+  `POST .../ledger/propose` (`{key, value, source}`; `manual_test` is stored as `tuning_review`;
+  refusal = 409 with `detail.reason`), `POST .../ledger/{id}/rollback` (`{reason}`),
+  `POST .../ledger/{id}/freeze` (`{days}`); writes are admin (401 without an admin token, as for every
+  `/api/v1` write). `GET /api/v1/settings` items carry `auto_tune {active, frozen_until, last_status}` for
+  allowlisted / ledger-touched keys. **MCP**: `get_auto_tune_ledger(limit)`, `rollback_auto_tune_change(id, reason)`.
+  Scorecard payload `auto_tune.active_change {id, key, new_value, day_n_of_7}` (as of build time).
+- Runtime knobs: `AUTO_TUNE_ENABLED`, `AUTO_TUNE_ALLOWLIST`, `AUTO_TUNE_MANUAL_FREEZE_DAYS`,
+  `AUTO_TUNE_ROLLBACK_FREEZE_DAYS`.
+
 ### `/daikin/heating-plan` = written offsets (#845, supersedes #829)
 
 `GET /api/v1/daikin/heating-plan` (Home chart, D-1/D/D+1) reports what the device
