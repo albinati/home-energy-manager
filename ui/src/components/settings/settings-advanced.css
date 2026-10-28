@@ -1,0 +1,56 @@
+/* #879 PR 3: mode line, Avancado, search */
+.settings-mode {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-card);
+  border-radius: var(--radius);
+}
+.settings-mode-label { color: var(--text-dim); font-size: var(--font-sm); }
+.settings-mode-value { font-size: var(--font-md); }
+.settings-mode-link { margin-left: auto; font-size: var(--font-sm); color: var(--accent); }
+
+.settings-section-title .settings-tab-badge { margin-left: var(--space-2); vertical-align: middle; }
+
+.settings-advanced > summary,
+.settings-adv-group > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  list-style: none;
+  padding: var(--space-3) 0;
+}
+.settings-advanced > summary::-webkit-details-marker,
+.settings-adv-group > summary::-webkit-details-marker { display: none; }
+.settings-advanced > summary::before,
+.settings-adv-group > summary::before {
+  content: "\25B8";
+  color: var(--text-dim);
+  transition: transform 0.15s;
+}
+.settings-advanced[open] > summary::before,
+.settings-adv-group[open] > summary::before { transform: rotate(90deg); }
+.settings-advanced-title { font-size: var(--font-lg); font-weight: 700; letter-spacing: -0.01em; }
+.settings-advanced-sub, .settings-adv-count { color: var(--text-dim); font-size: var(--font-sm); }
+.settings-advanced-body { display: flex; flex-direction: column; gap: var(--space-3); }
+.settings-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.settings-adv-group { border-top: 1px solid var(--border); }
+.settings-adv-group > summary .settings-section-title { font-size: var(--font-md); }
+.settings-adv-sub { padding-bottom: var(--space-2); }
+
+@media (max-width: 600px) {
+  .setting-field { grid-template-columns: 1fr; }
+  .settings-mode-link { margin-left: 0; }
+}

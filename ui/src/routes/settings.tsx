@@ -10,13 +10,13 @@ import { HemApiError } from "../lib/api";
 import { Spinner } from "../components/common/Spinner";
 import { Icon } from "../components/common/Icon";
 import { Modal } from "../components/common/Modal";
-import { ModeSwitcher, toDatetimeLocal } from "../components/settings/ModeSwitcher";
+import { Link } from "wouter-preact";
 import { SettingField } from "../components/settings/SettingField";
 import { BatchBar } from "../components/settings/BatchBar";
-import { SettingsTabs } from "../components/settings/SettingsTabs";
-import { SETTINGS_GROUPS, labelFor } from "../components/settings/groups";
+import { VISIBLE_GROUPS, ADVANCED_GROUPS, labelFor, filterAdvanced, modeLine } from "../components/settings/groups";
 import type { SettingSpec, SimulateBatchResponse } from "../lib/types";
 import "../components/settings/settings.css";
+import "../components/settings/settings-advanced.css";
 
 function isEqual(a: unknown, b: unknown): boolean {
   if (typeof a === "number" && typeof b === "number") return Math.abs(a - b) < 1e-9;
@@ -29,7 +29,7 @@ export default function Settings() {
   const [busy, setBusy] = useState(false);
   const [simResult, setSimResult] = useState<SimulateBatchResponse | null>(null);
   const [simOpen, setSimOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<string>(SETTINGS_GROUPS[0].id);
+  const [query, setQuery] = useState("");
 
   const specByKey = useMemo(() => {
     const map = new Map<string, SettingSpec>();
@@ -37,7 +37,10 @@ export default function Settings() {
     return map;
   }, [settings.data]);
 
-  const modeSpec = specByKey.get("OPTIMIZATION_PRESET") || null;
+  const modeText = modeLine(
+    specByKey.get("OPTIMIZATION_PRESET")?.value,
+    specByKey.get("VACATION_RETURN_AT")?.value,
+  );
 
   const onChange = (key: string, value: unknown) => {
     const spec = specByKey.get(key);
@@ -71,19 +74,14 @@ export default function Settings() {
     return n;
   }, [pending, specByKey]);
 
-  // Pending count per group, for the tab badges.
-  const pendingByGroup = useMemo(() => {
-    const out: Record<string, number> = {};
-    for (const g of SETTINGS_GROUPS) {
-      let n = 0;
-      for (const k of g.keys) {
-        const spec = specByKey.get(k);
-        if (spec && k in pending && !isEqual(pending[k], spec.value)) n += 1;
-      }
-      if (n > 0) out[g.id] = n;
+  const pendingIn = (keys: string[]) => {
+    let n = 0;
+    for (const k of keys) {
+      const spec = specByKey.get(k);
+      if (spec && k in pending && !isEqual(pending[k], spec.value)) n += 1;
     }
-    return out;
-  }, [pending, specByKey]);
+    return n;
+  };
 
   const onSimulate = async () => {
     if (pendingCount === 0) return;
@@ -99,7 +97,7 @@ export default function Settings() {
       setSimOpen(true);
     } catch (e) {
       const err = e as HemApiError;
-      toast.error("Simulation failed", err.body || err.message);
+      toast.error("Falha na simulação", err.body || err.message);
     } finally {
       setBusy(false);
     }
@@ -116,11 +114,11 @@ export default function Settings() {
       const failed = result.results.filter((r) => !r.ok);
       if (failed.length > 0) {
         toast.error(
-          `${failed.length} key${failed.length === 1 ? "" : "s"} failed`,
+          `${failed.length} ajuste${failed.length === 1 ? "" : "s"} com falha`,
           failed.map((f) => `${f.key}: ${f.error}`).join("\n"),
         );
       } else {
-        toast.success(`Applied ${result.results.length} setting${result.results.length === 1 ? "" : "s"}`);
+        toast.success(`${result.results.length} ajuste${result.results.length === 1 ? "" : "s"} aplicado${result.results.length === 1 ? "" : "s"}`);
         setPending({});
       }
       setSimOpen(false);
@@ -128,7 +126,7 @@ export default function Settings() {
       await settings.refresh();
     } catch (e) {
       const err = e as HemApiError;
-      toast.error("Apply failed", err.body || err.message);
+      toast.error("Falha ao aplicar", err.body || err.message);
     } finally {
       setBusy(false);
     }
@@ -137,83 +135,99 @@ export default function Settings() {
   if (settings.loading) {
     return (
       <div class="settings-page">
-        <Spinner label="Loading settings…" />
+        <Spinner label="Carregando ajustes…" />
       </div>
     );
   }
   if (settings.error) {
     return (
       <div class="settings-page">
-        <h1>Settings</h1>
-        <p class="muted">Failed to load settings: {settings.error.message}</p>
-        <button class="btn" onClick={() => settings.refresh()}>Retry</button>
+        <h1>Ajustes</h1>
+        <p class="muted">Falha ao carregar: {settings.error.message}</p>
+        <button class="btn" onClick={() => settings.refresh()}>Tentar de novo</button>
       </div>
     );
   }
 
-  const activeGroup = SETTINGS_GROUPS.find((g) => g.id === activeTab) || SETTINGS_GROUPS[0];
-  const activeSpecs = activeGroup.keys
-    .map((k) => specByKey.get(k))
-    .filter((s): s is SettingSpec => !!s);
+  const advancedAll = ADVANCED_GROUPS.flatMap((g) => g.keys);
+  const advancedPending = pendingIn(advancedAll);
+  const searching = query.trim().length > 0;
+  const advancedShown = filterAdvanced(ADVANCED_GROUPS, specByKey, query);
+
+  const renderFields = (keys: string[], plain: boolean) =>
+    keys
+      .map((k) => specByKey.get(k))
+      .filter((sp): sp is SettingSpec => !!sp)
+      .map((spec) => (
+        <SettingField
+          key={spec.key}
+          spec={spec}
+          plain={plain}
+          pending={pending[spec.key]}
+          onChange={onChange}
+          onRevert={onRevert}
+        />
+      ));
 
   return (
     <div class="settings-page">
       <header class="settings-header">
         <div>
-          <div class="settings-header-eyebrow">Runtime configuration</div>
-          <h1 class="settings-header-title">Settings</h1>
+          <h1 class="settings-header-title">Ajustes</h1>
           <p class="settings-header-sub">
-            Three-step flow: <strong>Edit</strong> values inline (yellow "Edited" pill marks pending), then <strong>Simulate</strong> opens a diff modal, then <strong>Apply</strong> writes to <code>runtime_settings</code>. Schedule keys hot-reload the cron jobs.
+            Edite os valores; <strong>Simular</strong> mostra o que muda; <strong>Aplicar</strong> grava.
           </p>
         </div>
       </header>
 
-      {modeSpec && (
-        <ModeSwitcher
-          spec={modeSpec}
-          pendingValue={pending.OPTIMIZATION_PRESET as string | undefined}
-          onChange={(v) => onChange("OPTIMIZATION_PRESET", v)}
-          onRevert={() => onRevert("OPTIMIZATION_PRESET")}
-          returnAt={
-            (pending.VACATION_RETURN_AT as string | undefined) ??
-            (specByKey.get("VACATION_RETURN_AT")?.value as string | undefined)
-          }
-          onReturnAtChange={(v) => {
-            // Normalised compare: an untouched value (server stores it lower-cased,
-            // with seconds/offset) must not become a pending change.
-            const server = specByKey.get("VACATION_RETURN_AT")?.value;
-            onChange(
-              "VACATION_RETURN_AT",
-              toDatetimeLocal(v) === toDatetimeLocal(server) ? server : v,
-            );
-          }}
-        />
-      )}
+      <section class="settings-mode" aria-label="Modo da casa">
+        <span class="settings-mode-label">Modo da casa</span>
+        <strong class="settings-mode-value">{modeText}</strong>
+        <Link href="/" class="settings-mode-link">mudar na Casa</Link>
+      </section>
 
-      <SettingsTabs
-        groups={SETTINGS_GROUPS}
-        activeId={activeTab}
-        pendingByGroup={pendingByGroup}
-        onSelect={setActiveTab}
-      />
-
-      <div class="settings-section">
-        <div class="settings-section-header">
-          <div class="settings-section-title">{activeGroup.title}</div>
-          <div class="settings-section-subtitle">{activeGroup.subtitle}</div>
+      {VISIBLE_GROUPS.map((g) => (
+        <div class="settings-section" key={g.id}>
+          <div class="settings-section-header">
+            <div class="settings-section-title">
+              {g.title}
+              {pendingIn(g.keys) > 0 && <span class="settings-tab-badge">{pendingIn(g.keys)}</span>}
+            </div>
+            {g.subtitle && <div class="settings-section-subtitle">{g.subtitle}</div>}
+          </div>
+          <div class="setting-group-fields">{renderFields(g.keys, true)}</div>
         </div>
-        <div class="setting-group-fields">
-          {activeSpecs.map((spec) => (
-            <SettingField
-              key={spec.key}
-              spec={spec}
-              pending={pending[spec.key]}
-              onChange={onChange}
-              onRevert={onRevert}
-            />
+      ))}
+
+      <details class="settings-advanced" open={searching || undefined}>
+        <summary>
+          <span class="settings-advanced-title">Avançado</span>
+          <span class="settings-advanced-sub">todos os outros ajustes ({advancedAll.length})</span>
+          {advancedPending > 0 && <span class="settings-tab-badge">{advancedPending}</span>}
+        </summary>
+        <div class="settings-advanced-body">
+          <input
+            type="search"
+            class="settings-search"
+            placeholder="Buscar por nome, chave ou descrição"
+            aria-label="Buscar ajustes avançados"
+            value={query}
+            onInput={(e) => setQuery((e.currentTarget as HTMLInputElement).value)}
+          />
+          {advancedShown.length === 0 && <p class="muted">Nenhum ajuste encontrado.</p>}
+          {advancedShown.map((g) => (
+            <details class="settings-adv-group" key={g.id} open={searching || undefined}>
+              <summary>
+                <span class="settings-section-title">{g.title}</span>
+                <span class="settings-adv-count">{g.keys.length}</span>
+                {pendingIn(g.keys) > 0 && <span class="settings-tab-badge">{pendingIn(g.keys)}</span>}
+              </summary>
+              {g.subtitle && <div class="settings-section-subtitle settings-adv-sub">{g.subtitle}</div>}
+              <div class="setting-group-fields">{renderFields(g.keys, false)}</div>
+            </details>
           ))}
         </div>
-      </div>
+      </details>
 
       <BatchBar
         pendingCount={pendingCount}
@@ -231,15 +245,15 @@ export default function Settings() {
             setSimResult(null);
           }
         }}
-        title="Review changes"
+        title="Revisar alterações"
         width="lg"
         footer={
           <>
             <button class="btn btn--ghost" onClick={() => setSimOpen(false)} disabled={busy}>
-              Cancel
+              Cancelar
             </button>
             <button class="btn btn--primary" onClick={onApply} disabled={busy}>
-              {busy ? "Applying…" : `Apply ${simResult?.sub_actions.length || 0} change${(simResult?.sub_actions.length || 0) === 1 ? "" : "s"}`}
+              {busy ? "Aplicando…" : `Aplicar ${simResult?.sub_actions.length || 0} alteraç${(simResult?.sub_actions.length || 0) === 1 ? "ão" : "ões"}`}
             </button>
           </>
         }
@@ -249,8 +263,8 @@ export default function Settings() {
             <table class="sim-diff">
               <thead>
                 <tr>
-                  <th>Setting</th>
-                  <th>Change</th>
+                  <th>Ajuste</th>
+                  <th>Mudança</th>
                 </tr>
               </thead>
               <tbody>
@@ -259,13 +273,14 @@ export default function Settings() {
                     <td>
                       <div>{labelFor(d.key)}</div>
                       <div class="muted"><code>{d.key}</code></div>
+                      {d.human_summary && <div class="muted">{d.human_summary}</div>}
                     </td>
                     <td>
                       <code class="from">{String(d.before[d.key])}</code>
                       <span class="arrow"><Icon name="chevron" size={12} /></span>
                       <code class="to">{String(d.after[d.key])}</code>
                       {specByKey.get(d.key)?.cron_reload && (
-                        <div class="muted">Hot-reloads scheduler</div>
+                        <div class="muted">Recarrega o agendador</div>
                       )}
                     </td>
                   </tr>
@@ -274,7 +289,7 @@ export default function Settings() {
             </table>
             {simResult.safety_flags.length > 0 && (
               <div class="sim-warnings">
-                <strong>Warnings:</strong>
+                <strong>Avisos:</strong>
                 <ul>
                   {simResult.safety_flags.map((w, i) => <li key={i}>{w}</li>)}
                 </ul>

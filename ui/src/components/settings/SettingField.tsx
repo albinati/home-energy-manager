@@ -2,7 +2,7 @@ import type { SettingSpec } from "../../lib/types";
 import { NumberInput, Select, Toggle, TextInput, SliderInput } from "../common/Inputs";
 import { Pill } from "../common/Pill";
 import { Icon } from "../common/Icon";
-import { labelFor, unitFor } from "./groups";
+import { labelFor, unitFor, PLAIN_COPY } from "./groups";
 import "./settings.css";
 
 interface SettingFieldProps {
@@ -10,6 +10,8 @@ interface SettingFieldProps {
   pending: unknown | undefined;
   onChange: (key: string, value: unknown) => void;
   onRevert: (key: string) => void;
+  /** Visible groups: plain-words hint instead of the developer description, key line hidden. */
+  plain?: boolean;
 }
 
 function effectiveValue(spec: SettingSpec, pending: unknown | undefined): unknown {
@@ -32,7 +34,7 @@ function stepFor(spec: SettingSpec): number {
   return 0.1;
 }
 
-export function SettingField({ spec, pending, onChange, onRevert }: SettingFieldProps) {
+export function SettingField({ spec, pending, onChange, onRevert, plain }: SettingFieldProps) {
   const value = effectiveValue(spec, pending);
   const dirty = hasPendingEdit(spec, pending);
   const hasRange = (spec.type === "int" || spec.type === "float") && spec.min != null && spec.max != null;
@@ -106,13 +108,13 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
           <span class="setting-field-name">{labelFor(spec.key)}</span>
           <div class="setting-field-tags">
             {spec.overridden && !dirty && (
-              <Pill tone="accent" title="This value differs from the .env default and is being driven by the runtime_settings table">
-                Custom
+              <Pill tone="accent" title="Valor diferente do padrão do .env, vindo da tabela runtime_settings">
+                Alterado
               </Pill>
             )}
             {dirty && (
-              <Pill tone="warn" title="Edit staged locally — not yet applied to the server">
-                Edited
+              <Pill tone="warn" title="Edição local, ainda não aplicada">
+                Editado
               </Pill>
             )}
             {spec.cron_reload && (
@@ -122,11 +124,19 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
             )}
           </div>
         </div>
-        <div class="setting-field-key">
-          <code>{spec.key}</code>
-          <span class="setting-field-default">default <strong>{defaultDisplay}</strong></span>
-        </div>
-        {spec.description && <div class="setting-field-desc">{spec.description}</div>}
+        {plain ? (
+          <div class="setting-field-key">
+            <span class="setting-field-default">padrão <strong>{defaultDisplay}</strong></span>
+          </div>
+        ) : (
+          <div class="setting-field-key">
+            <code>{spec.key}</code>
+            <span class="setting-field-default">padrão <strong>{defaultDisplay}</strong></span>
+          </div>
+        )}
+        {plain && PLAIN_COPY[spec.key]
+          ? <div class="setting-field-desc">{PLAIN_COPY[spec.key].hint}</div>
+          : spec.description && <div class="setting-field-desc">{spec.description}</div>}
       </div>
       <div class="setting-field-control">
         {inputEl}
@@ -135,8 +145,8 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
             type="button"
             class="setting-field-revert"
             onClick={() => onRevert(spec.key)}
-            title="Discard this pending change"
-            aria-label="Revert"
+            title="Descartar esta alteração"
+            aria-label="Desfazer"
           >
             <Icon name="revert" size={16} />
           </button>
