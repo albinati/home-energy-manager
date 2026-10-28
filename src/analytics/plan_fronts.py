@@ -757,6 +757,7 @@ def spend_section(day: date, windows: list[Any], now_utc: datetime, tz: ZoneInfo
         "realised_import_kwh": None, "realised_import_cost_gbp": None, "realised_avg_import_p": None,
         "forecast_import_kwh": None, "forecast_avg_import_p": None,
         "peak_import_kwh": None, "ideal_avg_import_p": None, "score": None,
+        "pv_kwh": None,
         "score_thresholds": {"ideal_max_p": None, "above_min_p": None},
         "score_basis": None, "period": {},
     }
@@ -774,6 +775,12 @@ def spend_section(day: date, windows: list[Any], now_utc: datetime, tz: ZoneInfo
         out["realised_avg_import_p"] = round(cost * 100.0 / kwh, 2) if kwh > 0 else None
     except Exception as exc:  # noqa: BLE001
         out["realised_error"] = f"{type(exc).__name__}: {exc}"
+
+    # Realised PV so far (Home "kWh de sol", #879).
+    try:
+        out["pv_kwh"] = round(sum(float(v) for v in db.half_hourly_solar_kwh_for_day(day).values()), 2)
+    except Exception:  # noqa: BLE001
+        logger.debug("plan_fronts: pv_kwh failed", exc_info=True)
 
     # Forecast (committed stitch × per-slot prices).
     fc = _committed_by_start(day, "import_kwh", tz)
@@ -857,6 +864,62 @@ def compare_section(day: date) -> dict[str, Any]:
     }
 
 
+# -------------------------------------------------------------------- billing
+def billing_cycle_bounds(today: date, cycle_day: int) -> tuple[date, date]:
+    """Inclusive ``(cycle_start, cycle_end)`` of the bill cycle containing ``today``.
+
+    The cycle starts on ``cycle_day`` (clamped 1..28 so every month has it) and
+    ends the day before the next start: day 21 -> 21 Oct .. 20 Nov.
+    """
+    cd = max(1, min(28, int(cycle_day)))
+    if today.day >= cd:
+        start = today.replace(day=cd)
+    else:
+        prev_last = today.replace(day=1) - timedelta(days=1)
+        start = prev_last.replace(day=cd)
+    nm_first = (start.replace(day=1) + timedelta(days=32)).replace(day=1)
+    end = nm_first.replace(day=cd) - timedelta(days=1)
+    return start, end
+
+
+def billing_forecast_gbp(realised: float, days_covered: int, days_remaining: int) -> float:
+    """realised + (realised / days_covered) x days_remaining."""
+    return round(realised + realised / max(1, int(days_covered)) * max(0, int(days_remaining)), 2)
+
+
+def billing_section(day: date) -> dict[str, Any]:
+    from . import fair_compare
+    from ..energy.tariff_structure import display_name
+
+    cycle_start, cycle_end = billing_cycle_bounds(day, int(config.OCTOPUS_BILLING_CYCLE_DAY))
+    days_total = (cycle_end - cycle_start).days + 1
+    days_elapsed = (day - cycle_start).days + 1
+    p = _period(cycle_start, day)  # 600 s cache, net incl. standing, clamped by SMART_TARIFF_START_DATE
+    realised = round(float(p.get("net_cost_gbp") or 0.0), 2)
+    # The clamp can shorten the range: divide by the days it really covered.
+    n_eff = int(p.get("n_days") or 0) or days_elapsed
+    res = fair_compare.cached_fair_comparison(cycle_start, day, 4)
+    current, rows = compare_rows(res)
+    compare = [
+        {"tariff": r["product_code"], "label": r["display_name"], "delta_gbp": r["delta_vs_current_gbp"]}
+        for r in rows if not r["is_current"] and r["delta_vs_current_gbp"] is not None
+    ]
+    # winner = cheapest of all rows incl. the current one.
+    best = min((r for r in rows if r["net_gbp"] is not None), key=lambda r: r["net_gbp"], default=None)
+    winner = None if best is None else {
+        "tariff": best["product_code"], "label": best["display_name"],
+        "is_current": bool(best["is_current"]),
+    }
+    return {
+        "cycle_start": cycle_start.isoformat(), "cycle_end": cycle_end.isoformat(),
+        "days_elapsed": days_elapsed, "days_total": days_total,
+        "realised_gbp": realised,
+        "forecast_cycle_gbp": billing_forecast_gbp(realised, n_eff, days_total - days_elapsed),
+        "current_label": (current or {}).get("display_name") or display_name(),
+        "compare": compare, "winner": winner,
+    }
+
+
 # ----------------------------------------------------------------------- main
 def plan_fronts(day: date | None = None, *, now_utc: datetime | None = None,
                 use_cache: bool = True) -> dict[str, Any]:
@@ -899,6 +962,7 @@ def plan_fronts(day: date | None = None, *, now_utc: datetime | None = None,
                                use_cache=use_cache),
         "spend": _guard(spend_section, day, windows, now_utc, tz),
         "compare": _guard(compare_section, day),
+        "billing": _guard(billing_section, day),
     }
     if use_cache:
         if len(_cache) > 32:

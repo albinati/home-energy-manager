@@ -1166,6 +1166,10 @@ async def cockpit_now():
         },
         # #873: {active, return_at, recovery_at, daikin_holiday_until_sent, holiday_enabled}
         "vacation": _vacation_status_safe(),
+        # #879 Home footer + status line: Onecta holiday flags, vendor quota, plan times.
+        "daikin": {"holiday": _daikin_holiday_state()},
+        "quota": _cockpit_quota_safe(),
+        "plan": {"pushed_at_utc": plan_fresh.get("fetched_at_utc")},
         "plan_date": plan_block["plan_date"],
         # Sign conventions for state.grid_kw / state.battery_kw / current_slot
         # prices. LLM consumers (notably OpenClaw) cannot see Pydantic Field
@@ -2421,6 +2425,16 @@ def _vacation_status_safe() -> dict | None:
 
         return _vac.status_block()
     except Exception:  # pragma: no cover — status must render
+        return None
+
+
+def _cockpit_quota_safe() -> dict | None:
+    """#879 - {fox, daikin}: {used, budget, blocked} (same reader as /status/alerts)."""
+    try:
+        from .routers.status import _quota_block
+
+        return _quota_block()
+    except Exception:  # pragma: no cover - status must render
         return None
 
 

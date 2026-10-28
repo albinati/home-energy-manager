@@ -34,7 +34,8 @@ def test_cockpit_now_shape(client):
     # Top-level keys.
     assert set(body.keys()) == {
         "now_utc", "planner_tz", "current_slot", "next_transition",
-        "state", "freshness", "thresholds", "modes", "vacation", "plan_date", "_legend",
+        "state", "freshness", "thresholds", "modes", "vacation", "daikin", "quota", "plan",
+        "plan_date", "_legend",
     }
     # _legend disambiguates sign conventions for LLM consumers (OpenClaw etc.).
     # The signed fields MUST carry a description so a negative value cannot be

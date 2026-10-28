@@ -124,4 +124,10 @@ export const MOCK_PLAN_FRONTS: PlanFrontsResponse = {
     ],
     framing: "Staying on Cosy for the contract — comparison is informational",
   },
+  billing: {
+    cycle_start: "2026-10-07", cycle_end: "2026-11-06", days_elapsed: 1, days_total: 31,
+    realised_gbp: 1.6, forecast_cycle_gbp: 49.6, current_label: "Cosy",
+    compare: [{ tariff: "BG-FIXED", label: "British Gas Fixed", delta_gbp: 0.5 }, { tariff: "AGILE", label: "Agile", delta_gbp: -0.1 }],
+    winner: { tariff: "AGILE", label: "Agile", is_current: false },
+  },
 };

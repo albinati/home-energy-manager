@@ -1,3 +1,4 @@
+import { useEffect, useState } from "preact/hooks";
 import { Link, useLocation } from "wouter-preact";
 import { ThemeToggle } from "./ThemeToggle";
 import { AdminButton } from "./AdminButton";
@@ -5,14 +6,22 @@ import { PeriodNavigator } from "./PeriodNavigator";
 import { Icon } from "../common/Icon";
 import { role } from "../../lib/auth";
 
-// Routes whose content follows the shared period signal — these get the
-// compact period control in the chrome (redesign P4c). Other routes keep a
-// plain bar (the spacers collapse the gap).
-const periodRoutes = ["/", "/insights"];
+// Period control only where the page follows it (Insights). Home has none (#879).
+const periodRoutes = ["/insights"];
 
-// Redesign chrome: the brand IS the home link (no "Home" tab); routes are
-// quiet borderless nav-links with a thin-line icon; Settings demotes to an
-// icon-btn; theme toggle is an icon-btn (inside ThemeToggle).
+/** Local wall clock, HH:MM, ticking every 20 s. */
+function Clock() {
+  const fmt = () => new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const [t, setT] = useState(fmt);
+  useEffect(() => {
+    const id = setInterval(() => setT(fmt()), 20_000);
+    return () => clearInterval(id);
+  }, []);
+  return <span class="nav-clock" aria-label="Hora local">{t}</span>;
+}
+
+// Chrome (#879): brand · Casa · Insights · Ajustes (admin) · clock. The brand
+// is also the home link; on phones the links collapse into the brand.
 export function TopNav() {
   const [path] = useLocation();
   const isAdmin = role.value === "admin";
@@ -21,29 +30,27 @@ export function TopNav() {
       <div class="topnav-inner">
         <Link href="/" class="brand">
           <span class="brand-mark">H</span>
-          <span class="brand-name">
-            Home Energy Manager{path === "/" && <span class="brand-dim"> · cockpit</span>}
-          </span>
+          <span class="brand-name">HEM</span>
         </Link>
-        <span class="topnav-spacer" />
-        {periodRoutes.includes(path) && <PeriodNavigator variant="chrome" />}
-        <span class="topnav-spacer" />
         <nav class="topnav-tabs" aria-label="Primary">
-          <Link href="/insights" title="Insights" class={`nav-link${path === "/insights" ? " active" : ""}`}>
-            <Icon name="trend" size={15} />Insights
+          <Link href="/" class={`nav-link nav-link--text${path === "/" ? " active" : ""}`}>Casa</Link>
+          <Link href="/insights" title="Insights" class={`nav-link nav-link--text${path === "/insights" ? " active" : ""}`}>
+            Insights
           </Link>
           {isAdmin && (
-            <Link href="/report" title="Journal" class={`nav-link${path === "/report" ? " active" : ""}`}>
-              <Icon name="schedule" size={15} />Journal
+            <Link href="/report" title="Journal" class={`nav-link nav-link--text${path === "/report" ? " active" : ""}`}>
+              Journal
             </Link>
           )}
           {isAdmin && (
-            <Link href="/settings" class={`icon-btn${path === "/settings" ? " active" : ""}`}
-                  aria-label="Settings" title="Settings">
-              <Icon name="settings" size={16} />
+            <Link href="/settings" title="Ajustes" class={`nav-link nav-link--text${path === "/settings" ? " active" : ""}`}>
+              <Icon name="settings" size={14} />Ajustes
             </Link>
           )}
         </nav>
+        <span class="topnav-spacer" />
+        {periodRoutes.includes(path) && <PeriodNavigator variant="chrome" />}
+        <Clock />
         <AdminButton />
         <ThemeToggle />
       </div>

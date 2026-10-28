@@ -502,6 +502,17 @@ SCHEMA: dict[str, SettingSpec] = {
             "kill switch (pre-#872 behaviour, no gate fires)."
         ),
     ),
+    "OCTOPUS_BILLING_CYCLE_DAY": SettingSpec(
+        key="OCTOPUS_BILLING_CYCLE_DAY",
+        type_name="int",
+        env_default=_int_env("OCTOPUS_BILLING_CYCLE_DAY", "21"),
+        min_value=1,
+        max_value=28,
+        description=(
+            "Day of month the Octopus bill cycle starts (1..28). Drives the Home "
+            "'Conta Octopus' card (plan_fronts billing section, #879)."
+        ),
+    ),
     # --- Vacation mode v2 (#873) --------------------------------------------
     "VACATION_RETURN_AT": SettingSpec(
         key="VACATION_RETURN_AT",

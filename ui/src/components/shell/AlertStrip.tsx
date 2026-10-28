@@ -16,7 +16,7 @@ import "./alert-strip.css";
 // auth misconfig) renders nothing. The strip is an enhancement — it must
 // never be the thing that breaks the page.
 
-interface Chip {
+export interface Chip {
   key: string;
   tone: "bad" | "warn";
   label: string;
@@ -220,13 +220,14 @@ const DEBUG_CHIPS: Chip[] = [
   { key: "fox-drift", tone: "warn", label: "Fox schedule drift (3)", detail: "debugAlerts sample" },
 ];
 
-export function AlertStrip() {
-  const alerts = usePoll(getStatusAlerts, 60_000);
-
+/** All chips for the current alerts payload (+ connection / freshness cues).
+ *  Shared by the shell strip and the Home status line (#879). */
+export function computeChips(data: StatusAlertsResponse | null, error: Error | null): Chip[] {
   const debug = typeof location !== "undefined" && location.search.includes("debugAlerts=1");
-  let chips: Chip[] = debug ? DEBUG_CHIPS : [];
-  if (!debug && alerts.data && !alerts.error) {
-    chips = buildChips(alerts.data);
+  if (debug) return DEBUG_CHIPS;
+  const chips: Chip[] = [];
+  if (data && !error) {
+    chips.push(...buildChips(data));
     // Connection first (it explains why the freshness map may be missing), then
     // per-source staleness. Only one of them usually fires.
     const cc = connectionChip();
@@ -234,6 +235,12 @@ export function AlertStrip() {
     const fc = freshnessChip();
     if (fc) chips.push(fc);
   }
+  return chips;
+}
+
+export function AlertStrip() {
+  const alerts = usePoll(getStatusAlerts, 60_000);
+  const chips = computeChips(alerts.data, alerts.error);
 
   if (chips.length === 0) return null;
 

@@ -231,3 +231,21 @@
     z-index: 41;
   }
 }
+
+/* ── Simplified chrome (#879): text nav links + local clock ─────────────── */
+.nav-clock {
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+@media (max-width: 640px) {
+  /* Text links keep their (short) labels on phones; "Casa" collapses into the brand. */
+  .topnav .nav-link.nav-link--text {
+    font-size: var(--font-sm);
+    gap: var(--space-1);
+    padding: var(--space-3) var(--space-2);
+    min-width: 0;
+  }
+  .topnav .nav-link.nav-link--text[href="/"] { display: none; }
+}
