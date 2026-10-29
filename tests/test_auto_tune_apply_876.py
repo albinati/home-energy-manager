@@ -94,11 +94,12 @@ def test_tradeoff_needs_comfort_signal():
     r = [_row(KEY, 20.0, 19.5, -32, 0.3, "trade-off")]
     assert _sel(r, {"n": 0, "cold": 0}) is None                     # silence is not agreement
     assert _sel(r, {"n": 4, "cold": 1}) is None                     # someone was cold
-    assert _sel(r, {"n": 4, "cold": 0, "ok": 4})["key"] == KEY
+    assert _sel(r, {"n": 4, "cold": 0, "ok": 4, "n_days": 1}) is None  # one press must not license it
+    assert _sel(r, {"n": 4, "cold": 0, "ok": 4, "n_days": 2})["key"] == KEY
     # a trade-off that adds a bad shower day is never applied
     r2 = [_row(KEY, 20.0, 19.5, -32, 0.3, "trade-off",
                {"shower_days_below_current": 0, "shower_days_below_suggested": 1})]
-    assert _sel(r2, {"n": 4, "cold": 0}) is None
+    assert _sel(r2, {"n": 4, "cold": 0, "n_days": 3}) is None
 
 
 def test_comfort_first_needs_cold_and_hours_below():
@@ -171,9 +172,10 @@ def test_applies_once_with_telegram_and_log(_env):
     # exactly one Telegram, pt-BR label, rollback hint
     assert len(sent) == 1
     m = sent[0]["message"]
-    assert "Mínimo à noite 20 °C → 19,5 °C" in m and "−32p/semana" in m and "+0,3 h abaixo do piso" in m
+    assert "Mínimo à noite 20 °C → 19,5 °C" in m and "Simulação da revisão (7 dias): −32p/sem, +0,3 h abaixo do piso" in m
     assert f"/api/v1/tuning/ledger/{out['id']}/rollback" in m and "reverto sozinho" in m
     assert sent[0]["header"].endswith("Ajuste automático")
+    assert sent[0]["kind"] == notifier.AlertType.AUTO_TUNE
     log = _last_log()
     assert log["result"] == "success" and log["params"]["applied"] is True
     assert log["params"]["candidates"][0]["key"] == KEY
@@ -244,7 +246,8 @@ def test_frozen_candidate_skipped_with_held_notification(_env, monkeypatch):
     sent = _env
     _on()
     _setup(20.0)
-    now = datetime.now(UTC)                       # the freeze is stamped with the real clock
+    now = APPLY_AT
+    monkeypatch.setattr(auto_tune, "_now", lambda n=None: (n or APPLY_AT).astimezone(UTC))
     auto_tune.freeze(key=KEY, days=10)
     ws = ap._expected_week_start(now)
     _seed([_row(KEY, 20.0, 19.5, -32, 0.3, "recommended", ws=ws)])
@@ -339,6 +342,7 @@ def test_ledger_api_has_next_apply_and_quota():
     auto_tune.propose_change(KEY, 19.5, "tuning_review", now=datetime.now(UTC))
     body = TestClient(app).get("/api/v1/tuning/ledger").json()
     assert body["weekly_quota_used"] == 1 and body["next_apply_at"].endswith("Z")
+    assert body["apply_enabled"] is True
     assert body["rows"]
 
 
@@ -375,3 +379,204 @@ def test_recommendations_ledger_status_and_button(monkeypatch):
     assert n["kind"] == "status" and n["action"] is None
     assert n["headline"].startswith("Aplicado ") and "avaliando dia 1/7" in n["headline"]
     assert n["ledger"]["status"] == "evaluating" and n["ledger"]["day_n"] == 1
+
+
+# ------------------------------------------------------------ review fixes
+def _fb_at(verdict, t):
+    db.insert_comfort_feedback(verdict=verdict, source="api", now=t)
+
+
+def test_s1_cold_week_never_loosens_comfort():
+    _on()
+    _setup(20.0)
+    _fb_at("cold", APPLY_AT - timedelta(hours=40))
+    _seed([_row(KEY, 20.0, 19.5, -32, 0.3, "recommended")])        # +0.3 h below the floor
+    out = ap.apply_weekly(APPLY_AT)
+    assert out["reason"] == "nothing_eligible" and out["candidates"][0]["skipped"] == "cold_feedback"
+    assert float(rts.get_setting(KEY)) == 20.0
+
+
+def test_s1_cold_week_same_row_without_comfort_cost_applies():
+    _on()
+    _setup(20.0)
+    _fb_at("cold", APPLY_AT - timedelta(hours=40))
+    _seed([_row(KEY, 20.0, 19.5, -32, 0.0, "recommended")])
+    assert ap.apply_weekly(APPLY_AT)["applied"] is True
+    # and without any cold feedback the +0.3 h row is fine (A/B)
+    db.get_connection  # noqa: B018
+    from src.db import get_connection  # reset the ledger for the B arm
+    c = get_connection()
+    c.execute("DELETE FROM auto_tune_changes")
+    c.execute("DELETE FROM comfort_feedback")
+    c.execute("DELETE FROM tuning_suggestions")
+    c.commit()
+    c.close()
+    _setup(20.0)
+    rts.clear_cache()
+    _seed([_row(KEY, 20.0, 19.5, -32, 0.3, "recommended")])
+    assert ap.apply_weekly(APPLY_AT)["applied"] is True
+
+
+def test_s1_conflicts_with_comfort_job_proposal():
+    _on()
+    _setup(20.0)
+    now = datetime.now(UTC)   # action_log is stamped with the real clock
+    db.log_action(device="comfort", action="weekly_summary",
+                  params={"proposal": {"key": KEY, "current": 20.0, "suggested": 20.5, "reason": "cold"}},
+                  result="success", trigger="cron")
+    _seed([_row(KEY, 20.0, 19.5, -32, 0.0, "recommended", ws=ap._expected_week_start(now))])
+    out = ap.apply_weekly(now)
+    assert out["applied"] is False, out
+    assert out["candidates"][0]["skipped"] == "conflicts_comfort"
+    # same direction as the comfort job is not a conflict
+    chosen, cons = ap.evaluate_candidates(
+        [_row(KEY, 20.0, 20.5, -4, 0.0, "recommended")],
+        {"comfort_job_proposal": {"key": KEY, "current": 20.0, "suggested": 20.5}}, now)
+    assert chosen is not None
+
+
+def test_s2_tradeoff_size_cap_and_two_days():
+    _setup(20.0)
+    sig = {"n": 4, "cold": 0, "n_days": 2}
+    assert _sel([_row(KEY, 20.0, 19.5, -32, 1.5, "trade-off")], sig) is None   # > 2 x 0.5 h
+    chosen, cons = ap.evaluate_candidates([_row(KEY, 20.0, 19.5, -32, 1.5, "trade-off")], sig, APPLY_AT)
+    assert cons[0]["skipped"] == "comfort_cost_too_large"
+    assert _sel([_row(KEY, 20.0, 19.5, -32, 0.9, "trade-off")], sig)["key"] == KEY
+
+
+def test_s3_apply_after_local_midnight(monkeypatch):
+    monkeypatch.setattr(config, "TUNING_REVIEW_HOUR_LOCAL", 23)
+    monkeypatch.setattr(config, "AUTO_TUNE_APPLY_DELAY_MINUTES", 90)
+    _on()
+    _setup(20.0)
+    at = datetime(2026, 11, 2, 0, 30, tzinfo=UTC)               # Monday 00:30, review was Sunday 23:00
+    assert ap._expected_week_start(at) == WS
+    _seed([_row(KEY, 20.0, 19.5, -32, 0.3, "recommended")])
+    assert ap.apply_weekly(at)["applied"] is True
+
+
+def test_n1_only_newest_build_of_the_week():
+    _on()
+    _setup(20.0)
+    rts.set_setting("DHW_TEMP_NORMAL_C", 45.0, actor="vacation_end")
+    _seed([_row(KEY, 20.0, 19.5, -90, 0.0, "recommended")])     # older build, bigger saving
+    _seed([_row("DHW_TEMP_NORMAL_C", 45.0, 44.0, -5, 0.0, "recommended")])
+    out = ap.apply_weekly(APPLY_AT)
+    assert out["applied"] is True and out["key"] == "DHW_TEMP_NORMAL_C"
+
+
+def test_partial_review_is_recorded(_env):
+    _on()
+    _setup(20.0)
+    _seed([_row(KEY, 20.0, 19.5, 8, -0.4, "comfort-first", {"status": "partial", "hours_below_current": 1.0})])
+    _fb_at("cold", APPLY_AT - timedelta(hours=40))
+    out = ap.apply_weekly(APPLY_AT)
+    assert out["applied"] is True
+    row = db.get_auto_tune_change(out["id"])
+    assert row["note"] == f"review {WS}: comfort-first, costs 8p/week, partial review"
+    assert _last_log()["params"]["review_status"] == "partial"
+    assert "(parcial)" in _env[0]["message"]
+
+
+def test_message_omits_zero_hours_clause(_env):
+    _on()
+    _setup(20.0)
+    _seed([_row(KEY, 20.0, 19.5, -32, 0.0, "recommended")])
+    ap.apply_weekly(APPLY_AT)
+    assert "−32p/sem." in _env[0]["message"] and " h abaixo" not in _env[0]["message"]
+
+
+def test_stale_between_review_and_apply():
+    _on()
+    _setup(20.0)
+    _seed([_row(KEY, 20.0, 19.5, -32, 0.0, "recommended")])
+    rts.set_setting(KEY, 20.5, actor="owner")                        # owner moves it after 09:00
+    out = ap.apply_weekly(APPLY_AT)
+    assert out["reason"] == "nothing_eligible" and out["candidates"][0]["skipped"] == "stale"
+    assert float(rts.get_setting(KEY)) == 20.5
+
+
+def test_n3_quota_fails_closed(monkeypatch):
+    monkeypatch.setattr(db, "get_auto_tune_changes", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db")))
+    assert ap.weekly_quota_used(APPLY_AT) == 1
+
+
+def test_n4_held_ping_names_eligible_row(_env, monkeypatch):
+    sent = _env
+    _on()
+    _setup(20.0)
+    rts.set_setting("INDOOR_SETPOINT_C", 21.5, actor="vacation_end")   # review saw 21 -> stale
+    rts.set_setting("DHW_TEMP_NORMAL_C", 45.0, actor="vacation_end")
+    auto_tune.propose_change("DHW_TEMP_NORMAL_C", 44.0, "tuning_review", now=APPLY_AT - timedelta(days=8))
+    _seed([_row("INDOOR_SETPOINT_C", 21.0, 20.5, -80, 0.0, "recommended"),
+           _row(KEY, 20.0, 19.5, -32, 0.0, "recommended")])
+    monkeypatch.setattr(config, "AUTO_TUNE_NOTIFY_SKIPPED", True, raising=False)
+    assert ap.apply_weekly(APPLY_AT)["reason"] == "busy"
+    assert len(sent) == 1 and "Mínimo à noite" in sent[0]["message"] and "−32p" in sent[0]["message"]
+
+
+def test_n7_ledger_extras_when_disabled():
+    ex = ap.ledger_extras(APPLY_AT)
+    assert ex["next_apply_at"] is None and ex["apply_enabled"] is False
+    _on()
+    assert ap.ledger_extras(APPLY_AT)["next_apply_at"].endswith("Z")
+    config.TUNING_REVIEW_ENABLED = False
+    assert ap.ledger_extras(APPLY_AT)["apply_enabled"] is False
+
+
+def test_n8_review_running_backs_off_once(monkeypatch):
+    from src import tuning_review
+    from src.scheduler import runner
+
+    class Fake:
+        def __init__(self):
+            self.jobs = []
+
+        def add_job(self, fn, trigger=None, **kw):
+            self.jobs.append((fn, trigger, kw))
+
+    f = Fake()
+    monkeypatch.setattr(runner, "_background_scheduler", f)
+    monkeypatch.setattr(tuning_review, "_running", True)
+    _on()
+    ap.weekly_apply_job()
+    assert len(f.jobs) == 1 and f.jobs[0][2]["id"] == "auto_tune_weekly_apply_retry"
+    assert f.jobs[0][2]["kwargs"] == {"retry": True} and _last_log() is None
+    ap.weekly_apply_job(retry=True)                                  # second time: no more back-off
+    assert len(f.jobs) == 1 and _last_log()["params"]["reason"] == "review_running"
+
+
+def test_s4_auto_tune_route_is_audible():
+    r = db.get_notification_route("auto_tune")
+    assert r and r["enabled"] and not r["silent"]
+
+
+def test_n5_other_rows_wait_while_a_change_is_evaluating(monkeypatch):
+    from src.analytics import recommendations as rec
+
+    today = datetime.now(LON).date()
+    ws = (today - timedelta(days=3)).isoformat()
+    monkeypatch.setattr(rec, "_live_value", lambda k: float(rts.get_setting(k)))
+    _on()
+    _setup(20.0)
+    rts.set_setting("DHW_TEMP_NORMAL_C", 45.0, actor="vacation_end")
+    db.save_tuning_suggestions([_row("DHW_TEMP_NORMAL_C", 45, 44, -9, 0.0, "recommended", ws=ws)])
+    assert rec.tuning_items(today, LON)[0]["kind"] == "setting"
+    assert auto_tune.propose_change(KEY, 19.5, "tuning_review", now=datetime.now(UTC))["applied"]
+    it = rec.tuning_items(today, LON)[0]
+    assert it["kind"] == "suggestion" and it["action"] is None
+    assert it["detail"].startswith("Aguarde: outra mudança em avaliação.")
+
+
+def test_n6_day_n_uses_the_composer_day(monkeypatch):
+    from src.analytics import recommendations as rec
+
+    today = datetime.now(LON).date()
+    monkeypatch.setattr(rec, "_live_value", lambda k: float(rts.get_setting(k)))
+    _on()
+    _setup(20.0)
+    ws = (today - timedelta(days=3)).isoformat()
+    db.save_tuning_suggestions([_row(KEY, 20, 19.5, -32, 0.3, "recommended", ws=ws)])
+    assert auto_tune.propose_change(KEY, 19.5, "tuning_review", now=datetime.now(UTC))["applied"]
+    it = rec.tuning_items(today + timedelta(days=2), LON)[0]
+    assert it["ledger"]["day_n"] == 3 and "avaliando dia 3/7" in it["headline"]

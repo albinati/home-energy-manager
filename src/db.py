@@ -583,6 +583,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("guests_mode_suggested", "reports",  0),
         ("dhw_bias_enable_ready", "reports",  0),
         ("tuning_review",         "reports",  1),  # silent push (pull-first)
+        ("auto_tune",             "reports",  0),  # #876 s2: automatic setting change - audible
         # 2026-07-28 — comfort/actuation divergence. Both are ACTIONABLE (the
         # user has to decide something), so they must not land in the muted
         # FYI bucket alongside the digests.

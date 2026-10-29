@@ -632,7 +632,7 @@ def _tuning_ledger(key: str, new: Any, end: date, tz: ZoneInfo) -> dict[str, Any
     try:
         from .. import auto_tune_apply
 
-        return auto_tune_apply.ledger_for_item(key, new)
+        return auto_tune_apply.ledger_for_item(key, new, today=end, tz=tz)
     except Exception:  # noqa: BLE001
         return None
 
@@ -654,6 +654,10 @@ def tuning_items(end: date, tz: ZoneInfo) -> list[dict[str, Any]]:
             last_cold = f
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
+    try:
+        busy = db.get_active_auto_tune_change() is not None   # #876: one change at a time
+    except Exception:  # noqa: BLE001
+        busy = False
     for r in rows:
         if r["week_start"] != week_start or r["verdict"] not in ("recommended", "trade-off", "comfort-first"):
             continue
@@ -713,10 +717,13 @@ def tuning_items(end: date, tz: ZoneInfo) -> list[dict[str, Any]]:
                 t = _parse(last_cold.get("at_utc"))
                 det += f" ({(last_cold.get('room') or 'casa')}{', ' + t.astimezone(tz).strftime('%H:%M') if t else ''})"
         money = float(pence) if saves else None
+        det = det + ("" if det.endswith(".") else ".")
+        if busy:
+            det = "Aguarde: outra mudança em avaliação. " + det
         out.append(_item(
-            f"tune_{key}", who, icon, head, det + ("" if det.endswith(".") else "."), kind="setting",
+            f"tune_{key}", who, icon, head, det, kind="suggestion" if busy else "setting",
             money_pence=money, money_label=None if money is None else pence_label(money, "/sem"),
-            action={"setting_key": key, "from": cur, "to": new},
+            action=None if busy else {"setting_key": key, "from": cur, "to": new},
             evidence={"week_start": week_start, "verdict": r["verdict"], "delta_comfort_hours": hrs,
                       "delta_shower_days": d_shower, "feedback": counts}))
         if led:

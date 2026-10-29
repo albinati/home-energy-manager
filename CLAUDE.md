@@ -1609,31 +1609,49 @@ this module never writes a setting itself).
   (default 20 -> Sunday 09:20 local, `BULLETPROOF_TIMEZONE`, rolls to the next weekday past midnight),
   `runner.register_auto_tune_apply_job`. Always registered; `AUTO_TUNE_ENABLED` (runtime) and
   `TUNING_REVIEW_ENABLED` are checked at run time. `no_review` when the newest `tuning_suggestions`
-  `week_start` is not the week the review of that Sunday covers (`yesterday - (TUNING_REVIEW_DAYS-1)`).
+  `week_start` is not the week the review covers (`review local date - 1 - (TUNING_REVIEW_DAYS-1)`, the
+  review date being now minus the apply delay, so a delay crossing local midnight still matches). If the
+  review is still running the job backs off 5 min ONCE (one-shot `auto_tune_weekly_apply_retry`), then
+  `review_running`.
 - **Quota**: `weekly_quota_used(now)` = non-manual ledger rows with `applied_at` in the current local ISO
-  week (any source; a rollback does not free it). The comfort-feedback job (08:45) checks it before its
+  week (any source; a rollback does not free it; a DB error FAILS CLOSED = spent). The comfort-feedback job (08:45) checks it before its
   own proposal (`action_log` comfort/`auto_tune` `skipped=weekly_quota`); the review apply (09:20) sees
   a spent week as `weekly_quota`. `kv_state` `auto_tune_last_apply_week` is informational only.
+- **Cold week = no loosening (review fix)**: with >= 1 `cold` feedback in the review's week, ANY candidate
+  with `delta_comfort_hours > 0` is skipped (`cold_feedback`), whatever its verdict; a review row on the
+  same key as the 08:45 comfort job's proposal (read from its `weekly_summary` action_log of the last 24 h)
+  that moves the other way is skipped (`conflicts_comfort`). `trade-off` additionally needs comfort cost
+  <= 2 x `TUNING_REVIEW_COMFORT_TOLERANCE_H` and feedback on >= 2 distinct local days.
 - **Selection** (`select_weekly_change` / `evaluate_candidates`, pure): `recommended` first (largest
   weekly saving, tie: smaller `delta_comfort_hours`); `comfort-first` only when the control had
   `hours_below_current > 0` AND the week had >= 1 `cold` feedback; `trade-off` only when the week had
-  >= 1 feedback and NO `cold`, it saves money, loosens comfort (hours up) and adds no shower-shortfall
-  day. Any candidate is skipped (reason recorded, next one tried) when: key not allowlisted, frozen,
+  >= 2 feedback days and NO `cold`, it saves money, loosens comfort (hours up, capped) and adds no
+  shower-shortfall day. Only rows of the NEWEST build (`built_at_utc`) of the week are considered. Any candidate is skipped (reason recorded, next one tried) when: key not allowlisted, frozen,
   review `current_value` != live persisted value (`stale`), already at the value, or more than one
   `auto_tune` step away (`step_too_large`). Comfort signal = `comfort_feedback.weekly_summary(week_start)`.
 - **Outcome**: every run writes `action_log` device `auto_tune` action `weekly_apply` (applied / reason /
   candidates considered with per-candidate skip reasons / comfort counts). Reasons: `disabled`,
   `review_disabled`, `weekly_quota`, `no_review`, `busy`, `nothing_eligible`, any `propose_change`
   refusal (`away`, `frozen`, `no_baseline`, ...), `error`. Never raises.
-- **Telegram** (`notifier.notify_auto_tune_applied`, AlertType `tuning_review`, honours
-  `OPENCLAW_NOTIFY_ENABLED`): ONE pt-BR message per applied change (label from `KEY_LABELS_PT`, review
-  saving and comfort cost, "Avalio por 7 dias e reverto sozinho se piorar", rollback endpoint). Nothing
+- **Telegram** (`notifier.notify_auto_tune_applied`, AlertType `auto_tune` with its own default route,
+  enabled and NOT silent, honours `OPENCLAW_NOTIFY_ENABLED`): ONE pt-BR message per applied change (label
+  from `KEY_LABELS_PT`, "Simulação da revisão (N dias): −32p/sem, +0,3 h abaixo do piso" - a REPLAY delta,
+  hours clause omitted when |h| < 0.05, "(parcial)" for a partial review, "Avalio por 7 dias e reverto sozinho se piorar", rollback endpoint). Nothing
   is sent when nothing is applied, except `notify_auto_tune_held` (busy / frozen with a saving >= 20
   p/week) which is OFF unless env `AUTO_TUNE_NOTIFY_SKIPPED=true`.
-- **Surfaces**: `GET /api/v1/tuning/ledger` adds `next_apply_at` and `weekly_quota_used`. The Insights
+- **Surfaces**: `GET /api/v1/tuning/ledger` adds `next_apply_at` (null when `AUTO_TUNE_ENABLED` or
+  `TUNING_REVIEW_ENABLED` is off), `apply_enabled` and `weekly_quota_used`. While a change is
+  `evaluating`, the other Insights tuning rows are `kind="suggestion"` with no Apply button ("Aguarde:
+  outra mudança em avaliação"). The Insights
   tuning items carry `ledger {status, applied_at, day_n, id}` when the key has an
   `evaluating|kept|rolled_back` row in the last 14 days; when the evaluating change IS that suggestion
   the item is `kind="status"` ("Aplicado dom 02/11 · avaliando dia 3/7") with no Apply button.
+- **Known edges**: the comfort job's window is the trailing Mon..Sun (08:45) while
+  `weekly_summary(week_start)` for the review is Sun..Sat, so a feedback on the boundary day may count in
+  one and not the other. A non-Sunday `TUNING_REVIEW_DOW` splits the shared quota across ISO weeks (the
+  comfort job and the apply can both fire in one calendar week); the ledger `busy` check is the real
+  one-at-a-time guard. Deploy with story 3 (the judge, #889) or keep `AUTO_TUNE_ENABLED=false`: without
+  it an `evaluating` row is never closed and every later week is `busy`.
 - **Kill switches**: `AUTO_TUNE_ENABLED=false` -> the review stays suggestions-only, bit-for-bit;
   `TUNING_REVIEW_ENABLED=false` -> no review, hence no apply.
 

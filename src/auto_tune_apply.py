@@ -107,8 +107,9 @@ def weekly_quota_used(now: datetime | None = None) -> int:
                 n += 1
         return n
     except Exception:  # noqa: BLE001
-        logger.debug("auto_tune_apply.weekly_quota_used failed", exc_info=True)
-        return 0
+        # Fail CLOSED: an unreadable ledger must not license a second change.
+        logger.warning("auto_tune_apply.weekly_quota_used failed; assuming spent", exc_info=True)
+        return 1
 
 
 # ----------------------------------------------------------------- schedule
@@ -142,9 +143,11 @@ def next_apply_at(now: datetime | None = None) -> str:
 def ledger_extras(now: datetime | None = None) -> dict[str, Any]:
     """Fields added to ``GET /api/v1/tuning/ledger``."""
     try:
-        return {"next_apply_at": next_apply_at(now), "weekly_quota_used": weekly_quota_used(now)}
+        on = auto_tune.enabled() and bool(getattr(config, "TUNING_REVIEW_ENABLED", True))
+        return {"next_apply_at": next_apply_at(now) if on else None, "apply_enabled": on,
+                "weekly_quota_used": weekly_quota_used(now)}
     except Exception:  # noqa: BLE001
-        return {"next_apply_at": None, "weekly_quota_used": 0}
+        return {"next_apply_at": None, "apply_enabled": False, "weekly_quota_used": 0}
 
 
 # ---------------------------------------------------------------- selection
@@ -173,13 +176,17 @@ def _check_candidate(row: dict[str, Any], comfort: dict[str, Any], now: datetime
     pl = row.get("payload") or {}
     cold, n = int(comfort.get("cold") or 0), int(comfort.get("n") or 0)
     hrs = row.get("delta_comfort_hours")
+    if cold >= 1 and hrs is not None and float(hrs) > 0:
+        return "cold_feedback"  # a cold week never loosens comfort, whatever the verdict
     if verdict == "trade-off":
         if n < 1:
             return "no_comfort_feedback"
-        if cold > 0:
-            return "cold_feedback"
+        if int(comfort.get("n_days") or 0) < 2:
+            return "feedback_on_one_day"
         if _pence(row) <= 0 or hrs is None or float(hrs) <= 0:
             return "not_a_loosening_saving"
+        if float(hrs) > 2.0 * float(config.TUNING_REVIEW_COMFORT_TOLERANCE_H) + 1e-9:
+            return "comfort_cost_too_large"
         sc, sn = pl.get("shower_days_below_current"), pl.get("shower_days_below_suggested")
         if sc is not None and sn is not None and int(sn) > int(sc):
             return "worse_shower_days"
@@ -201,6 +208,14 @@ def _check_candidate(row: dict[str, Any], comfort: dict[str, Any], now: datetime
         return "stale"
     if live == new:
         return "unchanged"
+    prop = comfort.get("comfort_job_proposal")
+    if isinstance(prop, dict) and str(prop.get("key")) == key:
+        try:
+            pdir = float(prop["suggested"]) - float(prop["current"])
+            if (float(new) - float(live)) * pdir < 0:
+                return "conflicts_comfort"
+        except (KeyError, TypeError, ValueError):
+            pass
     if spec.enum is not None:
         en = list(spec.enum)
         if abs(en.index(new) - en.index(live)) != 1:
@@ -255,7 +270,10 @@ def _log(params: dict[str, Any], result: str) -> None:
 
 
 def _expected_week_start(now: datetime) -> str:
-    end_day = now.astimezone(_tz()).date() - timedelta(days=1)
+    # The review's own local date: the apply may run past local midnight
+    # (late TUNING_REVIEW_HOUR_LOCAL + delay), so subtract the delay first.
+    review_at = now - timedelta(minutes=max(0, int(config.AUTO_TUNE_APPLY_DELAY_MINUTES)))
+    end_day = review_at.astimezone(_tz()).date() - timedelta(days=1)
     return (end_day - timedelta(days=int(config.TUNING_REVIEW_DAYS) - 1)).isoformat()
 
 
@@ -267,15 +285,67 @@ def applied_message(row: dict[str, Any], res: dict[str, Any]) -> str:
     key = res["key"]
     pence = row.get("delta_pence_per_week")
     hrs = row.get("delta_comfort_hours")
+    pl = row.get("payload") or {}
+    n_days = pl.get("n_days") or 7
     bits = []
     if pence is not None:
-        bits.append(f"{'−' if float(pence) < 0 else '+'}{_pt(abs(round(float(pence))))}p/semana")
-    if hrs is not None:
+        bits.append(f"{'−' if float(pence) < 0 else '+'}{_pt(abs(round(float(pence))))}p/sem")
+    if hrs is not None and abs(float(hrs)) >= 0.05:
         bits.append(f"{'+' if float(hrs) >= 0 else '−'}{_pt(abs(round(float(hrs), 1)))} h abaixo do piso")
-    why = f" (revisão de domingo: {', '.join(bits)})" if bits else ""
+    partial = " (parcial)" if pl.get("status") == "partial" else ""
+    why = f" Simulação da revisão ({n_days} dias){partial}: {', '.join(bits)}." if bits else ""
     return (f"{KEY_LABELS_PT.get(key, key)} {_fmt_val(key, res['old_value'])} → "
-            f"{_fmt_val(key, res['new_value'])}{why}. Avalio por 7 dias e reverto sozinho se piorar. "
+            f"{_fmt_val(key, res['new_value'])}.{why} Avalio por 7 dias e reverto sozinho se piorar. "
             f"Reverter agora: POST /api/v1/tuning/ledger/{res['id']}/rollback")
+
+
+def _review_running() -> bool:
+    try:
+        from . import tuning_review
+
+        return bool(tuning_review._running)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _feedback_days(week_start: str) -> int:
+    """Distinct local days with comfort feedback in the review's week."""
+    try:
+        from datetime import date as _date
+
+        d0 = _date.fromisoformat(week_start)
+        tz = _tz()
+        a = datetime(d0.year, d0.month, d0.day, tzinfo=tz)
+        b = a + timedelta(days=7)
+        rows = db.get_comfort_feedback(
+            since_utc=a.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            until_utc=b.astimezone(UTC).isoformat().replace("+00:00", "Z"))
+        days = set()
+        for r in rows:
+            t = auto_tune._parse(r.get("at_utc"))
+            if t is not None:
+                days.add(t.astimezone(tz).date())
+        return len(days)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _comfort_job_proposal(now: datetime) -> dict[str, Any] | None:
+    """The proposal the 08:45 comfort job logged within the last day (if any)."""
+    try:
+        for r in db.get_action_logs(device="comfort", action="weekly_summary", limit=3):
+            ts = r.get("timestamp")
+            try:
+                t = datetime.fromtimestamp(float(ts), UTC)
+            except (TypeError, ValueError):
+                t = auto_tune._parse(ts)
+            if t is None or not (timedelta(minutes=-5) <= now - t <= timedelta(hours=24)):
+                continue
+            prop = (r.get("params") or {}).get("proposal")
+            return prop if isinstance(prop, dict) else None
+    except Exception:  # noqa: BLE001
+        logger.debug("auto_tune_apply: comfort proposal lookup failed", exc_info=True)
+    return None
 
 
 def _notify(fn_name: str, *args: Any, **kw: Any) -> None:
@@ -333,12 +403,17 @@ def _apply_weekly(now: datetime | None) -> dict[str, Any]:
     if weekly_quota_used(t) > 0:
         return done("weekly_quota", week=iso_week_label(t))
 
+    if _review_running():
+        return done("review_running")
+
     rows = db.list_tuning_suggestions(1)
     if not rows or rows[0]["week_start"] != _expected_week_start(t):
         return done("no_review", expected_week_start=_expected_week_start(t),
                     latest_week_start=rows[0]["week_start"] if rows else None)
     week_start = rows[0]["week_start"]
-    rows = [r for r in rows if r["week_start"] == week_start]
+    build = rows[0].get("built_at_utc")
+    rows = [r for r in rows if r["week_start"] == week_start and r.get("built_at_utc") == build]
+    review_status = (rows[0].get("payload") or {}).get("status") if rows else None
 
     comfort: dict[str, Any] = {}
     try:
@@ -346,19 +421,20 @@ def _apply_weekly(now: datetime | None) -> dict[str, Any]:
 
         from .analytics import comfort_feedback as cf
 
-        comfort = cf.weekly_summary(_date.fromisoformat(week_start)) or {}
+        comfort = dict(cf.weekly_summary(_date.fromisoformat(week_start)) or {})
     except Exception:  # noqa: BLE001
         logger.debug("auto_tune_apply: comfort summary unavailable", exc_info=True)
-    comfort_brief = {k: comfort.get(k) for k in ("n", "cold", "ok", "hot")}
+    comfort["n_days"] = _feedback_days(week_start)
+    comfort["comfort_job_proposal"] = _comfort_job_proposal(t)
+    comfort_brief = {k: comfort.get(k) for k in ("n", "cold", "ok", "hot", "n_days")}
 
     chosen, considered = evaluate_candidates(rows, comfort, t)
-    top_saver = next((r for r in sorted(rows, key=lambda r: -_pence(r))
-                      if r.get("verdict") == "recommended"), None)
-    base = {"week_start": week_start, "candidates": considered, "comfort": comfort_brief}
+    base = {"week_start": week_start, "candidates": considered, "comfort": comfort_brief,
+            "review_status": review_status}
 
     if db.get_active_auto_tune_change():
         out = done("busy", **base)
-        _maybe_notify_held(top_saver, "busy", None, t)
+        _maybe_notify_held(chosen, "busy", None, t)  # the held ping names an ELIGIBLE row
         return out
     if chosen is None:
         frozen_top = next((c for c in considered if c["skipped"] == "frozen"), None)
@@ -367,8 +443,10 @@ def _apply_weekly(now: datetime | None) -> dict[str, Any]:
             _maybe_notify_held(held, "frozen", None, t)
         return done("nothing_eligible", **base)
 
-    note = (f"review {week_start}: {chosen['verdict']}, "
-            f"saves {round(_pence(chosen))}p/week")
+    pen = _pence(chosen)
+    money = f"saves {round(pen)}p/week" if pen >= 0 else f"costs {round(-pen)}p/week"
+    note = (f"review {week_start}: {chosen['verdict']}, {money}"
+            + (", partial review" if review_status == "partial" else ""))
     res = auto_tune.propose_change(str(chosen["key"]), chosen["suggested_value"], "tuning_review",
                                    note=note, now=t)
     if not res.get("applied"):
@@ -389,16 +467,32 @@ def _apply_weekly(now: datetime | None) -> dict[str, Any]:
             "new_value": res["new_value"], "verdict": chosen["verdict"]}
 
 
-def weekly_apply_job() -> None:
+def weekly_apply_job(retry: bool = False) -> None:
     """APScheduler entry (review slot + ``AUTO_TUNE_APPLY_DELAY_MINUTES``).
-    Registered unconditionally; decides at run time."""
+    Registered unconditionally; decides at run time. If the review is still
+    running, backs off 5 minutes ONCE (one-shot job) instead of ``no_review``."""
+    if not retry and _review_running():
+        try:
+            from apscheduler.triggers.date import DateTrigger
+
+            from .scheduler import runner
+
+            sched = runner._background_scheduler
+            if sched is not None:
+                sched.add_job(weekly_apply_job, DateTrigger(run_date=datetime.now(UTC) + timedelta(minutes=5)),
+                              id="auto_tune_weekly_apply_retry", replace_existing=True,
+                              kwargs={"retry": True})
+                logger.info("auto_tune weekly apply: review still running; retry in 5 min")
+                return
+        except Exception:  # noqa: BLE001
+            logger.warning("auto_tune weekly apply: retry scheduling failed", exc_info=True)
     res = apply_weekly()
     logger.info("auto_tune weekly apply: applied=%s reason=%s", res.get("applied"), res.get("reason"))
 
 
 # -------------------------------------------------------------- recommendations
 def ledger_for_item(key: str, new_value: Any, now: datetime | None = None,
-                    days: int = 14) -> dict[str, Any] | None:
+                    days: int = 14, *, today: Any = None, tz: Any = None) -> dict[str, Any] | None:
     """Ledger row summary for the Insights tuning item of ``key``: the newest
     ``evaluating`` / ``kept`` / ``rolled_back`` row applied in the last ``days``
     days. ``is_active_suggestion`` = that row is the evaluating change that set
@@ -411,8 +505,8 @@ def ledger_for_item(key: str, new_value: Any, now: datetime | None = None,
             at = auto_tune._parse(r.get("applied_at"))
             if at is None or t - at > timedelta(days=days):
                 continue
-            tz = _tz()
-            day_n = (t.astimezone(tz).date() - at.astimezone(tz).date()).days + 1
+            tz = tz or _tz()
+            day_n = ((today or t.astimezone(tz).date()) - at.astimezone(tz).date()).days + 1
             spec = rts.SCHEMA.get(key)
             same = False
             try:
