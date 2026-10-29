@@ -37,6 +37,16 @@ from . import runtime_settings as rts
 logger = logging.getLogger(__name__)
 
 SOURCES = ("tuning_review", "comfort_feedback", "learned_param", "plan_pattern")
+# Why a change was made (judge rule per intent, see auto_tune_judge.decide).
+INTENTS = ("saving", "trade_off", "comfort_up", "comfort_down", "learned")
+
+# Key classes, shared with the judge. "Loosening" = a comfort/DHW setting moved in the
+# direction that lets the house / tank be colder.
+COMFORT_LOOSEN_DOWN = ("LP_W3_NIGHT_FLOOR_C", "INDOOR_SETPOINT_C", "LP_W3_CEILING_C")
+COMFORT_LOOSEN_UP = ("LP_W3_PEAK_COAST_DELTA_C",)
+DHW_KEYS = ("DHW_TEMP_NORMAL_C", "DHW_TEMP_COMFORT_C")
+LEARNED_KEYS = ("LP_W3_SOLAR_GAIN_KW_PER_PV_KW", "LP_W3_INTERNAL_GAIN_KW", "LP_W3_EMITTER_TAU_MIN")
+
 STATUSES = ("evaluating", "kept", "rolled_back", "superseded_manual", "manual")
 
 # Keys no setting can ever put on the allowlist. ``AUTO_TUNE_*`` (prefix) and
@@ -282,6 +292,7 @@ def ledger_state(key: str) -> dict[str, Any]:
     return {
         "key": key,
         "active": active,
+        "intent": active.get("intent") if active else None,
         "last": rows[0] if rows else None,
         "frozen_until": db.auto_tune_frozen_until(key),
         "manual_value": manual_value(key),
@@ -351,8 +362,26 @@ def _same(spec: Any, a: Any, b: Any) -> bool:
         return str(a) == str(b)
 
 
+def derive_intent(key: str, source: str, old_value: Any, new_value: Any) -> str:
+    """Default ``intent`` when the proposer passes none: ``comfort_feedback`` ->
+    ``comfort_up`` / ``comfort_down`` by direction (floor up, peak delta down,
+    setpoint up, DHW up = up), ``learned_param`` -> ``learned``, else ``saving``."""
+    if source == "learned_param":
+        return "learned"
+    if source == "comfort_feedback":
+        try:
+            o, n = float(old_value), float(new_value)
+        except (TypeError, ValueError):
+            return "saving"
+        k = str(key).upper()
+        loosen = ((k in COMFORT_LOOSEN_DOWN or k in DHW_KEYS) and n < o) or (k in COMFORT_LOOSEN_UP and n > o)
+        return "comfort_down" if loosen else "comfort_up"
+    return "saving"
+
+
 def propose_change(key: str, new_value: Any, source: str, *, note: str | None = None,
-                   now: datetime | None = None) -> dict[str, Any]:
+                   now: datetime | None = None, intent: str | None = None,
+                   expected_comfort_hours: float | None = None) -> dict[str, Any]:
     """Apply ONE bounded automated change and open an ``evaluating`` ledger row.
 
     Returns ``{"applied": True, "id", "key", "old_value", "new_value", ...}`` or
@@ -376,6 +405,8 @@ def propose_change(key: str, new_value: Any, source: str, *, note: str | None = 
         return no("cron_reload")  # a write would need the scheduler re-registered
     if source not in SOURCES:
         return no("invalid", detail=f"unknown source {source!r}")
+    if intent is not None and intent not in INTENTS:
+        return no("invalid", detail=f"unknown intent {intent!r}")
     try:
         canonical = rts._validate(spec, new_value)
     except rts.SettingValidationError as exc:
@@ -420,10 +451,13 @@ def propose_change(key: str, new_value: Any, source: str, *, note: str | None = 
             rts.set_setting(key, canonical, actor=f"auto_tune:{source}")
         except rts.SettingValidationError as exc:
             return no("invalid", detail=str(exc))
+        intent = intent or derive_intent(key, source, cur, canonical)
         try:
             cid = db.insert_auto_tune_change(
                 key=key, old_value=cur, new_value=canonical, source=source,
-                status="evaluating", applied_at=_z(t), baseline=baseline, note=note)
+                status="evaluating", applied_at=_z(t), baseline=baseline, note=note, intent=intent,
+                evidence=({"expected_comfort_hours": float(expected_comfort_hours)}
+                          if expected_comfort_hours is not None else None))
         except Exception:  # noqa: BLE001
             logger.warning("auto_tune: ledger insert failed; restoring %s", key, exc_info=True)
             restored = True
@@ -444,9 +478,9 @@ def propose_change(key: str, new_value: Any, source: str, *, note: str | None = 
             return no("ledger_error", restored=restored)
 
     _log("auto_tune_apply", {"id": cid, "key": key, "old": cur, "new": canonical,
-                             "source": source, "baseline": baseline, "note": note})
+                             "source": source, "baseline": baseline, "note": note, "intent": intent})
     return {"applied": True, "id": cid, "key": key, "old_value": cur,
-            "new_value": canonical, "source": source, "baseline": baseline}
+            "new_value": canonical, "source": source, "baseline": baseline, "intent": intent}
 
 
 def _log(action: str, params: dict[str, Any], result: str = "success") -> None:
@@ -544,6 +578,14 @@ def rollback(change_id: int, *, reason: str, evidence: dict[str, Any] | None = N
             rts.set_setting(key, row["old_value"], actor="auto_tune:rollback")
         except rts.SettingValidationError as exc:
             return {"rolled_back": False, "reason": "invalid", "detail": str(exc)}
+        try:  # #790: an in-memory override would shadow the DB value we just restored
+            from .config import config
+
+            if config.has_override(key):
+                config.clear_override(key)
+                _log("auto_tune_override_cleared", {"id": change_id, "key": key})
+        except Exception:  # noqa: BLE001
+            logger.warning("auto_tune: could not clear override for %s", key, exc_info=True)
     days = int(rts.get_setting("AUTO_TUNE_ROLLBACK_FREEZE_DAYS"))
     ev = {**(evidence or {}), "reason": reason, "actor": actor}
     db.update_auto_tune_change(

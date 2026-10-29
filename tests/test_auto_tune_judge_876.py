@@ -37,7 +37,6 @@ def _env(monkeypatch):
     monkeypatch.setattr(auto_tune, "baseline_metrics", lambda *a, **k: dict(_FAKE_BASELINE))
     monkeypatch.setattr(auto_tune, "_is_away", lambda: False)
     rts.clear_cache()
-    config._overrides.clear()
     for k in ("AUTO_TUNE_PEAK_TRIP_KWH", "AUTO_TUNE_MIN_GAIN_PENCE", "AUTO_TUNE_VERDICT_BUDGET_SECONDS",
               "AUTO_TUNE_NOTIFY_KEPT"):
         monkeypatch.delenv(k, raising=False)
@@ -47,16 +46,17 @@ def _env(monkeypatch):
     monkeypatch.setattr(notifier, "notify_action_confirmation", lambda msg: info.append(msg))
     rts.set_setting("AUTO_TUNE_ENABLED", "true", actor="test")
     yield SimpleNamespace(risk=risk, info=info)
-    config._overrides.clear()
     rts.clear_cache()
 
 
-def _change(key=KEY, old=20.0, new=19.5, applied=APPLIED, source="tuning_review", live=True):
+def _change(key=KEY, old=20.0, new=19.5, applied=APPLIED, source="tuning_review", live=True, intent=None,
+            evidence=None, baseline=None):
     if live:
         rts.set_setting(key, new, actor="vacation_end")  # internal actor: no ledger row
     return db.insert_auto_tune_change(
         key=key, old_value=old, new_value=new, source=source, status="evaluating",
-        applied_at=applied.strftime("%Y-%m-%dT%H:%M:%SZ"), baseline=dict(_FAKE_BASELINE))
+        applied_at=applied.strftime("%Y-%m-%dT%H:%M:%SZ"), baseline=baseline or dict(_FAKE_BASELINE),
+        intent=intent, evidence=evidence)
 
 
 def _row(i):
@@ -89,8 +89,7 @@ def _cold(ts: datetime):
 
 
 def _resid(day: str, e: float):
-    db.upsert_lwt_learning_daily({"date": day, "payload": {"pred_resid": {
-        "day": {"n": 20, "mean_c": e}, "night": {"n": 10, "mean_c": e}}}})
+    db.upsert_lwt_learning_daily({"date": day, "pred_err_mean_c": e, "payload": {}})
 
 
 # ------------------------------------------------------------------ tripwires
@@ -159,7 +158,7 @@ def test_every_comfort_loosening_key_has_cold_tripwire(key, old, new):
 
 @pytest.mark.parametrize("key,old,new", [
     (KEY, 20.0, 20.5), ("INDOOR_SETPOINT_C", 21.0, 21.5), ("LP_W3_PEAK_COAST_DELTA_C", 0.5, 0.0),
-    ("LP_W3_CEILING_C", 23.0, 23.5), ("DHW_TEMP_NORMAL_C", 45.0, 46.0)])
+    ("DHW_TEMP_NORMAL_C", 45.0, 46.0), ("LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p75", "p90")])
 def test_tightening_has_no_comfort_tripwire(key, old, new):
     cid = _change(key, old, new)
     _cold(APPLIED + timedelta(days=1))
@@ -190,7 +189,7 @@ def test_dhw_comfort_key_also_traps():
 
 
 def test_peak_import_tripwire_and_env_limit(monkeypatch):
-    cid = _change("LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p75", "p90")
+    cid = _change("LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p90", "p75")
     _card("2026-10-12", peak=1.0)  # == limit, not over
     assert judge.tripwire_check(_row(cid), NOW_DUE) is None
     _card("2026-10-14", peak=1.4)
@@ -209,7 +208,7 @@ def test_learned_param_tripwire_two_consecutive_days():
     assert judge.tripwire_check(_row(cid), NOW_DUE) is None  # not consecutive
     _resid("2026-10-14", 0.65)
     trip = judge.tripwire_check(_row(cid), NOW_DUE)
-    assert trip["name"] == "pred_resid" and trip["evidence"]["days"] == ["2026-10-13", "2026-10-14"]
+    assert trip["name"] == "pred_err" and trip["evidence"]["days"] == ["2026-10-13", "2026-10-14"]
 
 
 def test_learned_param_without_baseline_never_trips():
@@ -218,7 +217,7 @@ def test_learned_param_without_baseline_never_trips():
         _resid(d, 5.0)
     assert judge.tripwire_check(_row(cid), NOW_DUE) is None
     judge.tripwire_job(NOW_DUE)
-    assert "no_pred_resid_baseline" in json.loads(db.get_kv(f"auto_tune_tripwire_{cid}"))["notes"]
+    assert "no_pred_err_baseline" in json.loads(db.get_kv(f"auto_tune_tripwire_{cid}"))["notes"]
 
 
 def test_away_days_never_count():
@@ -250,8 +249,12 @@ def _agg(cost=700.0, hours=0.0, shower=0.0, n=7):
             "shower_short_c": 0.0, "shower_day_below": shower, "n_days": float(n)}
 
 
+def _cn(after, before):
+    return {"after": after, "before": before, "before_normalised": float(before)}
+
+
 def test_decide_cost_noise_band():
-    cold = {"after": 0, "before": 0}
+    cold = _cn(0, 0)
     assert judge.decide(_agg(700), _agg(705), cold, 7)[0] == "keep"        # exactly +5 p: inside the band
     d, rule, _ = judge.decide(_agg(700), _agg(705.1), cold, 7)
     assert d == "rollback" and rule == "failed:cost"
@@ -262,15 +265,15 @@ def test_decide_cost_noise_band():
 
 
 def test_decide_comfort_band_shower_and_feedback():
-    cold = {"after": 1, "before": 0}
+    cold = _cn(1, 0)
     assert judge.decide(_agg(hours=1.0), _agg(hours=1.5), cold, 7)[0] == "keep"       # +0.5 h ok
     d, rule, _ = judge.decide(_agg(hours=1.0), _agg(hours=1.6), cold, 7)
     assert d == "rollback" and rule == "failed:hours_below_floor"
     d, rule, _ = judge.decide(_agg(), _agg(shower=1), cold, 7)
     assert d == "rollback" and rule == "failed:shower_shortfall_days"
     assert judge.decide(_agg(shower=1), _agg(shower=1), cold, 7)[0] == "keep"
-    assert judge.decide(_agg(), _agg(), {"after": 3, "before": 2}, 7)[0] == "keep"     # +1 allowed
-    d, rule, _ = judge.decide(_agg(), _agg(), {"after": 4, "before": 2}, 7)
+    assert judge.decide(_agg(), _agg(), _cn(3, 2), 7)[0] == "keep"     # +1 allowed
+    d, rule, _ = judge.decide(_agg(), _agg(), _cn(4, 2), 7)
     assert d == "rollback" and rule == "failed:cold_feedback"
     d, rule, _ = judge.decide(_agg(700), _agg(800, hours=2.0), cold, 7)
     assert rule == "failed:cost+hours_below_floor"
@@ -281,7 +284,7 @@ class Replays:
 
     def __init__(self, cost, hours=None, shower=None, boom=False):
         self.cost = cost
-        self.hours = hours or (lambda v: 0.0)
+        self.hours = hours or (lambda v, floor: 0.0)
         self.shower = shower or (lambda v: 0.0)
         self.calls: list[tuple[str, float]] = []
         self.boom = boom
@@ -299,19 +302,18 @@ class Replays:
 def stub_comfort(monkeypatch):
     monkeypatch.setattr(tr, "yardstick", lambda: {"floor": float(config.LP_W3_NIGHT_FLOOR_C)})
     monkeypatch.setattr(tr, "day_comfort", lambda day, yard: {
-        "night_below_h": 0.0, "peak_below_h": 0.0, "hours_below": day._repl.hours(day._v),
+        "night_below_h": 0.0, "peak_below_h": 0.0, "hours_below": day._repl.hours(day._v, yard["floor"]),
         "shower_short_c": 0.0, "shower_day_below": day._repl.shower(day._v)})
 
 
-def _run(repl, now=NOW_DUE, days=7):
-    d0 = date(2026, 10, 11)
+def _run(repl, now=NOW_DUE, days=7, d0=date(2026, 10, 10)):
     avail = {(d0 + timedelta(days=i)).isoformat() for i in range(days)}
     return judge.verdict_job(now, replay=repl, list_runs=lambda d: ["r"] if d in avail else [])
 
 
 def test_not_due_before_7_complete_days(stub_comfort):
     cid = _change()
-    out = _run(Replays(lambda v: 100.0), now=datetime(2026, 10, 17, 7, 40, tzinfo=UTC))
+    out = _run(Replays(lambda v: 100.0), now=datetime(2026, 10, 16, 7, 40, tzinfo=UTC))
     assert out["status"] == "not_due" and _row(cid)["status"] == "evaluating"
 
 
@@ -328,7 +330,7 @@ def test_verdict_keep_replays_both_arms_and_records_evidence(stub_comfort, _env)
     assert ev["cadence"] == str(config.TUNING_REVIEW_CADENCE) and ev["partial"] is False
     assert {v for _d, v in repl.calls} == {20.0, 19.5}  # old and new arm
     assert float(rts.get_setting(KEY)) == 19.5            # kept: value stays
-    assert float(config.LP_W3_NIGHT_FLOOR_C) == 19.5      # patched_config restored
+    assert float(config.LP_W3_NIGHT_FLOOR_C) == 19.5 and not config.has_override(KEY)  # patched_config restored
     assert _env.info == [] and _env.risk == []             # kept is muted by default
 
 
@@ -352,7 +354,7 @@ def test_verdict_rollback_on_cost(stub_comfort, _env):
 
 def test_verdict_rollback_on_comfort_hours(stub_comfort):
     cid = _change()
-    out = _run(Replays(lambda v: 100.0, hours=lambda v: 3.0 if v < 20 else 0.0))
+    out = _run(Replays(lambda v: 100.0, hours=lambda v, f: 3.0 if v < f else 0.0))
     assert out["status"] == "rolled_back" and "hours_below_floor" in _row(cid)["evidence"]["rule"]
 
 
