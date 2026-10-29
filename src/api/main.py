@@ -128,6 +128,7 @@ from .routers import thermal as thermal_router
 from .routers import pv as pv_router
 from .routers import sensors as sensors_router
 from .routers import tuning as tuning_router
+from .routers import auto_tune as auto_tune_router
 from .routers import insights as insights_router
 from .routers import status as status_router
 from .routers import workbench as workbench_router
@@ -369,6 +370,7 @@ app.include_router(scorecard_router.router)
 app.include_router(thermal_router.router)
 app.include_router(sensors_router.router)
 app.include_router(tuning_router.router)
+app.include_router(auto_tune_router.router)
 app.include_router(insights_router.router)
 app.include_router(status_router.router)
 
@@ -2341,7 +2343,16 @@ async def settings_list():
     """Return every runtime-tunable setting with its current value, env default,
     range, and ``overridden`` flag (true when the DB row supplants the env)."""
     from .. import runtime_settings as rts
-    return {"settings": rts.list_settings()}
+    items = rts.list_settings()
+    try:  # #876: per-key ledger state for allowlisted / ledger-touched keys
+        from .. import auto_tune
+        overlay = await asyncio.to_thread(auto_tune.settings_overlay)
+        for it in items:
+            if it["key"] in overlay:
+                it["auto_tune"] = overlay[it["key"]]
+    except Exception:  # noqa: BLE001
+        pass
+    return {"settings": items}
 
 
 @app.get("/api/v1/settings/{key}")

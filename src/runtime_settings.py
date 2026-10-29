@@ -684,6 +684,53 @@ SCHEMA: dict[str, SettingSpec] = {
             "by the weekly tuning review (#832)."
         ),
     ),
+    # --- #876 closed-loop auto-tune (story 1: ledger + kill switch) ----------
+    "AUTO_TUNE_ENABLED": SettingSpec(
+        key="AUTO_TUNE_ENABLED",
+        type_name="str",
+        env_default=_str_env("AUTO_TUNE_ENABLED", "false"),
+        enum=("true", "false"),
+        description=(
+            "Kill switch for automated setting changes (#876). false (code default) "
+            "= no automatic change is ever applied (manual changes are still "
+            "recorded in the ledger). See src/auto_tune.py."
+        ),
+    ),
+    "AUTO_TUNE_ALLOWLIST": SettingSpec(
+        key="AUTO_TUNE_ALLOWLIST",
+        type_name="str",
+        env_default=lambda: (os.getenv("AUTO_TUNE_ALLOWLIST") or (
+            "DHW_TEMP_NORMAL_C,DHW_TEMP_COMFORT_C,LP_W3_NIGHT_FLOOR_C,"
+            "LP_W3_PEAK_COAST_DELTA_C,INDOOR_SETPOINT_C,LP_W3_CEILING_C,"
+            "LP_LOAD_EXPENSIVE_BAND_QUANTILE,LP_W3_SOLAR_GAIN_KW_PER_PV_KW,"
+            "LP_W3_INTERNAL_GAIN_KW,LP_W3_EMITTER_TAU_MIN"
+        )).strip().lower(),
+        description=(
+            "Comma list of runtime keys auto-tune may change (#876). Stored "
+            "lower-cased by the str layer; matched case-insensitively. The hard "
+            "DENYLIST in src/auto_tune.py always wins over this list."
+        ),
+    ),
+    "AUTO_TUNE_MANUAL_FREEZE_DAYS": SettingSpec(
+        key="AUTO_TUNE_MANUAL_FREEZE_DAYS",
+        type_name="int",
+        env_default=_int_env("AUTO_TUNE_MANUAL_FREEZE_DAYS", "14"),
+        min_value=0,
+        max_value=90,
+        description=(
+            "Days auto-tune leaves a key alone after the owner changed it by hand (#876)."
+        ),
+    ),
+    "AUTO_TUNE_ROLLBACK_FREEZE_DAYS": SettingSpec(
+        key="AUTO_TUNE_ROLLBACK_FREEZE_DAYS",
+        type_name="int",
+        env_default=_int_env("AUTO_TUNE_ROLLBACK_FREEZE_DAYS", "28"),
+        min_value=0,
+        max_value=180,
+        description=(
+            "Days a key stays frozen after an automatic change on it was rolled back (#876)."
+        ),
+    ),
     "REQUIRE_SIMULATION_ID": SettingSpec(
         key="REQUIRE_SIMULATION_ID",
         type_name="str",  # "true" / "false" — kept as str so PUT payloads stay simple
@@ -1244,6 +1291,25 @@ def get_setting(key: str) -> Any:
         return value
 
 
+def _prev_for_ledger(key: str) -> Any:
+    """Value before a write, for the #876 ledger. Never raises."""
+    try:
+        return get_setting(key)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _notify_ledger(key: str, old: Any, new: Any, actor: str) -> None:
+    """#876 manual-always-wins hook. Lazy import (auto_tune imports this module);
+    ``on_manual_change`` itself never raises, this guard is belt and braces."""
+    try:
+        from . import auto_tune
+
+        auto_tune.on_manual_change(key, old, new, actor)
+    except Exception:  # noqa: BLE001
+        logger.debug("auto_tune ledger hook failed (non-fatal)", exc_info=True)
+
+
 def set_setting(key: str, value: Any, *, actor: str = "api") -> Any:
     """Validate + persist + invalidate cache. Returns the canonical value stored.
 
@@ -1273,6 +1339,7 @@ def set_setting(key: str, value: Any, *, actor: str = "api") -> Any:
                 f"INDOOR_SETPOINT_C ({canonical}) must be <= LP_W3_CEILING_C - 0.5 ({ce - 0.5})"
             )
     serialized = _serialize(spec, canonical)
+    prev = _prev_for_ledger(key)
     db.set_runtime_setting(key, serialized)
     # V11: append-only audit trail so a past LP run can be explained even
     # after a knob is changed. Non-fatal — never block the setting write.
@@ -1291,6 +1358,7 @@ def set_setting(key: str, value: Any, *, actor: str = "api") -> Any:
         actor,
         spec.cron_reload,
     )
+    _notify_ledger(key, prev, canonical, actor)
     return canonical
 
 
@@ -1302,6 +1370,7 @@ def delete_setting(key: str, *, actor: str = "api") -> bool:
     spec = SCHEMA.get(key)
     if spec is None:
         raise SettingValidationError(f"unknown runtime setting: {key!r}")
+    prev = _prev_for_ledger(key)
     removed = db.delete_runtime_setting(key)
     if removed:
         try:
@@ -1315,6 +1384,12 @@ def delete_setting(key: str, *, actor: str = "api") -> bool:
     logger.info(
         "runtime_setting cleared: %s (actor=%s, removed=%s)", key, actor, removed
     )
+    if removed:
+        try:
+            new = get_setting(key)
+        except Exception:  # noqa: BLE001
+            new = None
+        _notify_ledger(key, prev, new, actor)
     return removed
 
 

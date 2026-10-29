@@ -578,6 +578,51 @@ def build_mcp() -> FastMCP:
             return {"ok": False, "error": str(e)}
 
     @mcp.tool(
+        name="get_auto_tune_ledger",
+        description=(
+            "Closed-loop auto-tune change ledger (#876): whether AUTO_TUNE_ENABLED is on, "
+            "the active (evaluating) change, per-key freezes and the last `limit` rows "
+            "(automated changes and the owner's manual ones)."
+        ),
+    )
+    def get_auto_tune_ledger(limit: int = 20) -> dict[str, Any]:
+        from . import auto_tune
+
+        try:
+            return {"ok": True, **auto_tune.ledger_summary(max(1, min(int(limit), 200)))}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="rollback_auto_tune_change",
+        description=(
+            "Revert one automated setting change from the auto-tune ledger (#876) to its "
+            "previous value and freeze the key (AUTO_TUNE_ROLLBACK_FREEZE_DAYS). Only "
+            "the newest evaluating/kept automated row of a key; manual rows are never "
+            "reverted. Default is a dry-run: pass confirmed=True to apply."
+        ),
+    )
+    def rollback_auto_tune_change(id: int, reason: str = "mcp_rollback",
+                                  confirmed: bool = False) -> dict[str, Any]:
+        from . import auto_tune
+
+        try:
+            if config.OPENCLAW_READ_ONLY:
+                return {"ok": False, "error": "OPENCLAW_READ_ONLY=true: writes are disabled"}
+            if not confirmed:
+                row = db.get_auto_tune_change(int(id))
+                if row is None:
+                    return {"ok": False, "error": "not_found"}
+                return {"ok": True, "confirmed": False, "id": int(id), "key": row["key"],
+                        "status": row["status"], "would_restore": row["old_value"],
+                        "current": auto_tune.current_value(row["key"]),
+                        "message": "dry-run; pass confirmed=True to apply"}
+            res = auto_tune.rollback(int(id), reason=reason, actor="mcp")
+            return {"ok": bool(res.get("rolled_back")), **res}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
         name="save_indoor_temperature",
         description=(
             "Record an indoor room temperature reading (#540 W1). Feeds the LP "
