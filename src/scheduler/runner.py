@@ -749,6 +749,23 @@ def bulletproof_consumption_backfill_job() -> None:
         logger.warning("Consumption backfill failed (non-fatal): %s", e)
 
 
+def register_auto_tune_apply_job(scheduler: Any, tz: Any) -> None:
+    """#876 story 2: the weekly apply, ``AUTO_TUNE_APPLY_DELAY_MINUTES`` after the
+    tuning review slot (local clock, DST-safe). Always registered; the job checks
+    ``AUTO_TUNE_ENABLED`` / ``TUNING_REVIEW_ENABLED`` at run time."""
+    from apscheduler.triggers.cron import CronTrigger
+
+    from ..auto_tune_apply import apply_schedule, weekly_apply_job
+
+    dow, hh, mm = apply_schedule()
+    scheduler.add_job(
+        weekly_apply_job,
+        CronTrigger(day_of_week=dow, hour=hh, minute=mm, timezone=tz),
+        id="auto_tune_weekly_apply",
+        misfire_grace_time=3600,
+    )
+
+
 def cosy_scorecard_job() -> None:
     """Score YESTERDAY (local day) and persist one ``cosy_scorecard_daily`` row (#831).
 
@@ -3350,6 +3367,10 @@ def start_background_scheduler() -> None:
                     ),
                     id="tuning_review_weekly",
                 )
+            # #876 story 2: weekly APPLY of the review's top suggestion (one change per
+            # ISO week, via the auto_tune ledger). Always registered; AUTO_TUNE_ENABLED is
+            # checked at run time so flipping it needs no restart.
+            register_auto_tune_apply_job(_background_scheduler, tz)
 
             # #833 — comfort feedback: weekly summary + Telegram inbound short-poll.
             _background_scheduler.add_job(

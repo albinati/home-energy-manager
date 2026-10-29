@@ -1599,6 +1599,44 @@ should never suggest tactical Daikin actions ("preheat the tank now!") —
 the heat pump runs on its own weather curve and HEM does not change
 setpoints. Read `_mode_status_line()` in `src/analytics/daily_brief.py`.
 
+### Closed-loop auto-tune (#876) — story 2: weekly apply
+
+`src/auto_tune_apply.py` turns AT MOST ONE suggestion of the Sunday tuning review into a ledger change
+per ISO week (`auto_tune.propose_change(source="tuning_review")` - every story-1 guard still applies;
+this module never writes a setting itself).
+
+- **Job** `auto_tune_weekly_apply`: `TUNING_REVIEW_DOW`/`HOUR_LOCAL` + env `AUTO_TUNE_APPLY_DELAY_MINUTES`
+  (default 20 -> Sunday 09:20 local, `BULLETPROOF_TIMEZONE`, rolls to the next weekday past midnight),
+  `runner.register_auto_tune_apply_job`. Always registered; `AUTO_TUNE_ENABLED` (runtime) and
+  `TUNING_REVIEW_ENABLED` are checked at run time. `no_review` when the newest `tuning_suggestions`
+  `week_start` is not the week the review of that Sunday covers (`yesterday - (TUNING_REVIEW_DAYS-1)`).
+- **Quota**: `weekly_quota_used(now)` = non-manual ledger rows with `applied_at` in the current local ISO
+  week (any source; a rollback does not free it). The comfort-feedback job (08:45) checks it before its
+  own proposal (`action_log` comfort/`auto_tune` `skipped=weekly_quota`); the review apply (09:20) sees
+  a spent week as `weekly_quota`. `kv_state` `auto_tune_last_apply_week` is informational only.
+- **Selection** (`select_weekly_change` / `evaluate_candidates`, pure): `recommended` first (largest
+  weekly saving, tie: smaller `delta_comfort_hours`); `comfort-first` only when the control had
+  `hours_below_current > 0` AND the week had >= 1 `cold` feedback; `trade-off` only when the week had
+  >= 1 feedback and NO `cold`, it saves money, loosens comfort (hours up) and adds no shower-shortfall
+  day. Any candidate is skipped (reason recorded, next one tried) when: key not allowlisted, frozen,
+  review `current_value` != live persisted value (`stale`), already at the value, or more than one
+  `auto_tune` step away (`step_too_large`). Comfort signal = `comfort_feedback.weekly_summary(week_start)`.
+- **Outcome**: every run writes `action_log` device `auto_tune` action `weekly_apply` (applied / reason /
+  candidates considered with per-candidate skip reasons / comfort counts). Reasons: `disabled`,
+  `review_disabled`, `weekly_quota`, `no_review`, `busy`, `nothing_eligible`, any `propose_change`
+  refusal (`away`, `frozen`, `no_baseline`, ...), `error`. Never raises.
+- **Telegram** (`notifier.notify_auto_tune_applied`, AlertType `tuning_review`, honours
+  `OPENCLAW_NOTIFY_ENABLED`): ONE pt-BR message per applied change (label from `KEY_LABELS_PT`, review
+  saving and comfort cost, "Avalio por 7 dias e reverto sozinho se piorar", rollback endpoint). Nothing
+  is sent when nothing is applied, except `notify_auto_tune_held` (busy / frozen with a saving >= 20
+  p/week) which is OFF unless env `AUTO_TUNE_NOTIFY_SKIPPED=true`.
+- **Surfaces**: `GET /api/v1/tuning/ledger` adds `next_apply_at` and `weekly_quota_used`. The Insights
+  tuning items carry `ledger {status, applied_at, day_n, id}` when the key has an
+  `evaluating|kept|rolled_back` row in the last 14 days; when the evaluating change IS that suggestion
+  the item is `kind="status"` ("Aplicado dom 02/11 · avaliando dia 3/7") with no Apply button.
+- **Kill switches**: `AUTO_TUNE_ENABLED=false` -> the review stays suggestions-only, bit-for-bit;
+  `TUNING_REVIEW_ENABLED=false` -> no review, hence no apply.
+
 ### Tariff start clamp (PR #214, renamed #810)
 
 ```

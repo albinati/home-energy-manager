@@ -986,6 +986,25 @@ def notify_tuning_review(lines: list[str], *, week_start: str, n_recommended: in
     )
 
 
+def notify_auto_tune_applied(message: str, *, change_id: int, key: str) -> None:
+    """#876 story 2: ONE message per automatic weekly change."""
+    _dispatch(
+        AlertType.TUNING_REVIEW, message, urgent=False,
+        extra={"auto_tune_change_id": int(change_id), "key": key},
+        telegram_header_override="\U0001F527 Ajuste automático",
+    )
+
+
+def notify_auto_tune_held(message: str, *, week_start: str, key: str) -> None:
+    """#876 story 2: muted-by-default (``AUTO_TUNE_NOTIFY_SKIPPED``) FYI that a
+    worthwhile suggestion was held back (busy / frozen)."""
+    _dispatch(
+        AlertType.TUNING_REVIEW, message, urgent=False,
+        extra={"week_start": week_start, "key": key, "held": True},
+        telegram_header_override="Sugestão em espera",
+    )
+
+
 def notify_tank_target_divergence(
     *,
     planned_c: float,

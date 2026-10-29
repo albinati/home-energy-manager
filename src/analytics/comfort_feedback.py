@@ -360,10 +360,15 @@ def weekly_job(now: datetime | None = None) -> dict[str, Any] | None:
                       result="success", trigger="cron")
         prop = summ["proposal"]
         if prop:
-            from .. import auto_tune
+            from .. import auto_tune, auto_tune_apply
             from .. import runtime_settings as rs
 
-            if auto_tune.enabled():
+            if auto_tune.enabled() and auto_tune_apply.weekly_quota_used(now) > 0:
+                # #876 s2: ONE automated change per ISO week, shared with the review apply.
+                db.log_action(device="comfort", action="auto_tune",
+                              params={**prop, "applied": None, "skipped": "weekly_quota"},
+                              result="skipped", trigger="cron", actor="auto_tune:comfort_feedback")
+            elif auto_tune.enabled():
                 # #876: the ledger owns the change (one at a time, drift cap, judge).
                 cur = float(rs.get_setting(prop["key"]))
                 new = max(cur - STEP_C, min(cur + STEP_C, float(prop["suggested"])))
