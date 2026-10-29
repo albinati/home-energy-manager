@@ -386,7 +386,11 @@ export function buildStatus({ now, fronts }: StatusCtx): string {
 }
 
 // ------------------------------------------------------------------ tiles
-export interface TileText { value: string | null; unit: string; meaning: string; next: string; tone: "ok" | "warn" | "bad" | "dim" }
+export interface TileText {
+  value: string | null; unit: string; meaning: string; next: string; tone: "ok" | "warn" | "bad" | "dim";
+  /** Live flow line (Bateria tile only), shown between the headline and `meaning`. */
+  flow?: string; flowTone?: "charge" | "discharge" | "idle";
+}
 
 export function casaTile(now: CockpitNow, fronts: PlanFrontsResponse | null): TileText {
   const h = fronts?.heating && !fronts.heating.error ? fronts.heating : null;
@@ -565,7 +569,58 @@ export function bateriaTile(now: CockpitNow, fronts: PlanFrontsResponse | null):
     else if (r.kind === "empty") { meaning = `Chega até as ${r.at}`; tone = "warn"; }
     else if (r.at) { meaning = `Chega até as ${r.at}`; tone = "ok"; }
   }
-  return { value: soc != null ? fmt(soc, 0) : null, unit: "%", meaning, next: nextCharge(b, tariff, nowMs, away), tone };
+  const fl = batteryFlow(now.state);
+  return {
+    value: soc != null ? fmt(soc, 0) : null, unit: "%", meaning, next: nextCharge(b, tariff, nowMs, away), tone,
+    ...(fl ? { flow: fl.text, flowTone: fl.tone } : {}),
+  };
+}
+
+type FlowState = { battery_kw?: number | null; grid_kw?: number | null; solar_kw?: number | null } | null | undefined;
+const FLOW_DEAD_BAND_KW = 0.05;
+
+/** Live battery flow in words (pt-BR), from the power balance. battery_kw > 0 =
+ *  charging; grid_kw > 0 = import, < 0 = export. null when the reading is absent. */
+export function batteryFlow(s: FlowState): { text: string; tone: "charge" | "discharge" | "idle" } | null {
+  const b = s?.battery_kw;
+  if (b == null || !Number.isFinite(b)) return null;
+  if (Math.abs(b) < FLOW_DEAD_BAND_KW) return { text: "parada", tone: "idle" };
+  const kw = fmt(Math.abs(b), 1);
+  const grid = s?.grid_kw ?? 0;
+  if (b > 0) {
+    const src = (s?.solar_kw ?? 0) >= b ? " do sol" : grid > 0.1 ? " da rede" : "";
+    return { text: `carregando ${kw} kW${src}`, tone: "charge" };
+  }
+  return { text: `descarregando ${kw} kW para ${grid < -0.1 ? "a rede" : "a casa"}`, tone: "discharge" };
+}
+
+/** Signed kW for the Agora line: "+1,2" / "−0,3" / "0,0" (no "-0,0"). */
+function skw(n: number): string {
+  const r = Math.round(Math.abs(n) * 10) / 10;
+  return r === 0 ? "0,0" : `${n < 0 ? "−" : "+"}${fmt(r, 1)}`;
+}
+
+/** House power balance, one row: sol / casa (unsigned) and bateria / rede (signed;
+ *  explained once in the title). A null figure is hidden. The battery kW also
+ *  appears in the Bateria tile flow line: the one accepted duplicate (the tile is
+ *  the battery detail, this row is the house balance). */
+export function agoraParts(now: CockpitNow): string[] {
+  const s = now.state;
+  const out: string[] = [];
+  if (s.solar_kw != null) out.push(`sol ${fmt(Math.max(0, s.solar_kw), 1)} kW`);
+  if (s.load_kw != null) out.push(`casa ${fmt(Math.max(0, s.load_kw), 1)} kW`);
+  if (s.battery_kw != null) out.push(`bateria ${skw(s.battery_kw)} kW`);
+  if (s.grid_kw != null) out.push(`rede ${skw(s.grid_kw)} kW`);
+  return out;
+}
+export const AGORA_TITLE = "bateria: + carrega, − descarrega · rede: + importa, − exporta";
+const FOX_STALE_S = 300;
+/** " (há N min)" when the Fox reading is older than 5 min, else "". */
+export function agoraStale(now: CockpitNow): string {
+  const age = now.freshness?.fox?.age_s;
+  if (age == null || !(age > FOX_STALE_S)) return "";
+  const min = Math.floor(age / 60);
+  return min >= 60 ? ` (há ${Math.floor(min / 60)} h)` : ` (há ${min} min)`;
 }
 
 export function nextCharge(

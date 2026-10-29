@@ -83,6 +83,12 @@
 .hs-tile--dim .hs-meaning { color: var(--text-dim); }
 .hs-muted { color: var(--text-dim); font-size: var(--font-sm); }
 
+.hs-agora { margin: calc(var(--space-2) * -1) 0 0; font-size: var(--font-sm); color: var(--text-dim); font-variant-numeric: tabular-nums; line-height: 1.5; }
+.hs-flow { margin: var(--space-3) 0 0; font-size: var(--font-sm); line-height: 1.45; font-weight: 600; color: var(--text-dim); }
+.hs-flow--charge { color: var(--ok); }
+.hs-flow--discharge { color: var(--text); }
+.hs-flow + .hs-meaning { margin-top: var(--space-1); }
+
 /* ── money ───────────────────────────────────────────────────────────────── */
 .hs-money-grid {
   display: grid;
