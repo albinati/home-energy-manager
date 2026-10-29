@@ -4,12 +4,12 @@ import { getCockpitNow, getPlanFronts, getStatusAlerts } from "../lib/endpoints"
 import { Icon } from "../components/common/Icon";
 import { Spinner } from "../components/common/Spinner";
 import { computeChips, type Chip } from "../components/shell/AlertStrip";
-import { StatusLine } from "../components/home/simple/StatusLine";
+import { StatusLine, AgoraLine } from "../components/home/simple/StatusLine";
 import { Tile } from "../components/home/simple/Tile";
 import { MoneyCard } from "../components/home/simple/MoneyCard";
 import { ModeBox } from "../components/home/simple/ModeBox";
 import {
-  buildStatus, casaTile, aguaTile, bateriaTile, holidayFlags, footerLine,
+  buildStatus, casaTile, aguaTile, bateriaTile, agoraParts, agoraStale, holidayFlags, footerLine,
 } from "../components/home/simple/logic";
 import { publishFreshness, publishCockpitConn } from "../lib/freshness";
 import { buildSha } from "../lib/api";
@@ -24,7 +24,10 @@ const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mo
 // /plan/fronts (60 s) and /status/alerts (60 s); /whoami is fetched by the app
 // shell. No chart library is imported on this route.
 export default function Landing() {
-  const now = usePoll(getCockpitNow, 10_000);
+  const now = usePoll(async () => {
+    if (import.meta.env.DEV && MOCK) return (await import("../lib/mock/cockpit")).MOCK_COCKPIT;
+    return getCockpitNow();
+  }, 10_000);
   const fronts = usePoll(async () => {
     if (import.meta.env.DEV && MOCK) return (await import("../lib/mock/planFronts")).MOCK_PLAN_FRONTS;
     return getPlanFronts();
@@ -64,6 +67,7 @@ export default function Landing() {
     <div class="hs">
       <h1 class="sr-only">Casa</h1>
       <StatusLine chips={chips} text={buildStatus({ now: data, fronts: f })} />
+      <AgoraLine parts={agoraParts(data)} stale={agoraStale(data)} />
 
       <div class="hs-tiles">
         <Tile icon={<Icon name="house" size={14} />} title="Casa" t={casaTile(data, f)} />

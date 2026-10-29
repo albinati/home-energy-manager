@@ -6,7 +6,7 @@ import {
   fmt, pp, mergeRuns, dayAxis, frac, hourTicks, waterSegments, tariffSegments, gridLabel, heatingCell,
   batteryRunway, buildStatus, tierOf, billingVerdict, cycleLabel, nextHeating, aguaTile, casaTile, bateriaTile,
   peakCoverage, powerSource, spendVerdict, spendLine, bandRows, nextCharge, vacationHelp, holidayFlags,
-  isAwayPreset, localHHMM, sgbp, hourWord,
+  isAwayPreset, localHHMM, sgbp, hourWord, batteryFlow, agoraParts, agoraStale,
 } from "./logic.ts";
 
 const TZ = "Europe/London";
@@ -369,4 +369,45 @@ test("band list (phone): one row per band, each band names the tank window cover
 test("local time labels use the house timezone", () => {
   assert.equal(localHHMM("2026-10-07T13:30:00Z", TZ), "14:30");
   assert.equal(localHHMM("2026-12-07T13:30:00Z", TZ), "13:30");
+});
+
+test("battery flow wording: source, direction, dead band, null", () => {
+  assert.deepEqual(batteryFlow({ battery_kw: 1.2, solar_kw: 1.5, grid_kw: 0 }), { text: "carregando 1,2 kW do sol", tone: "charge" });
+  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 0.2, load_kw: 0.2, grid_kw: 1.4 }).text, "carregando 1,2 kW da rede");
+  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 0, grid_kw: 0 }).text, "carregando 1,2 kW");
+  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 0.8, load_kw: 0, grid_kw: 0.5 }).text, "carregando 1,2 kW do sol e da rede");
+  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 1.5, load_kw: 1.0, grid_kw: 0.7 }).text, "carregando 1,2 kW do sol e da rede");
+  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 1.0, load_kw: 1.0, grid_kw: 1.2 }).text, "carregando 1,2 kW da rede");
+  assert.equal(batteryFlow({ battery_kw: -0.1, solar_kw: 3, load_kw: 0.5, grid_kw: -2.3 }).text, "descarregando 0,1 kW para a casa");
+  assert.deepEqual(batteryFlow({ battery_kw: -0.3, solar_kw: 0, grid_kw: 0 }), { text: "descarregando 0,3 kW para a casa", tone: "discharge" });
+  assert.equal(batteryFlow({ battery_kw: -0.3, solar_kw: 0, grid_kw: -0.5 }).text, "descarregando 0,3 kW para a rede");
+  assert.deepEqual(batteryFlow({ battery_kw: 0.04 }), { text: "parada", tone: "idle" });
+  assert.equal(batteryFlow({ battery_kw: -0.049 }).text, "parada");
+  assert.equal(batteryFlow({ battery_kw: null }), null);
+  assert.equal(batteryFlow(undefined), null);
+});
+
+test("bateriaTile carries the flow line plus SoC and next event", () => {
+  const n = cockpit({ state: { soc_pct: 64, solar_kw: 0, load_kw: 0.4, grid_kw: 1.6, battery_kw: 1.2 } });
+  const t = bateriaTile(n, fronts());
+  assert.equal(t.value, "64");
+  assert.equal(t.flow, "carregando 1,2 kW da rede");
+  assert.equal(t.flowTone, "charge");
+  assert.ok(t.next.startsWith("Próximo"));
+  assert.equal(bateriaTile(cockpit({ state: { soc_pct: 50 } }), null).flow, undefined);
+});
+
+test("Agora line: figures, signs, hidden nulls, stale suffix", () => {
+  const n = cockpit({ state: { solar_kw: 0, load_kw: 0.3, battery_kw: -0.3, grid_kw: 0 } });
+  assert.deepEqual(agoraParts(n), ["sol 0,0 kW", "casa 0,3 kW", "bateria descarrega 0,3 kW", "rede 0,0 kW"]);
+  assert.deepEqual(agoraParts(cockpit({ state: { solar_kw: 2, load_kw: 0.5, battery_kw: 1.2, grid_kw: -0.3 } })),
+    ["sol 2,0 kW", "casa 0,5 kW", "bateria carrega 1,2 kW", "rede exporta 0,3 kW"]);
+  assert.deepEqual(agoraParts(cockpit({ state: { load_kw: 0.5, battery_kw: -0.02, grid_kw: null } })), ["casa 0,5 kW", "bateria 0,0 kW"]);
+  assert.equal(agoraStale(cockpit()), "");
+  assert.equal(agoraStale(cockpit({ freshness: { fox: { age_s: 300, stale: false, fetched_at_utc: null } } })), "");
+  assert.equal(agoraStale(cockpit({ freshness: { fox: { age_s: 7500, stale: true, fetched_at_utc: null } } })), " (há 2 h)");
+  const stl = cockpit({ state: { soc_pct: 50, battery_kw: 1.2, grid_kw: 1.3, solar_kw: 0, load_kw: 0.1 }, freshness: { fox: { age_s: 420, stale: true, fetched_at_utc: null } } });
+  assert.equal(bateriaTile(stl, null).flow, "carregando 1,2 kW da rede (há 7 min)");
+  assert.equal(agoraStale(cockpit({ freshness: { fox: { age_s: 200, stale: false, fetched_at_utc: null } } })), "");
+  assert.equal(agoraStale(cockpit({ freshness: { fox: { age_s: 420, stale: true, fetched_at_utc: null } } })), " (há 7 min)");
 });

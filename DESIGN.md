@@ -164,6 +164,7 @@ rationale + the rules. When they disagree, fix the drift, don't fork the values.
 | 2026-07-02 | `--cool` (chart-ramp cool end) + `--text-on-accent` tokens; every `var(--x, #literal)` fallback stripped (#621) | 7 fallbacks carried WRONG colors (amber/cyan mixups); light theme gained missing `--neg`/`--thermal`/`--cool` |
 | 2026-07-02 | Motion sub-scale `--dur-fast/med/slow`; `--space-0 2px`; breakpoint scale documented (#595) | Converge the 52 ad-hoc durations + chip micro-spacing on tokens |
 | 2026-10-28 | UI epic #879: Home/Insights/Settings v2, band strip instead of price curves, `--on-cheap/--on-standard/--on-peak` tokens, `--peak-export` removed, Journal out of the nav, Agile-era copy and ~60 dead UI files/wrappers deleted | Cosy is a 3-band tariff; the old charts were percentile-based and confusing |
+| 2026-10-29 | Home: battery kW shown in the Bateria tile AND in the "Ao vivo:" balance row (accepted exception to "every number once") | Tile = battery detail (SoC, flow in words, source); row = house balance (sol / casa / bateria / rede). Owner feedback: needed to know if the battery is charging |
 
 ## Gap status (2026-07-02 re-audit — was "Open Gaps", 2026-06-16)
 All gaps re-verified against source on 2026-07-02 (4-sweep conformity audit):
