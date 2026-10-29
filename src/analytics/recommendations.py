@@ -627,6 +627,16 @@ def _live_value(key: str) -> Any:
         return None
 
 
+def _tuning_ledger(key: str, new: Any, end: date, tz: ZoneInfo) -> dict[str, Any] | None:
+    """Auto-tune ledger summary for ``key`` (last 14 days) or None. Guarded."""
+    try:
+        from .. import auto_tune_apply
+
+        return auto_tune_apply.ledger_for_item(key, new, today=end, tz=tz)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def tuning_items(end: date, tz: ZoneInfo) -> list[dict[str, Any]]:
     rows = db.list_tuning_suggestions(1)
     if not rows:
@@ -644,6 +654,10 @@ def tuning_items(end: date, tz: ZoneInfo) -> list[dict[str, Any]]:
             last_cold = f
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
+    try:
+        busy = db.get_active_auto_tune_change() is not None   # #876: one change at a time
+    except Exception:  # noqa: BLE001
+        busy = False
     for r in rows:
         if r["week_start"] != week_start or r["verdict"] not in ("recommended", "trade-off", "comfort-first"):
             continue
@@ -654,7 +668,21 @@ def tuning_items(end: date, tz: ZoneInfo) -> list[dict[str, Any]]:
         new = _num(pl.get("body", {}).get("value", r["suggested_value"]))
         live = _live_value(key)
         cur = _num(live) if live is not None else _num(r["current_value"])
+        led = _tuning_ledger(key, new, end, tz)
         if live is not None and str(_num(live)) == str(new):
+            if led and led.pop("is_active_suggestion", False):
+                # #876 s2: the auto-tune applied THIS suggestion and is evaluating it.
+                seen.add(key)
+                who, icon, label = _TUNING_COPY[key]
+                unit = "" if key == "LP_LOAD_EXPENSIVE_BAND_QUANTILE" else " °C"
+                head = (f"Aplicado {led['weekday_pt'][:3]} {led['applied_local']} · "
+                        f"avaliando dia {min(led['day_n'], 7)}/7")
+                det = f"{label.capitalize()} {_fmt_val(r['current_value'])} → {_fmt_val(new)}{unit}. " \
+                      "Reverto sozinho se piorar."
+                it = _item(f"tune_{key}", who, icon, head, det, kind="status",
+                           evidence={"week_start": week_start, "verdict": r["verdict"]})
+                it["ledger"] = {k: led[k] for k in ("status", "applied_at", "day_n", "id", "intent")}
+                out.append(it)
             continue                                   # already applied: the row is stale
         seen.add(key)
         who, icon, label = _TUNING_COPY[key]
@@ -689,12 +717,18 @@ def tuning_items(end: date, tz: ZoneInfo) -> list[dict[str, Any]]:
                 t = _parse(last_cold.get("at_utc"))
                 det += f" ({(last_cold.get('room') or 'casa')}{', ' + t.astimezone(tz).strftime('%H:%M') if t else ''})"
         money = float(pence) if saves else None
+        det = det + ("" if det.endswith(".") else ".")
+        if busy:
+            det = "Aguarde: outra mudança em avaliação. " + det
         out.append(_item(
-            f"tune_{key}", who, icon, head, det + ("" if det.endswith(".") else "."), kind="setting",
+            f"tune_{key}", who, icon, head, det, kind="suggestion" if busy else "setting",
             money_pence=money, money_label=None if money is None else pence_label(money, "/sem"),
-            action={"setting_key": key, "from": cur, "to": new},
+            action=None if busy else {"setting_key": key, "from": cur, "to": new},
             evidence={"week_start": week_start, "verdict": r["verdict"], "delta_comfort_hours": hrs,
                       "delta_shower_days": d_shower, "feedback": counts}))
+        if led:
+            led.pop("is_active_suggestion", None)
+            out[-1]["ledger"] = {k: led[k] for k in ("status", "applied_at", "day_n", "id", "intent")}
     return out
 
 

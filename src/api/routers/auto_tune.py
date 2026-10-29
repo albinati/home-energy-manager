@@ -30,7 +30,12 @@ def _require_no_simulation_gate() -> None:
 async def get_ledger(limit: int = 20, key: str | None = None) -> dict[str, Any]:
     from ... import auto_tune
     limit = max(1, min(int(limit), 200))
-    return await asyncio.to_thread(auto_tune.ledger_summary, limit, key)
+    from ... import auto_tune_apply
+
+    def _build() -> dict[str, Any]:
+        return {**auto_tune.ledger_summary(limit, key), **auto_tune_apply.ledger_extras()}
+
+    return await asyncio.to_thread(_build)
 
 
 @router.post("/api/v1/tuning/ledger/propose")

@@ -1246,6 +1246,10 @@ class Config:
     # 13 variants x 7 days run inside ~10 min).
     TUNING_REVIEW_CADENCE: str = os.getenv("TUNING_REVIEW_CADENCE", "stride:4")
     TUNING_REVIEW_MIN_SAVING_PENCE: float = float(os.getenv("TUNING_REVIEW_MIN_SAVING_PENCE", "5"))
+    # #876 story 2: the weekly apply runs this many minutes after the review job.
+    AUTO_TUNE_APPLY_DELAY_MINUTES: int = int(os.getenv("AUTO_TUNE_APPLY_DELAY_MINUTES", "20"))
+    # One muted info ping when a >= 20 p/week suggestion is held back (busy / frozen).
+    AUTO_TUNE_NOTIFY_SKIPPED: bool = os.getenv("AUTO_TUNE_NOTIFY_SKIPPED", "false").strip().lower() in ("1", "true", "yes", "on")
     TUNING_REVIEW_COMFORT_TOLERANCE_H: float = float(os.getenv("TUNING_REVIEW_COMFORT_TOLERANCE_H", "0.5"))
     LOAD_EXPECTED_HISTORY_DAYS: int = int(os.getenv("LOAD_EXPECTED_HISTORY_DAYS", "60"))
     # #821 — spend score: "ideal" when the day's average import price is within

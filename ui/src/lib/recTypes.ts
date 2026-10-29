@@ -14,6 +14,8 @@ export interface RecItem {
   kind: RecKind;
   action: RecAction | null;
   evidence?: Record<string, unknown>;
+  /** #876 s2: auto-tune ledger state of this suggestion's key (last 14 days). */
+  ledger?: { status: "evaluating" | "kept" | "rolled_back"; applied_at: string; day_n: number; id: number; intent?: string | null };
 }
 export interface RecBandShares { cheap: number | null; day: number | null; peak: number | null; solar: number | null }
 export interface RecWeekSummary {

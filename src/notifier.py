@@ -86,6 +86,10 @@ class AlertType(str, Enum):
     DHW_BIAS_ENABLE_READY = "dhw_bias_enable_ready"
     # #832 weekly fine-tuning review summary (suggestions only, never applied)
     TUNING_REVIEW = "tuning_review"
+    # #876 s2 - an automatic change of a runtime setting (and held-back pings).
+    # Own route (enabled, NOT silent): the muted tuning_review route must not hide
+    # the only notice of an automatic hardware-setting change.
+    AUTO_TUNE = "auto_tune"
     # 2026-07-28 — the live tank SETPOINT no longer matches the plan row that
     # owns this moment. ACTIONABLE: either the user moved it (fine — but they
     # should know it is still in force) or something else did (not fine).
@@ -118,6 +122,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "lp_health_regression": "EnergyLPHealthRegression",
     "dhw_bias_enable_ready": "EnergyDhwBiasEnableReady",
     "tuning_review": "EnergyTuningReview",
+    "auto_tune": "EnergyAutoTune",
     "tank_target_divergence": "EnergyTankTargetDivergence",
     "morning_tank_cold": "EnergyMorningTankCold",
     "actuation_stale": "EnergyActuationStale",
@@ -983,6 +988,25 @@ def notify_tuning_review(lines: list[str], *, week_start: str, n_recommended: in
         AlertType.TUNING_REVIEW, body, urgent=False,
         extra={"week_start": week_start, "n_recommended": int(n_recommended)},
         telegram_header_override="Ajustes sugeridos da semana",
+    )
+
+
+def notify_auto_tune_applied(message: str, *, change_id: int, key: str) -> None:
+    """#876 story 2: ONE message per automatic weekly change."""
+    _dispatch(
+        AlertType.AUTO_TUNE, message, urgent=False,
+        extra={"auto_tune_change_id": int(change_id), "key": key},
+        telegram_header_override="\U0001F527 Ajuste automático",
+    )
+
+
+def notify_auto_tune_held(message: str, *, week_start: str, key: str) -> None:
+    """#876 story 2: muted-by-default (``AUTO_TUNE_NOTIFY_SKIPPED``) FYI that a
+    worthwhile suggestion was held back (busy / frozen)."""
+    _dispatch(
+        AlertType.AUTO_TUNE, message, urgent=False,
+        extra={"week_start": week_start, "key": key, "held": True},
+        telegram_header_override="Sugestão em espera",
     )
 
 
