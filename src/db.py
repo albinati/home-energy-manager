@@ -364,7 +364,8 @@ CREATE TABLE IF NOT EXISTS auto_tune_changes (
     evaluated_at TEXT,
     evidence_json TEXT,
     frozen_until TEXT,
-    note TEXT
+    note TEXT,
+    intent TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_auto_tune_changes_key ON auto_tune_changes(key, applied_at);
 """
@@ -868,6 +869,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     ):
         if col not in al_cols:
             conn.execute(f"ALTER TABLE action_log ADD COLUMN {col} {typ}")
+
+    # #876 story 3: why the change was made (saving | trade_off | comfort_up | comfort_down | learned).
+    cur = conn.execute("PRAGMA table_info(auto_tune_changes)")
+    if "intent" not in {str(r[1]) for r in cur.fetchall()}:
+        conn.execute("ALTER TABLE auto_tune_changes ADD COLUMN intent TEXT")
 
     # V13: plan_consent.last_notified_at — time of last Telegram/Discord ping
     # for this plan_date. Used by _write_plan_consent to debounce notifications
@@ -3509,6 +3515,7 @@ def get_action_logs(
     limit: int = 200,
     since: str | None = None,
     action: str | None = None,
+    result: str | None = None,
 ) -> list[dict[str, Any]]:
     with _lock:
         conn = get_connection()
@@ -3524,6 +3531,9 @@ def get_action_logs(
             if action:
                 q += " AND action = ?"
                 args.append(action)
+            if result:
+                q += " AND result = ?"
+                args.append(result)
             if since:
                 q += " AND timestamp >= ?"
                 args.append(since)
@@ -10147,7 +10157,7 @@ def list_tuning_suggestions(weeks: int = 4) -> list[dict]:
 # --- #876 auto-tune change ledger ---------------------------------------------
 
 _AUTO_TUNE_FIELDS = ("old_value", "new_value", "source", "applied_at", "baseline_json",
-                     "status", "evaluated_at", "evidence_json", "frozen_until", "note")
+                     "status", "evaluated_at", "evidence_json", "frozen_until", "note", "intent")
 
 
 def _auto_tune_row(r: Any) -> dict[str, Any]:
@@ -10177,6 +10187,7 @@ def insert_auto_tune_change(
     frozen_until: str | None = None,
     note: str | None = None,
     evaluated_at: str | None = None,
+    intent: str | None = None,
 ) -> int:
     with _lock:
         conn = get_connection()
@@ -10184,12 +10195,12 @@ def insert_auto_tune_change(
             cur = conn.execute(
                 """INSERT INTO auto_tune_changes
                    (key, old_value, new_value, source, applied_at, baseline_json, status,
-                    evaluated_at, evidence_json, frozen_until, note)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    evaluated_at, evidence_json, frozen_until, note, intent)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (key, None if old_value is None else str(old_value), str(new_value), source,
                  applied_at or _utc_z(), json.dumps(baseline or {}, default=str), status,
                  evaluated_at, json.dumps(evidence, default=str) if evidence is not None else None,
-                 frozen_until, note),
+                 frozen_until, note, intent),
             )
             conn.commit()
             return int(cur.lastrowid)

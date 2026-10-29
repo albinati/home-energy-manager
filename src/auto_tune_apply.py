@@ -59,6 +59,8 @@ KEY_UNITS: dict[str, str] = {
     "LP_W3_INTERNAL_GAIN_KW": " kW", "LP_W3_EMITTER_TAU_MIN": " min",
 }
 SKIP_NOTIFY_MIN_SAVING_PENCE = 20.0
+# Ledger intent per review verdict (the judge's rule depends on it, #876 s3).
+VERDICT_INTENT = {"recommended": "saving", "trade-off": "trade_off", "comfort-first": "comfort_up"}
 _WEEKDAY_PT = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
 
 
@@ -447,8 +449,11 @@ def _apply_weekly(now: datetime | None) -> dict[str, Any]:
     money = f"saves {round(pen)}p/week" if pen >= 0 else f"costs {round(-pen)}p/week"
     note = (f"review {week_start}: {chosen['verdict']}, {money}"
             + (", partial review" if review_status == "partial" else ""))
-    res = auto_tune.propose_change(str(chosen["key"]), chosen["suggested_value"], "tuning_review",
-                                   note=note, now=t)
+    intent = VERDICT_INTENT.get(str(chosen["verdict"]), "saving")
+    res = auto_tune.propose_change(
+        str(chosen["key"]), chosen["suggested_value"], "tuning_review", note=note, now=t, intent=intent,
+        expected_comfort_hours=(float(chosen["delta_comfort_hours"] or 0.0)
+                                if intent == "trade_off" else None))
     if not res.get("applied"):
         out = done(str(res.get("reason")), chosen={"key": chosen["key"], "to": chosen["suggested_value"],
                                                    "verdict": chosen["verdict"]},
@@ -514,7 +519,7 @@ def ledger_for_item(key: str, new_value: Any, now: datetime | None = None,
             except Exception:  # noqa: BLE001
                 same = False
             return {"status": r["status"], "applied_at": r["applied_at"], "day_n": day_n,
-                    "id": r["id"], "is_active_suggestion": bool(r["status"] == "evaluating" and same),
+                    "id": r["id"], "intent": r.get("intent"), "is_active_suggestion": bool(r["status"] == "evaluating" and same),
                     "weekday_pt": _WEEKDAY_PT[at.astimezone(tz).weekday()],
                     "applied_local": at.astimezone(tz).strftime("%d/%m")}
         return None

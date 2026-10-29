@@ -580,3 +580,28 @@ def test_n6_day_n_uses_the_composer_day(monkeypatch):
     assert auto_tune.propose_change(KEY, 19.5, "tuning_review", now=datetime.now(UTC))["applied"]
     it = rec.tuning_items(today + timedelta(days=2), LON)[0]
     assert it["ledger"]["day_n"] == 3 and "avaliando dia 3/7" in it["headline"]
+
+
+@pytest.mark.parametrize("verdict,hrs,intent", [
+    ("recommended", 0.0, "saving"), ("trade-off", 0.4, "trade_off"), ("comfort-first", -0.5, "comfort_up")])
+def test_intent_per_verdict_reaches_the_ledger(verdict, hrs, intent):
+    _on()
+    _setup(20.0)
+    pence = 8 if verdict == "comfort-first" else -32
+    payload = {"hours_below_current": 1.0} if verdict == "comfort-first" else {}
+    if verdict != "recommended":
+        _fb_at("cold" if verdict == "comfort-first" else "ok", APPLY_AT - timedelta(hours=30))
+        _fb_at("cold" if verdict == "comfort-first" else "ok", APPLY_AT - timedelta(hours=60))
+    _seed([_row(KEY, 20.0, 19.5 if verdict != "comfort-first" else 20.5, pence, hrs, verdict, payload)])
+    out = ap.apply_weekly(APPLY_AT)
+    assert out["applied"] is True, out
+    assert db.get_auto_tune_change(out["id"])["intent"] == intent
+
+
+def test_comfort_source_keeps_derived_intent(monkeypatch):
+    _on()
+    _setup(20.0)
+    monkeypatch.setattr(cf, "weekly_summary", lambda ws: {
+        "proposal": {"key": KEY, "current": 20.0, "suggested": 20.5, "reason": "cold"}, "week_start": "x"})
+    cf.weekly_job(COMFORT_AT)
+    assert db.get_auto_tune_changes(1, key=KEY)[0]["intent"] == "comfort_up"

@@ -108,6 +108,25 @@ WHITELIST: dict[str, OverrideSpec] = {
         description="W3 emitter/water-loop lag (minutes, 0 = off).",
         group="comfort", promotable=True,
     ),
+    # --- #876 judge: the allowlisted learned / ceiling knobs must be replayable with the OLD value
+    "LP_W3_CEILING_C": OverrideSpec(
+        key="LP_W3_CEILING_C", config_attr="LP_W3_CEILING_C",
+        type_name="float", min_value=18.0, max_value=28.0,
+        description="W3 soft indoor ceiling (deg C).",
+        group="comfort", promotable=True,
+    ),
+    "LP_W3_SOLAR_GAIN_KW_PER_PV_KW": OverrideSpec(
+        key="LP_W3_SOLAR_GAIN_KW_PER_PV_KW", config_attr="LP_W3_SOLAR_GAIN_KW_PER_PV_KW",
+        type_name="float", min_value=0.0, max_value=2.0,
+        description="W3 solar heat gain (thermal kW per PV kW).",
+        group="comfort", promotable=True,
+    ),
+    "LP_W3_INTERNAL_GAIN_KW": OverrideSpec(
+        key="LP_W3_INTERNAL_GAIN_KW", config_attr="LP_W3_INTERNAL_GAIN_KW",
+        type_name="float", min_value=0.0, max_value=1.0,
+        description="W3 constant internal heat gain (thermal kW).",
+        group="comfort", promotable=True,
+    ),
     "LP_W3_PEAK_COAST_DELTA_C": OverrideSpec(
         key="LP_W3_PEAK_COAST_DELTA_C", config_attr="LP_W3_PEAK_COAST_DELTA_C",
         type_name="float", min_value=0.0, max_value=4.0,

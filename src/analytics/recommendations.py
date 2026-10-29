@@ -681,7 +681,7 @@ def tuning_items(end: date, tz: ZoneInfo) -> list[dict[str, Any]]:
                       "Reverto sozinho se piorar."
                 it = _item(f"tune_{key}", who, icon, head, det, kind="status",
                            evidence={"week_start": week_start, "verdict": r["verdict"]})
-                it["ledger"] = {k: led[k] for k in ("status", "applied_at", "day_n", "id")}
+                it["ledger"] = {k: led[k] for k in ("status", "applied_at", "day_n", "id", "intent")}
                 out.append(it)
             continue                                   # already applied: the row is stale
         seen.add(key)
@@ -728,7 +728,7 @@ def tuning_items(end: date, tz: ZoneInfo) -> list[dict[str, Any]]:
                       "delta_shower_days": d_shower, "feedback": counts}))
         if led:
             led.pop("is_active_suggestion", None)
-            out[-1]["ledger"] = {k: led[k] for k in ("status", "applied_at", "day_n", "id")}
+            out[-1]["ledger"] = {k: led[k] for k in ("status", "applied_at", "day_n", "id", "intent")}
     return out
 
 
