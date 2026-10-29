@@ -1248,6 +1248,64 @@ equation used to put `e_space*COP` into `t_in` in the SAME slot.
 - Rollout: deploy at 0, read the fit + the ~30-40 min table, replay 7 days at 0 vs tau, then
   `PUT /api/v1/settings` `LP_W3_EMITTER_TAU_MIN`. Kill switch: set it back to 0.
 
+### Closed-loop auto-tune (#876) — story 3: judge
+
+`src/auto_tune_judge.py` judges the single `evaluating` ledger row (never `manual` /
+`superseded_manual`). Two daily cron jobs on the LOCAL clock, `COSY_SCORECARD_HOUR_LOCAL:MINUTE`
++ 10 min (`auto_tune_tripwires`; `auto_tune_verdict` 30 s later; `CronTrigger` with the
+`BULLETPROOF_TIMEZONE` zone, so DST-safe). Both are single-flight (`_job_lock`), never raise, and
+are no-ops with `AUTO_TUNE_ENABLED=false` (a change left `evaluating` stays so; `action_log`
+`auto_tune_judge_disabled`; the owner can still `POST /tuning/ledger/{id}/rollback`).
+Away days (scorecard `holiday` / `vacation`, or away right now for today) never count anywhere.
+
+- **Tripwires** (`tripwire_check(change, now) -> {name, evidence} | None`, data readers only). Class
+  and direction come from the key and `old_value -> new_value`; a tripped wire calls
+  `auto_tune.rollback(id, reason="tripwire:<name>")` (restore, 28 d freeze, ONE notify, log).
+
+  | Class (key, direction) | Tripwire (since `applied_at`) |
+  |---|---|
+  | comfort loosening: `LP_W3_NIGHT_FLOOR_C` down, `INDOOR_SETPOINT_C` down, `LP_W3_CEILING_C` down, `LP_W3_PEAK_COAST_DELTA_C` up | `cold_feedback` (>= 2 `cold` verdicts inside any 3-day window), `lwt_emergency` (any), `comfort_backstop` (any `lwt_comfort_backstop` with result `ok` = fired) |
+  | DHW loosening: `DHW_TEMP_NORMAL_C` / `DHW_TEMP_COMFORT_C` down | `shower_floor`: a scorecard day AFTER the apply day with `tank.any_below_floor` |
+  | `LP_LOAD_EXPENSIVE_BAND_QUANTILE` (either way) | `peak_import`: scorecard `peak_import_kwh` > `AUTO_TUNE_PEAK_TRIP_KWH` (1.0) on a day after the apply day |
+  | learned: `LP_W3_SOLAR_GAIN_KW_PER_PV_KW`, `LP_W3_INTERNAL_GAIN_KW`, `LP_W3_EMITTER_TAU_MIN` | `pred_resid`: `lwt_learning_daily.payload.pred_resid` mean abs error (day+night, slot-weighted) > 1.5x the baseline on 2 consecutive days. Baseline = mean over the 7 days before the apply day (>= 3 needed, floored at 0.1 C); without one there is no tripwire and `kv_state` `auto_tune_tripwire_<id>.notes` says `no_pred_resid_baseline` |
+  | tightening (the inverse directions) | none (cost verdict only) |
+
+  Scorecard-day wires use days strictly AFTER the apply day (the apply day is half old policy).
+  Each run stores `{checked_at, tripped, notes}` in `kv_state` `auto_tune_tripwire_<id>`; the
+  scorecard `payload.auto_tune.active_change` carries `tripwire_checked` / `tripped` (state at
+  scorecard build time, so the 07:30 build shows the previous day's check).
+- **Day-7 verdict.** Due when 7 complete local days exist after the apply day (`yesterday >=
+  apply_day + 7`). Order in `verdict_job`: tripwires first, then the replay. The 7 days
+  `apply_day+1..+7` that have `optimizer_log` runs (away days dropped) are replayed with
+  `tuning_review.evaluate` (forward mode, live DB, `TUNING_REVIEW_CADENCE`), interleaved day by
+  day so a budget stop leaves the same days on both arms: arm OLD = `patched_config({key:
+  old_value})`, arm NEW = `patched_config({key: new_value})`. **Both arms are replays**: realised cost
+  carries execution noise (device lag, write failures, replans) that a replay lacks, and nothing proves
+  forward-mode replay reproduces the committed plans, so mixing a realised and a replayed arm would put
+  that gap into the verdict. The comfort yardstick (`tuning_review.yardstick`) is taken under the OLD
+  value for both arms, otherwise lowering a floor would trivially win. KEEP only if ALL hold (`decide`):
+  cost(new) <= cost(old) + `AUTO_TUNE_MIN_GAIN_PENCE` (5 p/week); hours below floor(new) <= old + 0.5 h;
+  shower-shortfall days(new) <= old; cold feedback in the 7 days after <= the 7 days before apply + 1.
+  Bands scale with `n_days/7` on a partial verdict. A KEEP is re-checked against the tripwires first.
+  `evidence_json`: both arms (`arm_old`/`arm_new`), per-clause deltas, `rule`
+  (`all_clauses_passed` | `failed:<clauses>` | `tripwire:<name>`), `cadence`, `days_replayed`,
+  `days_skipped_away`, `days_failed`, `partial`, `cold_feedback`, `yardstick`, `deferred`,
+  `busy_retries`. Rollback goes through `auto_tune.rollback` (which sends the ONE rollback message);
+  KEEP is silent unless `AUTO_TUNE_NOTIFY_KEPT=true`.
+- **Budget, deferral, undecidable.** `AUTO_TUNE_VERDICT_BUDGET_SECONDS` (1800) caps the whole
+  replay. >= 4 common days on both arms decide (`partial=true` if the budget cut it); fewer defer to
+  the next day (`evidence.deferred += 1`, status stays `evaluating`). A busy replay lock (a weekly
+  review running) retries next day WITHOUT counting (`busy_retries`); being away now waits too. On the
+  4th failed attempt (3 deferrals) the change is KEPT with `reason="undecidable"` plus one
+  `notify_risk`: it already passed the tripwires for ~10 days, and an unjudgeable change must neither
+  block the ledger forever nor be reverted on missing data. A key that cannot be replayed with its old
+  value defers the same way (never a trivial keep of two identical arms).
+- **Replay whitelist.** `LP_W3_CEILING_C`, `LP_W3_SOLAR_GAIN_KW_PER_PV_KW` and `LP_W3_INTERNAL_GAIN_KW`
+  were not in `lp_overrides.WHITELIST`, so `patched_config` silently ignored them; they are added
+  (comfort group, promotable) so their OLD value is replayable.
+- Env knobs: `AUTO_TUNE_PEAK_TRIP_KWH`, `AUTO_TUNE_MIN_GAIN_PENCE`, `AUTO_TUNE_VERDICT_BUDGET_SECONDS`,
+  `AUTO_TUNE_NOTIFY_KEPT` (all env-only, read at call time). Kill switch: `AUTO_TUNE_ENABLED=false`.
+
 ## Key `.env` settings to know
 
 ```

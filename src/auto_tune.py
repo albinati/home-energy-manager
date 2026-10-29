@@ -331,8 +331,15 @@ def scorecard_section(day: date, start: datetime, end: datetime, tz: Any) -> dic
         if ev is not None and ev < start:
             continue
         n = (day - t.astimezone(tz).date()).days + 1
-        return {"active_change": {"id": r["id"], "key": r["key"], "new_value": r["new_value"],
-                                  "status": r["status"], "day_n_of_7": n}}
+        out = {"id": r["id"], "key": r["key"], "new_value": r["new_value"],
+               "status": r["status"], "day_n_of_7": n}
+        try:
+            from . import auto_tune_judge  # story 3: last tripwire check / tripped wire
+
+            out.update(auto_tune_judge.scorecard_fields(r))
+        except Exception:  # noqa: BLE001
+            logger.debug("auto_tune.scorecard_section: judge fields failed", exc_info=True)
+        return {"active_change": out}
     return {"active_change": None}
 
 

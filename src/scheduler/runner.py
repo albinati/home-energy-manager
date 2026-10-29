@@ -3351,6 +3351,14 @@ def start_background_scheduler() -> None:
                     id="tuning_review_weekly",
                 )
 
+            # #876 story 3 — auto-tune judge: tripwires + day-7 replay verdict (no-ops while
+            # AUTO_TUNE_ENABLED=false), 10 min after the Cosy scorecard.
+            try:
+                from ..auto_tune_judge import register_jobs as _register_auto_tune_judge
+                _register_auto_tune_judge(_background_scheduler, tz)
+            except Exception as e:
+                logger.warning("auto_tune judge jobs not registered: %s", e)
+
             # #833 — comfort feedback: weekly summary + Telegram inbound short-poll.
             _background_scheduler.add_job(
                 _comfort_weekly_job,
