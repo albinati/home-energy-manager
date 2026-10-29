@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,11 +16,15 @@ from src.config import config
 
 NOW = datetime(2026, 11, 1, 10, 0, tzinfo=UTC)
 KEY = "LP_W3_NIGHT_FLOOR_C"
+_REAL_BASELINE = auto_tune.baseline_metrics
+_FAKE_BASELINE = {"n_days": 7, "net_gbp_per_day": 1.0, "hours_below_floor_per_day": 0.0,
+                  "shower_shortfall_days": 0, "peak_import_kwh_per_day": 0.0}
 
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     db.init_db()
+    monkeypatch.setattr(auto_tune, "baseline_metrics", lambda *a, **k: dict(_FAKE_BASELINE))
     rts.clear_cache()
     config._overrides.clear()
     monkeypatch.setattr(config, "HEM_UI_AUTH_REQUIRED", False, raising=False)
@@ -80,7 +85,7 @@ def test_propose_happy_path():
     assert row["status"] == "evaluating" and row["source"] == "tuning_review"
     assert float(row["old_value"]) == 20.0 and float(row["new_value"]) == 19.5
     assert row["applied_at"] == "2026-11-01T10:00:00Z"
-    assert row["baseline"] == {}  # no scorecards yet
+    assert row["baseline"]["n_days"] == 7
     audit = db.get_config_audit(limit=5) if hasattr(db, "get_config_audit") else None
     if audit:
         assert any(a.get("actor") == "auto_tune:tuning_review" for a in audit)
@@ -111,7 +116,7 @@ def test_baseline_from_scorecards():
             "payload": {"comfort": {"hours_below_night_floor": 0.5, "hours_below_peak_floor": 0.25},
                         "tank": {"any_below_floor": i == 2}},
             "built_at_utc": "2026-11-01T00:00:00Z"})
-    b = auto_tune.baseline_metrics(NOW.date() - timedelta(days=1))
+    b = _REAL_BASELINE(NOW.date() - timedelta(days=1))
     assert b["n_days"] == 7 and b["shower_shortfall_days"] == 1
     assert b["hours_below_floor_per_day"] == 0.75 and b["peak_import_kwh_per_day"] == 0.5
     assert b["net_gbp_per_day"] == pytest.approx(1.4)
@@ -170,8 +175,8 @@ def test_drift_cap_vs_last_manual():
     r = auto_tune.propose_change(KEY, 18.0, "tuning_review", now=NOW)
     assert r["reason"] == "drift_cap" and r["reference"] == 20.0
     # a new manual value moves the reference
-    rts.set_setting(KEY, 18.5, actor="api")
-    assert auto_tune.propose_change(KEY, 18.0, "tuning_review", now=NOW)["applied"]
+    rts.set_setting(KEY, 19.0, actor="api")
+    assert auto_tune.propose_change(KEY, 18.5, "tuning_review", now=NOW)["applied"]
 
 
 def test_drift_reference_without_manual_row_is_value_before_first_auto():
@@ -312,20 +317,28 @@ def test_ledger_state_and_summary():
     assert st["active"]["id"] == a["id"] and st["manual_value"] == "20.5" and st["auto_value"] == "20.0"
     s = auto_tune.ledger_summary()
     assert s["enabled"] and s["active"]["id"] == a["id"] and KEY in s["keys"]
-    sc = auto_tune.scorecard_section(today=NOW.date() + timedelta(days=2))
+    day = NOW.date() + timedelta(days=2)
+    tz = ZoneInfo("Europe/London")
+    a0 = datetime(day.year, day.month, day.day, tzinfo=tz).astimezone(UTC)
+    sc = auto_tune.scorecard_section(day, a0, a0 + timedelta(days=1), tz)
     assert sc["active_change"]["day_n_of_7"] == 3 and sc["active_change"]["key"] == KEY
+    # a day BEFORE the change was applied does not see it
+    d0 = NOW.date() - timedelta(days=1)
+    b0 = datetime(d0.year, d0.month, d0.day, tzinfo=tz).astimezone(UTC)
+    assert auto_tune.scorecard_section(d0, b0, b0 + timedelta(days=1), tz)["active_change"] is None
 
 
 def test_scorecard_payload_has_auto_tune(monkeypatch):
     from src.analytics import cosy_scorecard as sc
+    monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")
     _on()
     _setup_key(20.0)
-    a = auto_tune.propose_change(KEY, 19.5, "tuning_review")
-    try:
-        row = sc.build_scorecard(date(2026, 10, 30))
-    except Exception:
-        pytest.skip("scorecard build needs fixtures unavailable here")
-    assert row["payload"]["auto_tune"]["active_change"]["id"] == a["id"]
+    a = auto_tune.propose_change(KEY, 19.5, "tuning_review", now=datetime(2026, 10, 28, 10, 0, tzinfo=UTC))
+    row = sc.build_scorecard(date(2026, 10, 30))
+    ac = row["payload"]["auto_tune"]["active_change"]
+    assert ac["id"] == a["id"] and ac["day_n_of_7"] == 3
+    # the day before the application: nothing active
+    assert sc.build_scorecard(date(2026, 10, 27))["payload"]["auto_tune"]["active_change"] is None
 
 
 # ------------------------------------------------- comfort_feedback routing
@@ -400,8 +413,9 @@ def test_api_ledger_read_and_propose_409_and_rollback():
     assert c.post("/api/v1/tuning/ledger/999/freeze", json={"days": 2}).status_code == 404
     r = c.post(f"/api/v1/tuning/ledger/{cid}/rollback", json={"reason": "owner"})
     assert r.status_code == 200 and float(rts.get_setting(KEY)) == 20.0
-    assert c.post(f"/api/v1/tuning/ledger/{cid}/rollback", json={}).status_code == 409
-    assert c.post("/api/v1/tuning/ledger/999/rollback", json={}).status_code == 404
+    assert c.post(f"/api/v1/tuning/ledger/{cid}/rollback", json={"reason": "x"}).status_code == 409
+    assert c.post(f"/api/v1/tuning/ledger/{cid}/rollback", json={}).status_code == 400
+    assert c.post("/api/v1/tuning/ledger/999/rollback", json={"reason": "x"}).status_code == 404
 
 
 def test_api_writes_need_admin(monkeypatch):
@@ -412,7 +426,7 @@ def test_api_writes_need_admin(monkeypatch):
     c = _client()
     assert c.get("/api/v1/tuning/ledger").status_code == 200  # viewer read
     for path, body in (("/api/v1/tuning/ledger/propose", {"key": KEY, "value": 1}),
-                       ("/api/v1/tuning/ledger/1/rollback", {}),
+                       ("/api/v1/tuning/ledger/1/rollback", {"reason": "x"}),
                        ("/api/v1/tuning/ledger/1/freeze", {"days": 1})):
         assert c.post(path, json=body).status_code == 401
         assert c.post(path, json=body, headers={"Authorization": "Bearer ui-tok"}).status_code == 401
@@ -432,3 +446,239 @@ def test_mcp_tools_registered():
     from src import mcp_server
     src = open(mcp_server.__file__).read()
     assert 'name="get_auto_tune_ledger"' in src and 'name="rollback_auto_tune_change"' in src
+
+
+# ===================== review fixes (PR #887 review) =====================
+def test_pinned_key_refused_and_db_untouched():
+    _on()
+    _setup_key(20.0)
+    config._rt_set(KEY, 16.0)  # Workbench-style in-memory pin
+    r = auto_tune.propose_change(KEY, 16.5, "tuning_review", now=NOW)
+    assert r["reason"] == "pinned"
+    assert rts.get_setting(KEY) == 20.0 and db.get_auto_tune_changes(5, key=KEY) == []
+
+
+def test_rollback_of_kept_row_refused_after_owner_change():
+    _on()
+    rts.set_setting("AUTO_TUNE_MANUAL_FREEZE_DAYS", 0, actor="test")
+    _setup_key(20.0)
+    a = auto_tune.propose_change(KEY, 20.5, "tuning_review", now=NOW)
+    auto_tune.keep(a["id"])
+    rts.set_setting(KEY, 22.0, actor="api")
+    r = auto_tune.rollback(a["id"], reason="late")
+    assert r["rolled_back"] is False and r["reason"] == "superseded"
+    assert float(rts.get_setting(KEY)) == 22.0 and _row(a["id"])["status"] == "kept"
+    assert db.auto_tune_frozen_until(KEY) is None
+
+
+def test_rollback_of_older_kept_row_refused_when_newer_auto_row_exists():
+    _on()
+    _setup_key(20.0)
+    a = auto_tune.propose_change(KEY, 20.5, "tuning_review", now=NOW)
+    auto_tune.keep(a["id"])
+    b = auto_tune.propose_change(KEY, 21.0, "tuning_review", now=NOW)
+    auto_tune.keep(b["id"])
+    assert auto_tune.rollback(a["id"], reason="x")["reason"] == "superseded"
+    assert float(rts.get_setting(KEY)) == 21.0
+    assert auto_tune.rollback(b["id"], reason="x")["rolled_back"]
+    assert float(rts.get_setting(KEY)) == 20.5
+
+
+def test_api_rollback_of_superseded_row_is_409():
+    _on()
+    _setup_key(20.0)
+    a = auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)
+    rts.set_setting(KEY, 21.0, actor="api")
+    r = _client().post(f"/api/v1/tuning/ledger/{a['id']}/rollback", json={"reason": "x"})
+    assert r.status_code == 409 and float(rts.get_setting(KEY)) == 21.0
+
+
+def test_race_owner_write_before_set_is_refused_changed(monkeypatch):
+    _on()
+    _setup_key(20.0)
+    real = auto_tune.baseline_metrics
+
+    def sneaky(*a, **k):  # the owner writes while the proposer is between check and write
+        rts.set_setting(KEY, 20.5, actor="api")  # real hook: blocks on _lock? no - same thread re-entry
+        return dict(_FAKE_BASELINE)
+
+    # run the owner write from another thread so the hook must wait for the lock
+    import threading
+    done = threading.Event()
+
+    def owner():
+        rts.set_setting(KEY, 20.5, actor="api")
+        done.set()
+
+    def slow_baseline(*a, **k):
+        t = threading.Thread(target=owner)
+        t.start()
+        t.join(0.5)  # owner's DB write lands; its hook is blocked on _lock
+        return dict(_FAKE_BASELINE)
+
+    monkeypatch.setattr(auto_tune, "baseline_metrics", slow_baseline)
+    r = auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)
+    assert done.wait(5)
+    assert r["reason"] == "changed"
+    assert float(rts.get_setting(KEY)) == 20.5
+    assert db.get_auto_tune_changes(5, key=KEY, status="manual")  # owner recorded after release
+    monkeypatch.setattr(auto_tune, "baseline_metrics", real)
+
+
+def test_hook_restores_owner_value_if_overwritten():
+    # simulate: owner wrote 21 (hook arrives), but the DB meanwhile holds the auto value
+    _on()
+    _setup_key(20.0)
+    a = auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)
+    auto_tune.on_manual_change(KEY, 20.0, 21.0, "api")
+    assert float(rts.get_setting(KEY)) == 21.0
+    assert _row(a["id"])["status"] == "superseded_manual"
+
+
+def test_ledger_error_restores_with_internal_actor_and_notifies_on_failed_restore(monkeypatch, _env):
+    sent = _env
+    _on()
+    _setup_key(20.0)
+    monkeypatch.setattr(db, "insert_auto_tune_change", lambda **k: (_ for _ in ()).throw(RuntimeError("db")))
+    r = auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)
+    assert r["reason"] == "ledger_error" and r["restored"] is True
+    assert float(rts.get_setting(KEY)) == 20.0 and sent == []
+    real = rts.set_setting
+    calls = []
+
+    def flaky(k, v, *, actor="api"):
+        calls.append(actor)
+        if actor == "auto_tune:rollback":
+            raise RuntimeError("boom")
+        return real(k, v, actor=actor)
+
+    monkeypatch.setattr(rts, "set_setting", flaky)
+    r = auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)
+    assert r["reason"] == "ledger_error" and r["restored"] is False and len(sent) == 1
+
+
+def test_batch_rollback_deletes_manual_row_and_reopens_evaluating():
+    _on()
+    _setup_key(20.0)
+    a = auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)
+    rts.set_setting(KEY, 21.0, actor="api_batch")  # a batch write by the owner...
+    assert _row(a["id"])["status"] == "superseded_manual"
+    rts.set_setting(KEY, 19.5, actor="api_batch_rollback")  # ...that fails and is undone
+    assert db.get_auto_tune_changes(5, key=KEY, status="manual") == []
+    assert _row(a["id"])["status"] == "evaluating" and db.auto_tune_frozen_until(KEY) is None
+
+
+def test_workbench_promote_rollback_same():
+    rts.set_setting(KEY, 21.0, actor="workbench_promote")
+    assert len(db.get_auto_tune_changes(5, key=KEY, status="manual")) == 1
+    rts.set_setting(KEY, 17.5, actor="workbench_promote_rollback")
+    assert db.get_auto_tune_changes(5, key=KEY) == []
+
+
+def test_baseline_excludes_away_days_and_requires_five_days():
+    def put(i, **pl):
+        d = (NOW.date() - timedelta(days=i)).isoformat()
+        db.upsert_cosy_scorecard({"date": d, "score": "ideal", "peak_import_kwh": 1.0, "import_kwh": 1,
+                                  "import_cost_gbp": 1, "avg_import_p": 1, "ideal_avg_import_p": 1,
+                                  "net_cost_gbp": 1.0, "payload": pl, "built_at_utc": "x"})
+    for i in range(1, 8):
+        put(i, vacation=(i <= 2), tank={"any_below_floor": i == 1})
+    end = NOW.date() - timedelta(days=1)
+    b = _REAL_BASELINE(end)
+    assert b["n_days"] == 5 and b["shower_shortfall_days"] == 0  # away days gone from every metric
+    put(3, holiday=True)
+    b = _REAL_BASELINE(end)
+    assert b == {"no_baseline": True, "n_days": 4, "end_day": end.isoformat()}
+
+
+def test_no_baseline_refused(monkeypatch):
+    _on()
+    _setup_key(20.0)
+    monkeypatch.setattr(auto_tune, "baseline_metrics", lambda *a, **k: {})
+    assert auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)["reason"] == "no_baseline"
+    monkeypatch.setattr(auto_tune, "baseline_metrics", lambda *a, **k: {"no_baseline": True, "n_days": 3})
+    assert auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)["reason"] == "no_baseline"
+
+
+def test_cron_reload_key_refused():
+    _on()
+    key = next(k for k, sp in rts.SCHEMA.items() if sp.cron_reload)
+    rts.set_setting("AUTO_TUNE_ALLOWLIST", key.lower(), actor="test")
+    assert auto_tune.propose_change(key, rts.SCHEMA[key].min_value or 0, "tuning_review")["reason"] == "cron_reload"
+
+
+def test_drift_reference_survives_rollback():
+    _on()
+    _setup_key(20.0)
+    a = auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)
+    auto_tune.rollback(a["id"], reason="x")
+    assert auto_tune.manual_value(KEY) == "20.0"  # still the pre-auto value
+    later = datetime.now(UTC) + timedelta(days=30)
+    b = auto_tune.propose_change(KEY, 19.5, "tuning_review", now=later)
+    assert b["applied"]
+
+
+def test_noop_owner_write_creates_nothing():
+    _on()
+    _setup_key(20.0)
+    a = auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)
+    rts.set_setting(KEY, 19.5, actor="api")  # same value
+    assert _row(a["id"])["status"] == "evaluating"
+    assert db.get_auto_tune_changes(5, key=KEY, status="manual") == []
+
+
+def test_enum_step_adjacent_only(monkeypatch):
+    _on()
+    sp = rts.SCHEMA["LP_LOAD_EXPENSIVE_BAND_QUANTILE"]
+    assert sp.enum == ("p75", "p90")  # adjacency is trivially satisfied with 2 values
+    assert auto_tune.propose_change("LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p90", "tuning_review")["applied"]
+
+
+def test_delete_hook_never_stores_none_string():
+    rts.set_setting(KEY, 21.0, actor="api")
+    rts.delete_setting(KEY, actor="api")
+    assert all(r["new_value"] != "None" for r in db.get_auto_tune_changes(10, key=KEY))
+
+
+def test_away_when_vacation_preset(monkeypatch):
+    _on()
+    _setup_key(20.0)
+    monkeypatch.setattr("src.vacation.current_preset", lambda: "vacation")
+    assert auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)["reason"] == "away"
+
+
+def test_legacy_comfort_path_skips_when_frozen(monkeypatch):
+    _stub_summary(monkeypatch)
+    _setup_key(20.0)
+    monkeypatch.setattr(config, "COMFORT_FEEDBACK_AUTO_TUNE", True, raising=False)
+    rts.set_setting(KEY, 20.0 + 0.0, actor="api")  # no-op: nothing recorded
+    rts.set_setting(KEY, 21.0, actor="api")  # real owner change -> 14 d freeze
+    cf.weekly_job(NOW)
+    assert float(rts.get_setting(KEY)) == 21.0
+
+
+def test_api_invalid_is_422_and_simulation_gate_409():
+    _on()
+    _setup_key(20.0)
+    c = _client()
+    assert c.post("/api/v1/tuning/ledger/propose", json={"key": KEY, "value": "abc"}).status_code == 422
+    rts.set_setting("REQUIRE_SIMULATION_ID", "true", actor="test")
+    r = c.post("/api/v1/tuning/ledger/propose", json={"key": KEY, "value": 19.5})
+    assert r.status_code == 409 and r.json()["detail"]["reason"] == "simulation_required"
+    assert c.post("/api/v1/tuning/ledger/1/rollback", json={"reason": "x"}).status_code == 409
+
+
+def test_mcp_rollback_dry_run_and_read_only(monkeypatch):
+    from src import mcp_server
+    _on()
+    _setup_key(20.0)
+    a = auto_tune.propose_change(KEY, 19.5, "tuning_review", now=NOW)
+    mcp = mcp_server.build_mcp()
+    fn = mcp._tool_manager._tools["rollback_auto_tune_change"].fn
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", True, raising=False)
+    assert fn(a["id"])["ok"] is False
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False, raising=False)
+    d = fn(a["id"])
+    assert d["ok"] and d["confirmed"] is False and d["would_restore"] == "20.0"
+    assert float(rts.get_setting(KEY)) == 19.5
+    assert fn(a["id"], confirmed=True)["ok"] and float(rts.get_setting(KEY)) == 20.0

@@ -90,10 +90,14 @@ INTERNAL_ACTORS: frozenset[str] = frozenset({
     "workbench_promote_rollback",
 })
 
-REFUSALS = ("disabled", "not_allowlisted", "denylisted", "busy", "frozen",
-            "step_too_large", "drift_cap", "away", "unchanged", "invalid")
+REFUSALS = ("disabled", "not_allowlisted", "denylisted", "cron_reload", "invalid", "pinned",
+            "unchanged", "busy", "frozen", "step_too_large", "drift_cap", "away",
+            "no_baseline", "changed")
 # Extra, only if the ledger insert itself fails after the setting was written
 # (the setting is restored first): "ledger_error".
+
+MIN_BASELINE_DAYS = 5
+BATCH_UNDO_ACTORS = {"api_batch_rollback": "api_batch", "workbench_promote_rollback": "workbench_promote"}
 
 _lock = threading.Lock()
 
@@ -161,16 +165,28 @@ def max_drift(key: str) -> float | None:
 
 
 def current_value(key: str) -> Any:
-    """What the system really uses: honours a pinned in-memory ``config`` override."""
+    """The PERSISTED value (what a write replaces). A pinned in-memory ``config``
+    override is handled by the ``pinned`` refusal, never used as a reference."""
+    return rts.get_setting(key)
+
+
+def _is_pinned(key: str) -> bool:
     try:
         from .config import config
 
-        return config._rt_get(key)
+        return bool(config.has_override(key))
     except Exception:  # noqa: BLE001
-        return rts.get_setting(key)
+        return False
 
 
 def _is_away() -> bool:
+    try:
+        from . import vacation
+
+        if vacation.current_preset() == "vacation":
+            return True
+    except Exception:  # noqa: BLE001
+        pass
     try:
         if (db.get_kv("vacation_end_at") or "").strip():
             return True
@@ -190,17 +206,35 @@ def _is_away() -> bool:
 
 
 # ----------------------------------------------------------------- baseline
-def baseline_metrics(end_day: date | None = None) -> dict[str, Any]:
-    """7-day metrics ending at ``end_day`` (default yesterday UTC) from
-    ``cosy_scorecard_daily``: net GBP/day mean, hours below floor per day
-    (night + peak), shower-shortfall days, peak import kWh/day. Guarded: ``{}``
-    when no rows."""
+def _local_yesterday() -> date:
     try:
-        end = end_day or (datetime.now(UTC).date() - timedelta(days=1))
+        from zoneinfo import ZoneInfo
+
+        from .config import config
+
+        return (datetime.now(ZoneInfo(config.BULLETPROOF_TIMEZONE)) - timedelta(days=1)).date()
+    except Exception:  # noqa: BLE001
+        return datetime.now(UTC).date() - timedelta(days=1)
+
+
+def baseline_metrics(end_day: date | None = None) -> dict[str, Any]:
+    """7-day metrics ending at ``end_day`` (default: yesterday in
+    ``BULLETPROOF_TIMEZONE``, the key of ``cosy_scorecard_daily``): net GBP/day
+    mean, hours below floor per day (night + peak), shower-shortfall days, peak
+    import kWh/day. Holiday / vacation days are excluded from EVERY metric (an
+    empty house is not a baseline). ``{}`` when there are no rows;
+    ``{"no_baseline": True, "n_days": n}`` when fewer than ``MIN_BASELINE_DAYS``
+    usable days remain. Guarded."""
+    try:
+        end = end_day or _local_yesterday()
         rows = [r for r in db.get_cosy_scorecards(7, up_to=end.isoformat())
                 if (end - date.fromisoformat(r["date"])).days < 7]
+        rows = [r for r in rows
+                if not ((r.get("payload") or {}).get("holiday") or (r.get("payload") or {}).get("vacation"))]
         if not rows:
             return {}
+        if len(rows) < MIN_BASELINE_DAYS:
+            return {"no_baseline": True, "n_days": len(rows), "end_day": end.isoformat()}
 
         def mean(vals: list[float]) -> float | None:
             return round(sum(vals) / len(vals), 4) if vals else None
@@ -215,7 +249,7 @@ def baseline_metrics(end_day: date | None = None) -> dict[str, Any]:
             if hn is not None or hp is not None:
                 below.append(float(hn or 0) + float(hp or 0))
             t = p.get("tank") if isinstance(p.get("tank"), dict) else {}
-            if t.get("any_below_floor") is True and not (p.get("holiday") or p.get("vacation")):
+            if t.get("any_below_floor") is True:
                 short += 1
         return {
             "end_day": end.isoformat(), "n_days": len(rows),
@@ -236,8 +270,8 @@ def manual_value(key: str) -> Any:
     manual = db.get_auto_tune_changes(1, key=key, status="manual")
     if manual:
         return manual[0]["new_value"]
-    autos = [r for r in db.get_auto_tune_changes(500, key=key) if r["status"] != "manual"]
-    return autos[-1]["old_value"] if autos else None
+    first = db.get_auto_tune_changes(1, key=key, exclude_status="manual", oldest_first=True)
+    return first[0]["old_value"] if first else None
 
 
 def ledger_state(key: str) -> dict[str, Any]:
@@ -271,45 +305,52 @@ def ledger_summary(limit: int = 20, key: str | None = None) -> dict[str, Any]:
 
 def settings_overlay() -> dict[str, dict[str, Any]]:
     """Per-key ``{active, frozen_until, last_status}`` for the Settings list
-    (allowlisted keys and keys with ledger rows only). Two cheap queries."""
-    out: dict[str, dict[str, Any]] = {}
+    (allowlisted keys and keys with ledger rows only). One GROUP BY query."""
     try:
-        rows = db.get_auto_tune_changes(500)
-        by_key: dict[str, list[dict[str, Any]]] = {}
-        for r in rows:
-            by_key.setdefault(r["key"], []).append(r)
-        for k in set(allowlist()) | set(by_key):
-            rs = by_key.get(k, [])
-            out[k] = {
-                "active": next((r["id"] for r in rs if r["status"] == "evaluating"), None),
-                "frozen_until": db.auto_tune_frozen_until(k),
-                "last_status": rs[0]["status"] if rs else None,
-            }
+        summ = db.auto_tune_key_summary()
+        empty = {"active": None, "frozen_until": None, "last_status": None}
+        return {k: summ.get(k, dict(empty)) for k in set(allowlist()) | set(summ)}
     except Exception:  # noqa: BLE001
         logger.debug("auto_tune.settings_overlay failed", exc_info=True)
-    return out
+        return {}
 
 
-def scorecard_section(today: date | None = None) -> dict[str, Any]:
-    """``payload.auto_tune`` for the Cosy scorecard (as of build time)."""
-    a = db.get_active_auto_tune_change()
-    if not a:
-        return {"active_change": None}
-    t = _parse(a["applied_at"])
-    d0 = t.date() if t else (today or datetime.now(UTC).date())
-    n = max(1, min(7, ((today or datetime.now(UTC).date()) - d0).days + 1))
-    return {"active_change": {"id": a["id"], "key": a["key"], "new_value": a["new_value"],
-                              "day_n_of_7": n}}
+def scorecard_section(day: date, start: datetime, end: datetime, tz: Any) -> dict[str, Any]:
+    """``payload.auto_tune`` for the Cosy scorecard of local ``day``
+    (``[start, end)`` UTC): the newest automated change that was applied before
+    the day ended and not evaluated before it started. ``day_n_of_7`` counts
+    local days from the application day to ``day`` (not capped; > 7 means the
+    judge has not closed it)."""
+    for r in db.get_auto_tune_changes(50):
+        if r["status"] == "manual":
+            continue
+        t = _parse(r["applied_at"])
+        if t is None or t >= end:
+            continue
+        ev = _parse(r.get("evaluated_at"))
+        if ev is not None and ev < start:
+            continue
+        n = (day - t.astimezone(tz).date()).days + 1
+        return {"active_change": {"id": r["id"], "key": r["key"], "new_value": r["new_value"],
+                                  "status": r["status"], "day_n_of_7": n}}
+    return {"active_change": None}
 
 
 # ------------------------------------------------------------------ propose
+def _same(spec: Any, a: Any, b: Any) -> bool:
+    try:
+        return rts._validate(spec, a) == rts._validate(spec, b)
+    except Exception:  # noqa: BLE001
+        return str(a) == str(b)
+
+
 def propose_change(key: str, new_value: Any, source: str, *, note: str | None = None,
                    now: datetime | None = None) -> dict[str, Any]:
     """Apply ONE bounded automated change and open an ``evaluating`` ledger row.
 
     Returns ``{"applied": True, "id", "key", "old_value", "new_value", ...}`` or
-    ``{"applied": False, "reason": <one of REFUSALS>, ...}``. Never raises for a
-    policy refusal.
+    ``{"applied": False, "reason": <one of REFUSALS | ledger_error>, ...}``. Never
+    raises for a policy refusal.
     """
     key = str(key).strip()
     t = _now(now)
@@ -323,18 +364,21 @@ def propose_change(key: str, new_value: Any, source: str, *, note: str | None = 
         return no("denylisted")
     if not is_allowlisted(key) or key not in rts.SCHEMA:
         return no("not_allowlisted")
+    spec = rts.SCHEMA[key]
+    if spec.cron_reload:
+        return no("cron_reload")  # a write would need the scheduler re-registered
     if source not in SOURCES:
         return no("invalid", detail=f"unknown source {source!r}")
-    spec = rts.SCHEMA[key]
     try:
         canonical = rts._validate(spec, new_value)
     except rts.SettingValidationError as exc:
         return no("invalid", detail=str(exc))
 
     with _lock:
+        if _is_pinned(key):
+            return no("pinned")  # in-memory override (Workbench what-if) shadows the DB
         try:
-            cur_raw = current_value(key)
-            cur = rts._validate(spec, cur_raw)
+            cur = rts._validate(spec, current_value(key))
         except Exception as exc:  # noqa: BLE001
             return no("invalid", detail=f"current value unreadable: {exc}")
         if canonical == cur:
@@ -344,8 +388,11 @@ def propose_change(key: str, new_value: Any, source: str, *, note: str | None = 
         frozen = db.auto_tune_frozen_until(key, t)
         if frozen:
             return no("frozen", frozen_until=frozen)
-        numeric = spec.enum is None and spec.type_name in ("float", "int")
-        if numeric:
+        if spec.enum is not None:
+            en = list(spec.enum)
+            if abs(en.index(canonical) - en.index(cur)) != 1:
+                return no("step_too_large", step=1)
+        elif spec.type_name in ("float", "int"):
             if abs(float(canonical) - float(cur)) > step_for(key) + 1e-9:
                 return no("step_too_large", step=step_for(key))
             cap = max_drift(key)
@@ -355,8 +402,13 @@ def propose_change(key: str, new_value: Any, source: str, *, note: str | None = 
                 return no("drift_cap", cap=cap, reference=ref_f)
         if _is_away():
             return no("away")
-
         baseline = baseline_metrics()
+        if baseline.get("no_baseline") or not baseline.get("n_days"):
+            return no("no_baseline", n_days=baseline.get("n_days", 0), min_days=MIN_BASELINE_DAYS)
+
+        # Owner wrote between our read and now? (the hook cannot run until we release _lock)
+        if not _same(spec, current_value(key), cur):
+            return no("changed")
         try:
             rts.set_setting(key, canonical, actor=f"auto_tune:{source}")
         except rts.SettingValidationError as exc:
@@ -367,11 +419,22 @@ def propose_change(key: str, new_value: Any, source: str, *, note: str | None = 
                 status="evaluating", applied_at=_z(t), baseline=baseline, note=note)
         except Exception:  # noqa: BLE001
             logger.warning("auto_tune: ledger insert failed; restoring %s", key, exc_info=True)
+            restored = True
             try:
                 rts.set_setting(key, cur, actor="auto_tune:rollback")
             except Exception:  # noqa: BLE001
+                restored = False
                 logger.error("auto_tune: restore of %s failed", key, exc_info=True)
-            return no("ledger_error")
+            if not restored:
+                try:
+                    from .notifier import notify_risk
+
+                    notify_risk(f"Auto-tune: falha ao gravar o registro E ao restaurar {key} "
+                                f"(valor atual {canonical}, anterior {cur}).",
+                                extra={"warning_key": f"auto_tune_ledger_error_{key}"})
+                except Exception:  # noqa: BLE001
+                    logger.warning("auto_tune: ledger_error notify failed", exc_info=True)
+            return no("ledger_error", restored=restored)
 
     _log("auto_tune_apply", {"id": cid, "key": key, "old": cur, "new": canonical,
                              "source": source, "baseline": baseline, "note": note})
@@ -392,36 +455,67 @@ def on_manual_change(key: str, old_value: Any, new_value: Any, actor: str) -> No
     """Hook from ``runtime_settings``. Never raises."""
     try:
         actor = str(actor or "")
+        if actor in BATCH_UNDO_ACTORS:
+            _undo_batch_manual(key, BATCH_UNDO_ACTORS[actor])
+            return
         if actor.startswith("auto_tune:") or actor in INTERNAL_ACTORS:
             return
-        if is_denylisted(key):
+        if is_denylisted(key) or new_value is None:
             return
-        has_rows = bool(db.get_auto_tune_changes(1, key=key))
-        if not (key.upper() in allowlist() or has_rows):
-            return
-        t = _now()
-        days = int(rts.get_setting("AUTO_TUNE_MANUAL_FREEZE_DAYS"))
-        frozen = _z(t + timedelta(days=days)) if days > 0 else None
-        for r in db.get_auto_tune_changes(20, key=key, status="evaluating"):
-            db.update_auto_tune_change(
-                r["id"], status="superseded_manual", evaluated_at=_z(t),
-                evidence={"reason": "manual_change", "actor": actor})
-        cid = db.insert_auto_tune_change(
-            key=key, old_value=old_value, new_value=new_value, source="manual",
-            status="manual", applied_at=_z(t), frozen_until=frozen,
-            note=f"actor={actor}")
-        _log("auto_tune_manual", {"id": cid, "key": key, "old": old_value, "new": new_value,
-                                  "actor": actor, "frozen_until": frozen})
+        spec = rts.SCHEMA.get(key)
+        if spec is not None and _same(spec, old_value, new_value):
+            return  # a no-op write is not a decision
+        with _lock:  # waits for an in-flight propose_change on this process
+            if not (key.upper() in allowlist() or db.get_auto_tune_changes(1, key=key)):
+                return
+            t = _now()
+            # A proposer that wrote AFTER the owner overwrote the owner's value: restore it.
+            try:
+                if spec is not None and not _same(spec, current_value(key), new_value):
+                    rts.set_setting(key, new_value, actor="auto_tune:rollback")
+            except Exception:  # noqa: BLE001
+                logger.warning("auto_tune: could not restore owner's value for %s", key, exc_info=True)
+            days = int(rts.get_setting("AUTO_TUNE_MANUAL_FREEZE_DAYS"))
+            frozen = _z(t + timedelta(days=days)) if days > 0 else None
+            cid = db.insert_auto_tune_change(
+                key=key, old_value=old_value, new_value=new_value, source="manual",
+                status="manual", applied_at=_z(t), frozen_until=frozen,
+                note=f"actor={actor}")
+            for r in db.get_auto_tune_changes(20, key=key, status="evaluating"):
+                db.update_auto_tune_change(
+                    r["id"], status="superseded_manual", evaluated_at=_z(t),
+                    evidence={"reason": "manual_change", "actor": actor, "manual_id": cid})
+            _log("auto_tune_manual", {"id": cid, "key": key, "old": old_value, "new": new_value,
+                                      "actor": actor, "frozen_until": frozen})
     except Exception:  # noqa: BLE001
         logger.warning("auto_tune.on_manual_change failed (non-fatal)", exc_info=True)
+
+
+def _undo_batch_manual(key: str, batch_actor: str) -> None:
+    """A failed batch / workbench promote is being undone: the manual row (and
+    freeze) the hook just recorded for ``key`` was never a real decision. Delete it
+    and re-open the ``evaluating`` row it superseded."""
+    with _lock:
+        for m in db.get_auto_tune_changes(5, key=key, status="manual"):
+            if (m.get("note") or "") != f"actor={batch_actor}":
+                continue
+            for r in db.get_auto_tune_changes(20, key=key, status="superseded_manual"):
+                if (r.get("evidence") or {}).get("manual_id") == m["id"]:
+                    db.update_auto_tune_change(r["id"], status="evaluating", evaluated_at=None,
+                                               evidence={})
+            db.delete_auto_tune_change(m["id"])
+            _log("auto_tune_manual_undone", {"key": key, "manual_id": m["id"], "actor": batch_actor})
+            break
 
 
 # --------------------------------------------------------------------- verbs
 def rollback(change_id: int, *, reason: str, evidence: dict[str, Any] | None = None,
              actor: str = "judge") -> dict[str, Any]:
     """Restore ``old_value``, mark ``rolled_back``, freeze the key, notify once.
-    Only ``evaluating`` / ``kept`` automated rows can be rolled back; a
-    ``manual`` row is never reverted."""
+    Only ``evaluating`` / ``kept`` automated rows can be rolled back, and only if
+    the row is still the NEWEST row of its key and the setting still holds its
+    ``new_value`` (otherwise ``superseded``: a later owner/auto change must not be
+    overwritten). A ``manual`` row is never reverted."""
     row = db.get_auto_tune_change(change_id)
     if row is None:
         return {"rolled_back": False, "reason": "not_found"}
@@ -430,10 +524,19 @@ def rollback(change_id: int, *, reason: str, evidence: dict[str, Any] | None = N
     if row["old_value"] is None:
         return {"rolled_back": False, "reason": "no_old_value"}
     key, t = row["key"], _now()
-    try:
-        rts.set_setting(key, row["old_value"], actor="auto_tune:rollback")
-    except rts.SettingValidationError as exc:
-        return {"rolled_back": False, "reason": "invalid", "detail": str(exc)}
+    spec = rts.SCHEMA.get(key)
+    if spec is None:
+        return {"rolled_back": False, "reason": "invalid"}
+    with _lock:
+        all_rows = db.get_auto_tune_changes(500, key=key)
+        max_id = max(r["id"] for r in all_rows) if all_rows else row["id"]
+        if row["id"] != max_id or not _same(spec, current_value(key), row["new_value"]):
+            return {"rolled_back": False, "reason": "superseded",
+                    "newest_id": max_id, "current": current_value(key)}
+        try:
+            rts.set_setting(key, row["old_value"], actor="auto_tune:rollback")
+        except rts.SettingValidationError as exc:
+            return {"rolled_back": False, "reason": "invalid", "detail": str(exc)}
     days = int(rts.get_setting("AUTO_TUNE_ROLLBACK_FREEZE_DAYS"))
     ev = {**(evidence or {}), "reason": reason, "actor": actor}
     db.update_auto_tune_change(

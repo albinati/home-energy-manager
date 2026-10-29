@@ -14,6 +14,18 @@ from fastapi import APIRouter, HTTPException
 router = APIRouter(tags=["auto_tune"])
 
 
+def _require_no_simulation_gate() -> None:
+    """Story 1 does not implement the simulate->confirm flow for ledger writes:
+    when ``REQUIRE_SIMULATION_ID`` is on they are refused (409) instead of silently
+    bypassing the gate that ``PUT /settings/{key}`` honours."""
+    from ... import runtime_settings as rts
+    if str(rts.get_setting("REQUIRE_SIMULATION_ID") or "false").strip().lower() == "true":
+        raise HTTPException(status_code=409, detail={
+            "reason": "simulation_required",
+            "message": "REQUIRE_SIMULATION_ID is on; ledger writes are not simulatable yet. "
+                       "Use PUT /api/v1/settings/{key} with X-Simulation-Id."})
+
+
 @router.get("/api/v1/tuning/ledger")
 async def get_ledger(limit: int = 20, key: str | None = None) -> dict[str, Any]:
     from ... import auto_tune
@@ -27,6 +39,7 @@ async def post_propose(body: dict) -> dict[str, Any]:
     ledger sources, or ``manual_test`` (recorded as ``tuning_review`` with a note).
     A refusal is a 409 carrying the stable ``reason``."""
     from ... import auto_tune
+    _require_no_simulation_gate()
     if "key" not in body or "value" not in body:
         raise HTTPException(status_code=400, detail="body needs 'key' and 'value'")
     source = str(body.get("source") or "manual_test")
@@ -36,14 +49,17 @@ async def post_propose(body: dict) -> dict[str, Any]:
     res = await asyncio.to_thread(auto_tune.propose_change, str(body["key"]), body["value"],
                                   source, note=note)
     if not res.get("applied"):
-        raise HTTPException(status_code=409, detail=res)
+        raise HTTPException(status_code=422 if res.get("reason") == "invalid" else 409, detail=res)
     return res
 
 
 @router.post("/api/v1/tuning/ledger/{change_id}/rollback")
 async def post_rollback(change_id: int, body: dict | None = None) -> dict[str, Any]:
     from ... import auto_tune
-    reason = str((body or {}).get("reason") or "manual_rollback")
+    _require_no_simulation_gate()
+    reason = str((body or {}).get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="body needs a non-empty 'reason'")
     res = await asyncio.to_thread(auto_tune.rollback, change_id, reason=reason, actor="api")
     if not res.get("rolled_back"):
         code = 404 if res.get("reason") == "not_found" else 409

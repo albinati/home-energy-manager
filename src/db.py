@@ -10197,8 +10197,10 @@ def insert_auto_tune_change(
 
 
 def get_auto_tune_changes(limit: int = 20, key: str | None = None,
-                          status: str | None = None) -> list[dict[str, Any]]:
-    """Newest-first ledger rows (``baseline`` / ``evidence`` parsed)."""
+                          status: str | None = None, *, exclude_status: str | None = None,
+                          oldest_first: bool = False) -> list[dict[str, Any]]:
+    """Newest-first ledger rows (``baseline`` / ``evidence`` parsed);
+    ``oldest_first`` orders by id ascending instead."""
     q, args = "SELECT * FROM auto_tune_changes WHERE 1=1", []
     if key:
         q += " AND key = ?"
@@ -10206,7 +10208,10 @@ def get_auto_tune_changes(limit: int = 20, key: str | None = None,
     if status:
         q += " AND status = ?"
         args.append(status)
-    q += " ORDER BY applied_at DESC, id DESC LIMIT ?"
+    if exclude_status:
+        q += " AND status != ?"
+        args.append(exclude_status)
+    q += " ORDER BY id ASC LIMIT ?" if oldest_first else " ORDER BY applied_at DESC, id DESC LIMIT ?"
     args.append(max(1, int(limit)))
     with _lock:
         conn = get_connection()
@@ -10267,5 +10272,34 @@ def auto_tune_frozen_until(key: str, now: datetime | None = None) -> str | None:
                 (key, now_z),
             ).fetchone()
             return r[0] if r and r[0] else None
+        finally:
+            conn.close()
+
+
+def delete_auto_tune_change(change_id: int) -> bool:
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute("DELETE FROM auto_tune_changes WHERE id = ?", (int(change_id),))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def auto_tune_key_summary(now: datetime | None = None) -> dict[str, dict[str, Any]]:
+    """One GROUP BY query: per key ``{active, frozen_until, last_status}``."""
+    now_z = _utc_z(now)
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                """SELECT c.key,
+                          MAX(CASE WHEN c.status = 'evaluating' THEN c.id END),
+                          MAX(CASE WHEN c.frozen_until > ? THEN c.frozen_until END),
+                          (SELECT c2.status FROM auto_tune_changes c2 WHERE c2.key = c.key
+                           ORDER BY c2.id DESC LIMIT 1)
+                   FROM auto_tune_changes c GROUP BY c.key""", (now_z,)).fetchall()
+            return {r[0]: {"active": r[1], "frozen_until": r[2], "last_status": r[3]} for r in rows}
         finally:
             conn.close()

@@ -598,13 +598,25 @@ def build_mcp() -> FastMCP:
         description=(
             "Revert one automated setting change from the auto-tune ledger (#876) to its "
             "previous value and freeze the key (AUTO_TUNE_ROLLBACK_FREEZE_DAYS). Only "
-            "evaluating/kept automated rows; manual rows are never reverted."
+            "the newest evaluating/kept automated row of a key; manual rows are never "
+            "reverted. Default is a dry-run: pass confirmed=True to apply."
         ),
     )
-    def rollback_auto_tune_change(id: int, reason: str = "mcp_rollback") -> dict[str, Any]:
+    def rollback_auto_tune_change(id: int, reason: str = "mcp_rollback",
+                                  confirmed: bool = False) -> dict[str, Any]:
         from . import auto_tune
 
         try:
+            if config.OPENCLAW_READ_ONLY:
+                return {"ok": False, "error": "OPENCLAW_READ_ONLY=true: writes are disabled"}
+            if not confirmed:
+                row = db.get_auto_tune_change(int(id))
+                if row is None:
+                    return {"ok": False, "error": "not_found"}
+                return {"ok": True, "confirmed": False, "id": int(id), "key": row["key"],
+                        "status": row["status"], "would_restore": row["old_value"],
+                        "current": auto_tune.current_value(row["key"]),
+                        "message": "dry-run; pass confirmed=True to apply"}
             res = auto_tune.rollback(int(id), reason=reason, actor="mcp")
             return {"ok": bool(res.get("rolled_back")), **res}
         except Exception as e:

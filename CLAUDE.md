@@ -868,36 +868,52 @@ in `db.py`: `insert/get/update_auto_tune_change(s)`, `get_active_auto_tune_chang
   `set_setting(actor="auto_tune:<source>")`, stores `baseline_json` (`baseline_metrics`: 7-day
   net GBP/day, hours-below-floor/day, shower-shortfall days, peak import kWh/day from
   `cosy_scorecard_daily`; `{}` when none), opens an `evaluating` row, logs `action_log`
-  `auto_tune_apply` (device `auto_tune`). Refusals (`{applied: False, reason}`), checked in
-  this order: `disabled | denylisted | not_allowlisted | invalid | unchanged | busy (one
-  evaluating row) | frozen | step_too_large | drift_cap | away` (+ `ledger_error`: the insert
-  failed after the write, the setting was restored). Step = `auto_tune.STEPS` (SettingSpec has no
+  `auto_tune_apply` (device `auto_tune`); NO Telegram on apply in story 1 (story 2 adds it).
+  Refusals (`{applied: False, reason}`), in this order: `disabled | denylisted | not_allowlisted |
+  cron_reload (spec has cron_reload) | invalid | pinned (a `config._overrides` pin, e.g. a Workbench
+  what-if, shadows the DB: the persisted value is the only reference, and it is refused rather than
+  guessed) | unchanged | busy (one evaluating row) | frozen | step_too_large | drift_cap | away |
+  no_baseline (< 5 usable scorecard days) | changed (the owner wrote between our check and our write)`
+  (+ `ledger_error`: the insert failed after the write; the setting is restored, and one
+  `notify_risk` fires if the restore failed too). Step = `auto_tune.STEPS` (SettingSpec has no
   step; fallback (max-min)/20), enum keys accept any one other value. Drift cap =
   `auto_tune.MAX_DRIFT` (comfort 1.5 C, DHW 3 C, else step x 3) from the owner's newest `manual`
-  value, or the value before the first automated change. `away` = `kv_state vacation_end_at` set
-  or `daikin_holiday_active` with any point true.
+  value, or the value before the first automated change. `away` = `kv_state vacation_end_at` set,
+  preset `vacation`, or `daikin_holiday_active` with any point true. Enum step = adjacent values only.
+  `baseline_metrics` excludes holiday/vacation days from every metric and ends at yesterday in
+  `BULLETPROOF_TIMEZONE` (the scorecard key).
 - **Manual always wins.** `runtime_settings.set_setting` / `delete_setting` call
   `auto_tune.on_manual_change` (never raises). Actors `auto_tune:*` and the internal writers
   (`vacation_end`, `comfort_feedback_auto_tune`, `api_batch_rollback`, `workbench_promote_rollback`)
   are skipped; every other actor (`api`, `mcp`, `api_batch`, `workbench_promote`,
-  `snapshot_restore`) is the owner. For a key on the allowlist or with ledger rows: a `manual` row with
+  `snapshot_restore`) is the owner; a write that does not change the value is ignored. For a key on the allowlist or with ledger rows: a `manual` row with
   `frozen_until = now + AUTO_TUNE_MANUAL_FREEZE_DAYS` (14), and any `evaluating` row of the key ->
-  `superseded_manual` (`evidence {reason: manual_change, actor}`), never rolled back.
+  `superseded_manual` (`evidence {reason: manual_change, actor, manual_id}`), never rolled back. The hook
+  takes the same lock as `propose_change`; if a proposer's write landed AFTER the owner's, the owner's
+  value is restored. A failed batch / workbench promote that is undone (`api_batch_rollback`,
+  `workbench_promote_rollback`) deletes the manual row it had just produced and re-opens the superseded one.
 - **Verbs**: `rollback(id, reason=, evidence=, actor=)` (`set_setting` old value as
   `auto_tune:rollback`, row `rolled_back`, `frozen_until = now + AUTO_TUNE_ROLLBACK_FREEZE_DAYS` (28),
   `action_log auto_tune_rollback`, one `notify_risk` deduped `auto_tune_rollback_<id>`; only
-  `evaluating`/`kept` automated rows), `keep(id, evidence)`, `freeze(id | key=, days=)`,
+  `evaluating`/`kept` automated rows, and only the NEWEST row of its key while the setting still holds its
+  value, else `superseded`), `keep(id, evidence)`, `freeze(id | key=, days=)`,
   `ledger_state(key)`, `ledger_summary()`.
-- **Comfort feedback (#833)** now goes through `propose_change(source="comfort_feedback")` when
-  `AUTO_TUNE_ENABLED`; with the ledger off, `COMFORT_FEEDBACK_AUTO_TUNE=true` keeps its old direct
-  write bit-for-bit (no ledger row, internal actor).
+- **Comfort feedback (#833)** goes through `propose_change(source="comfort_feedback")` when
+  `AUTO_TUNE_ENABLED`. NOTE: with the ledger ON the legacy flag no longer gates anything - the weekly
+  comfort change IS applied even if `COMFORT_FEEDBACK_AUTO_TUNE=false` (the ledger replaces the gate).
+  With the ledger off, `COMFORT_FEEDBACK_AUTO_TUNE=true` keeps its old direct write (no ledger row,
+  internal actor) except that it skips a key the owner froze (`auto_tune_frozen_until`).
 - **API** (`src/api/routers/auto_tune.py`): `GET /api/v1/tuning/ledger?limit=&key=` (viewer),
   `POST .../ledger/propose` (`{key, value, source}`; `manual_test` is stored as `tuning_review`;
   refusal = 409 with `detail.reason`), `POST .../ledger/{id}/rollback` (`{reason}`),
   `POST .../ledger/{id}/freeze` (`{days}`); writes are admin (401 without an admin token, as for every
-  `/api/v1` write). `GET /api/v1/settings` items carry `auto_tune {active, frozen_until, last_status}` for
-  allowlisted / ledger-touched keys. **MCP**: `get_auto_tune_ledger(limit)`, `rollback_auto_tune_change(id, reason)`.
-  Scorecard payload `auto_tune.active_change {id, key, new_value, day_n_of_7}` (as of build time).
+  `/api/v1` write). `REQUIRE_SIMULATION_ID=true` makes `propose` and `rollback` answer 409
+  `simulation_required` (story 1 does not implement the simulate flow for ledger writes; use
+  `PUT /settings/{key}`); `invalid` -> 422, rollback needs a `reason`. `GET /api/v1/settings` items carry `auto_tune {active, frozen_until, last_status}` for
+  allowlisted / ledger-touched keys. **MCP**: `get_auto_tune_ledger(limit)`, `rollback_auto_tune_change(id, reason, confirmed=False)` (dry-run
+  by default; refuses under `OPENCLAW_READ_ONLY`).
+  Scorecard payload `auto_tune.active_change {id, key, new_value, status, day_n_of_7}` for the SCORED day (change
+  applied before the day ended and not evaluated before it started; `day_n_of_7` uncapped).
 - Runtime knobs: `AUTO_TUNE_ENABLED`, `AUTO_TUNE_ALLOWLIST`, `AUTO_TUNE_MANUAL_FREEZE_DAYS`,
   `AUTO_TUNE_ROLLBACK_FREEZE_DAYS`.
 

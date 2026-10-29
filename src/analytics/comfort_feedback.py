@@ -375,7 +375,14 @@ def weekly_job(now: datetime | None = None) -> dict[str, Any] | None:
                               result="success" if res.get("applied") else "skipped",
                               trigger="cron", actor="auto_tune:comfort_feedback")
             elif getattr(config, "COMFORT_FEEDBACK_AUTO_TUNE", False):
-                # Ledger off: the legacy key keeps its bit-for-bit behaviour.
+                # Ledger off: the legacy key keeps its behaviour, except that the
+                # owner's freeze (a recent manual change on the key) still wins.
+                if db.auto_tune_frozen_until(prop["key"]):
+                    db.log_action(device="comfort", action="auto_tune",
+                                  params={**prop, "applied": None, "skipped": "frozen"},
+                                  result="skipped", trigger="cron",
+                                  actor="comfort_feedback_auto_tune")
+                    return summ
                 cur = float(rs.get_setting(prop["key"]))
                 new = max(cur - STEP_C, min(cur + STEP_C, float(prop["suggested"])))
                 rs.set_setting(prop["key"], new, actor="comfort_feedback_auto_tune")

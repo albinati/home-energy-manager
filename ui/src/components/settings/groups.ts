@@ -212,6 +212,10 @@ export const PLAIN_COPY: Record<string, PlainCopy> = {
 // Friendly labels for the Avancado keys; keys without an entry fall back to
 // the raw key (still searchable, description comes from the backend).
 export const KEY_LABELS: Record<string, string> = {
+  AUTO_TUNE_ENABLED: "Ajuste automático ligado",
+  AUTO_TUNE_ALLOWLIST: "Chaves que o ajuste automático pode mexer",
+  AUTO_TUNE_MANUAL_FREEZE_DAYS: "Dias sem ajuste automático após mudança sua",
+  AUTO_TUNE_ROLLBACK_FREEZE_DAYS: "Dias sem ajuste automático após reversão",
   DAIKIN_LWT_SOURCE: "Fonte dos ajustes da Daikin",
   DAIKIN_LWT_COAST_MODE: "Modo de descanso do aquecimento",
   LP_W3_EMERGENCY_FLOOR_C: "Piso de emergência",
@@ -390,6 +394,7 @@ export function isBoolEnum(options: readonly string[] | null | undefined): boole
 
 /** Keys that need a visible warning under the field. */
 export const DANGER: Record<string, string> = {
+  AUTO_TUNE_ENABLED: "Ligado: o sistema passa a mudar sozinho configurações de conforto e água quente (uma por vez, com reversão automática). Suas mudanças manuais sempre vencem.",
   DAIKIN_CONTROL_MODE: "passive = o HEM para de escrever na Daikin (a bomba segue a curva dela).",
   OPTIMIZATION_PRESET: "Muda toda a política da casa. O normal é trocar o modo na Casa; aqui existe só para hóspedes.",
   REQUIRE_SIMULATION_ID: "Ligado: exige simulação antes de qualquer escrita, inclusive scripts e MCP. Desligar abre mão dessa trava.",
