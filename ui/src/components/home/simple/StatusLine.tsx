@@ -30,7 +30,14 @@ export function AgoraLine({ parts, stale }: { parts: string[]; stale: string }) 
   if (parts.length === 0) return null;
   return (
     <p class="hs-agora" title={AGORA_TITLE}>
-      {parts.join(" · ")}{stale}
+      Agora:{" "}
+      {parts.map((t, i) => (
+        <span key={t}>
+          {i > 0 && " · "}
+          <span class="hs-agora-i">{t}</span>
+        </span>
+      ))}
+      {stale}
     </p>
   );
 }

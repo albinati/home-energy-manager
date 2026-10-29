@@ -570,55 +570,66 @@ export function bateriaTile(now: CockpitNow, fronts: PlanFrontsResponse | null):
     else if (r.at) { meaning = `Chega até as ${r.at}`; tone = "ok"; }
   }
   const fl = batteryFlow(now.state);
+  const stale = agoraStale(now);   // no present tense on stale data
   return {
     value: soc != null ? fmt(soc, 0) : null, unit: "%", meaning, next: nextCharge(b, tariff, nowMs, away), tone,
-    ...(fl ? { flow: fl.text, flowTone: fl.tone } : {}),
+    ...(fl ? { flow: fl.text + stale, flowTone: fl.tone } : {}),
   };
 }
 
-type FlowState = { battery_kw?: number | null; grid_kw?: number | null; solar_kw?: number | null } | null | undefined;
+type FlowState = {
+  battery_kw?: number | null; grid_kw?: number | null; solar_kw?: number | null; load_kw?: number | null;
+} | null | undefined;
 const FLOW_DEAD_BAND_KW = 0.05;
+const SRC_MIN_KW = 0.1;
 
 /** Live battery flow in words (pt-BR), from the power balance. battery_kw > 0 =
- *  charging; grid_kw > 0 = import, < 0 = export. null when the reading is absent. */
+ *  charging; grid_kw > 0 = import, < 0 = export. Sun available to the battery is
+ *  the PV surplus after the house load. null when the reading is absent. */
 export function batteryFlow(s: FlowState): { text: string; tone: "charge" | "discharge" | "idle" } | null {
   const b = s?.battery_kw;
   if (b == null || !Number.isFinite(b)) return null;
   if (Math.abs(b) < FLOW_DEAD_BAND_KW) return { text: "parada", tone: "idle" };
   const kw = fmt(Math.abs(b), 1);
   const grid = s?.grid_kw ?? 0;
+  const surplus = Math.max(0, (s?.solar_kw ?? 0) - (s?.load_kw ?? 0));
   if (b > 0) {
-    const src = (s?.solar_kw ?? 0) >= b ? " do sol" : grid > 0.1 ? " da rede" : "";
+    const fromSun = Math.min(b, surplus);
+    const fromGrid = Math.max(0, Math.min(b - fromSun, grid));
+    const src = fromSun >= SRC_MIN_KW && fromGrid >= SRC_MIN_KW ? " do sol e da rede"
+      : fromGrid >= SRC_MIN_KW ? " da rede"
+      : fromSun > 0 ? " do sol" : "";
     return { text: `carregando ${kw} kW${src}`, tone: "charge" };
   }
-  return { text: `descarregando ${kw} kW para ${grid < -0.1 ? "a rede" : "a casa"}`, tone: "discharge" };
+  const toGrid = Math.max(0, -grid - surplus);
+  return { text: `descarregando ${kw} kW para ${toGrid >= SRC_MIN_KW ? "a rede" : "a casa"}`, tone: "discharge" };
 }
 
-/** Signed kW for the Agora line: "+1,2" / "−0,3" / "0,0" (no "-0,0"). */
-function skw(n: number): string {
-  const r = Math.round(Math.abs(n) * 10) / 10;
-  return r === 0 ? "0,0" : `${n < 0 ? "−" : "+"}${fmt(r, 1)}`;
-}
-
-/** House power balance, one row: sol / casa (unsigned) and bateria / rede (signed;
- *  explained once in the title). A null figure is hidden. The battery kW also
- *  appears in the Bateria tile flow line: the one accepted duplicate (the tile is
- *  the battery detail, this row is the house balance). */
+/** House power balance, one row of phrases. bateria / rede use WORDS instead of
+ *  signs (carrega / descarrega, importa / exporta) so the legend is visible on a
+ *  phone; a zero reads "bateria 0,0 kW". A null figure is hidden. The battery kW
+ *  also appears in the Bateria tile flow line: the one accepted duplicate (the
+ *  tile is the battery detail, this row is the house balance; DESIGN.md log). */
 export function agoraParts(now: CockpitNow): string[] {
   const s = now.state;
   const out: string[] = [];
+  const dir = (n: number, pos: string, neg: string) => {
+    const r = Math.round(Math.abs(n) * 10) / 10;
+    return r === 0 ? "0,0" : `${n > 0 ? pos : neg} ${fmt(r, 1)}`;
+  };
   if (s.solar_kw != null) out.push(`sol ${fmt(Math.max(0, s.solar_kw), 1)} kW`);
   if (s.load_kw != null) out.push(`casa ${fmt(Math.max(0, s.load_kw), 1)} kW`);
-  if (s.battery_kw != null) out.push(`bateria ${skw(s.battery_kw)} kW`);
-  if (s.grid_kw != null) out.push(`rede ${skw(s.grid_kw)} kW`);
+  if (s.battery_kw != null) out.push(`bateria ${dir(s.battery_kw, "carrega", "descarrega")} kW`);
+  if (s.grid_kw != null) out.push(`rede ${dir(s.grid_kw, "importa", "exporta")} kW`);
   return out;
 }
-export const AGORA_TITLE = "bateria: + carrega, − descarrega · rede: + importa, − exporta";
+export const AGORA_TITLE = "bateria: carrega / descarrega · rede: importa / exporta";
 const FOX_STALE_S = 300;
 /** " (há N min)" when the Fox reading is older than 5 min, else "". */
 export function agoraStale(now: CockpitNow): string {
   const age = now.freshness?.fox?.age_s;
-  if (age == null || !(age > FOX_STALE_S)) return "";
+  const stale = now.freshness?.fox?.stale === true;
+  if (age == null || !(age > FOX_STALE_S)) return stale && age != null ? ` (há ${Math.max(1, Math.floor(age / 60))} min)` : "";
   const min = Math.floor(age / 60);
   return min >= 60 ? ` (há ${Math.floor(min / 60)} h)` : ` (há ${min} min)`;
 }

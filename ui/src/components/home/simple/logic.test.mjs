@@ -373,8 +373,12 @@ test("local time labels use the house timezone", () => {
 
 test("battery flow wording: source, direction, dead band, null", () => {
   assert.deepEqual(batteryFlow({ battery_kw: 1.2, solar_kw: 1.5, grid_kw: 0 }), { text: "carregando 1,2 kW do sol", tone: "charge" });
-  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 0.2, grid_kw: 1.4 }).text, "carregando 1,2 kW da rede");
-  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 0.2, grid_kw: 0 }).text, "carregando 1,2 kW");
+  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 0.2, load_kw: 0.2, grid_kw: 1.4 }).text, "carregando 1,2 kW da rede");
+  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 0, grid_kw: 0 }).text, "carregando 1,2 kW");
+  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 0.8, load_kw: 0, grid_kw: 0.5 }).text, "carregando 1,2 kW do sol e da rede");
+  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 1.5, load_kw: 1.0, grid_kw: 0.7 }).text, "carregando 1,2 kW do sol e da rede");
+  assert.equal(batteryFlow({ battery_kw: 1.2, solar_kw: 1.0, load_kw: 1.0, grid_kw: 1.2 }).text, "carregando 1,2 kW da rede");
+  assert.equal(batteryFlow({ battery_kw: -0.1, solar_kw: 3, load_kw: 0.5, grid_kw: -2.3 }).text, "descarregando 0,1 kW para a casa");
   assert.deepEqual(batteryFlow({ battery_kw: -0.3, solar_kw: 0, grid_kw: 0 }), { text: "descarregando 0,3 kW para a casa", tone: "discharge" });
   assert.equal(batteryFlow({ battery_kw: -0.3, solar_kw: 0, grid_kw: -0.5 }).text, "descarregando 0,3 kW para a rede");
   assert.deepEqual(batteryFlow({ battery_kw: 0.04 }), { text: "parada", tone: "idle" });
@@ -395,11 +399,15 @@ test("bateriaTile carries the flow line plus SoC and next event", () => {
 
 test("Agora line: figures, signs, hidden nulls, stale suffix", () => {
   const n = cockpit({ state: { solar_kw: 0, load_kw: 0.3, battery_kw: -0.3, grid_kw: 0 } });
-  assert.deepEqual(agoraParts(n), ["sol 0,0 kW", "casa 0,3 kW", "bateria −0,3 kW", "rede 0,0 kW"]);
+  assert.deepEqual(agoraParts(n), ["sol 0,0 kW", "casa 0,3 kW", "bateria descarrega 0,3 kW", "rede 0,0 kW"]);
   assert.deepEqual(agoraParts(cockpit({ state: { solar_kw: 2, load_kw: 0.5, battery_kw: 1.2, grid_kw: -0.3 } })),
-    ["sol 2,0 kW", "casa 0,5 kW", "bateria +1,2 kW", "rede −0,3 kW"]);
+    ["sol 2,0 kW", "casa 0,5 kW", "bateria carrega 1,2 kW", "rede exporta 0,3 kW"]);
   assert.deepEqual(agoraParts(cockpit({ state: { load_kw: 0.5, battery_kw: -0.02, grid_kw: null } })), ["casa 0,5 kW", "bateria 0,0 kW"]);
   assert.equal(agoraStale(cockpit()), "");
+  assert.equal(agoraStale(cockpit({ freshness: { fox: { age_s: 300, stale: false, fetched_at_utc: null } } })), "");
+  assert.equal(agoraStale(cockpit({ freshness: { fox: { age_s: 7500, stale: true, fetched_at_utc: null } } })), " (há 2 h)");
+  const stl = cockpit({ state: { soc_pct: 50, battery_kw: 1.2, grid_kw: 1.3, solar_kw: 0, load_kw: 0.1 }, freshness: { fox: { age_s: 420, stale: true, fetched_at_utc: null } } });
+  assert.equal(bateriaTile(stl, null).flow, "carregando 1,2 kW da rede (há 7 min)");
   assert.equal(agoraStale(cockpit({ freshness: { fox: { age_s: 200, stale: false, fetched_at_utc: null } } })), "");
   assert.equal(agoraStale(cockpit({ freshness: { fox: { age_s: 420, stale: true, fetched_at_utc: null } } })), " (há 7 min)");
 });
