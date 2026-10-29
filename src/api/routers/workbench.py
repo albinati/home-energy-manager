@@ -82,6 +82,13 @@ async def workbench_simulate(body: dict | None = None):
     except lp_overrides.OverrideValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # #876/#790: a tuning review / auto-tune verdict is patching the SHARED config
+    # singleton right now (process-wide, not thread-local); a what-if here would
+    # read its half-patched state and could restore over it.
+    from ... import tuning_review
+    if tuning_review._running:
+        raise HTTPException(status_code=409, detail="a tuning review / auto-tune verdict replay is running; retry in a few minutes")
+
     with lp_overrides.patched_config(overrides) as prior:
         result = run_lp_simulation(allow_daikin_refresh=False)
         applied = {k: overrides[k] for k in overrides if lp_overrides.WHITELIST[k].config_attr in prior}
