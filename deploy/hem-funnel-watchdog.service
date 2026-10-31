@@ -1,0 +1,17 @@
+[Unit]
+Description=HEM Tailscale Funnel public-ingress watchdog
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+# Probes the public funnel outside-in; restarts ONLY tailscaled (needs root +
+# systemctl, so no ProtectSystem=strict). Install notes: deploy/README.md §13.
+Type=oneshot
+EnvironmentFile=-/etc/default/hem-funnel-watchdog
+ExecStart=/usr/local/sbin/hem-funnel-watchdog.sh
+StateDirectory=hem-funnel-watchdog
+TimeoutStartSec=120
+Nice=10
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectHome=yes

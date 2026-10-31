@@ -419,6 +419,45 @@ systemctl restart hem` — sem o token, a rota volta a ser admin-only e o sensor
 passa a levar 401 (nada mais no deploy muda). Revogar/rotacionar um device:
 troca o valor do `HEM_SENSOR_INGEST_TOKEN` + restart + atualiza o YAML.
 
+## 13. Funnel watchdog (host)
+
+Em 2026-10-31 00:20Z o ingresso público do Tailscale Funnel
+(`https://openclaw-overbot.tail0dbf20.ts.net:8443` -> hem-ui) morreu em silêncio
+(TLS nunca completava vindo da internet) enquanto tudo dentro da tailnet seguia
+funcionando. Os sensores ESPHome não fazem buffer: ~10 h de leituras internas
+foram perdidas e nada alertou. `systemctl restart tailscaled` resolveu em ~10 s.
+
+O watchdog (`hem-funnel-watchdog.timer`, a cada 5 min) testa de fora pra dentro:
+resolve o nome com resolver PÚBLICO (`dig @1.1.1.1`, depois `@9.9.9.9`) e fixa a
+conexão no IP do ingresso com `curl --resolve` (o MagicDNS do host iria pela
+tailnet e não provaria nada). Qualquer status HTTP = vivo. 2 falhas seguidas ->
+`systemctl restart tailscaled` + Telegram; no máximo 1 restart por cooldown
+(30 min), depois só 1 alerta "não resolveu"; ao voltar, 1 aviso "Funnel voltou".
+Se todos os resolvers falham, nada é contado. Só `tailscaled` é tocado.
+
+Instalar (como root, na raiz do checkout):
+
+```bash
+install -m 755 deploy/hem-funnel-watchdog.sh /usr/local/sbin/
+install -m 644 deploy/hem-funnel-watchdog.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now hem-funnel-watchdog.timer
+```
+
+Teste único:
+
+```bash
+FUNNEL_DRY_RUN=1 /usr/local/sbin/hem-funnel-watchdog.sh   # só imprime as ações
+systemctl start hem-funnel-watchdog.service; journalctl -u hem-funnel-watchdog -n 20
+```
+
+Ajustes em `/etc/default/hem-funnel-watchdog` (formato `CHAVE=valor`): `FUNNEL_HOST`,
+`FUNNEL_PORT`, `FUNNEL_PATH`, `FUNNEL_RESOLVERS`, `FUNNEL_TIMEOUT_S` (20),
+`FUNNEL_FAIL_THRESHOLD` (2), `FUNNEL_RESTART_COOLDOWN_S` (1800),
+`FUNNEL_STATE_DIR`, `HEM_ENV_FILE` (lê `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`,
+sem `source`), `FUNNEL_DRY_RUN`.
+
+Desligar: `systemctl disable --now hem-funnel-watchdog.timer`.
+
 ## Troubleshooting
 
 | Sintoma | Causa provável | Ação |
