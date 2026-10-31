@@ -20,6 +20,7 @@ application code out of OpenClaw's reach. Deploy/rollback runbook lives at
 | Config file | `/srv/hem/.env` (mounted ro into the container) |
 | Compose | `/srv/hem/compose.yaml` |
 | Systemd unit | `hem.service` (wraps `docker compose up`) |
+| Funnel watchdog | `hem-funnel-watchdog.timer` (host, deploy/README §13) |
 | API server | `http://127.0.0.1:8000` (loopback) + Tailscale interface |
 | MCP transport | `http://127.0.0.1:8000/mcp` (bearer-guarded HTTP, see below) |
 | Build entrypoint | `tini → python -m src.cli serve` (set in `Dockerfile`) |
