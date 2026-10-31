@@ -32,8 +32,8 @@ done
 echo "probe $ip" >> "$SHIM_DIR/calls.log"
 rc=0
 [ -f "$SHIM_DIR/probe_$ip" ] && rc="$(cat "$SHIM_DIR/probe_$ip")"
-if [ "$rc" = "0" ]; then printf '503'; exit 0; fi
-printf '000'
+if [ "$rc" = "0" ]; then printf '503 0.123'; exit 0; fi
+printf '000 0.000'
 exit "$rc"
 """
 
@@ -103,9 +103,10 @@ def w(tmp_path: Path) -> Env:
 
 
 def test_alive_no_action(w: Env) -> None:
-    w.run()
+    res = w.run()
     assert not w.restarts() and not w.telegrams()
     assert w.fails() == 0
+    assert "alive: 10.0.0.1 answered HTTP 503 in 0.123s" in res.stderr
 
 
 def test_single_failure_no_action(w: Env) -> None:
@@ -144,7 +145,8 @@ def test_recovery_message_and_state_reset(w: Env) -> None:
     w.run()
     w.run()
     w.set_probe("10.0.0.1", 0)
-    w.run()
+    res = w.run()
+    assert "recovered after 2 failures / 1 restarts" in res.stderr
     tg = w.telegrams()
     assert len(tg) == 2 and "voltou" in tg[1]
     assert w.fails() == 0
