@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 import subprocess
 from pathlib import Path
 
@@ -38,6 +39,10 @@ exit "$rc"
 
 SYSTEMCTL = """#!/usr/bin/env bash
 echo "systemctl $*" >> "$SHIM_DIR/calls.log"
+case "$*" in
+  *"show -p ActiveEnterTimestamp"*) [ -f "$SHIM_DIR/active_enter" ] && cat "$SHIM_DIR/active_enter"; exit 0;;
+  "restart tailscaled") [ -f "$SHIM_DIR/restart_rc" ] && exit "$(cat "$SHIM_DIR/restart_rc")";;
+esac
 exit 0
 """
 
@@ -59,14 +64,16 @@ class Env:
     def set_probe(self, ip: str, rc: int) -> None:
         (self.shim / f"probe_{ip}").write_text(str(rc))
 
-    def run(self, **extra: str) -> subprocess.CompletedProcess:
+    def run(self, state: bool = True, **extra: str) -> subprocess.CompletedProcess:
         env = {
             "PATH": f"{self.shim}:{os.environ['PATH']}",
             "SHIM_DIR": str(self.shim),
-            "FUNNEL_STATE_DIR": str(self.state),
             "HEM_ENV_FILE": str(self.envfile),
             "HOME": str(self.shim),
+            "TMPDIR": str(self.shim),
         }
+        if state:
+            env["FUNNEL_STATE_DIR"] = str(self.state)
         env.update(extra)
         res = subprocess.run(
             ["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60
@@ -114,7 +121,7 @@ def test_second_failure_restarts_once(w: Env) -> None:
     w.run()
     assert len(w.restarts()) == 1
     assert len(w.telegrams()) == 1
-    assert "reiniciado" in w.telegrams()[0]
+    assert "reiniciando" in w.telegrams()[0]
     assert "bot123:ABC" in w.telegrams()[0]
     assert "HEM host:" in w.telegrams()[0]
 
@@ -128,7 +135,7 @@ def test_cooldown_blocks_second_restart_and_alerts_once(w: Env) -> None:
     assert len(w.restarts()) == 1
     tg = w.telegrams()
     assert len(tg) == 2
-    assert "reiniciado" in tg[0]
+    assert "reiniciando" in tg[0]
     assert "não resolveu" in tg[1]
 
 
@@ -181,3 +188,96 @@ def test_dry_run_hits_nothing(w: Env) -> None:
     res = w.run(FUNNEL_DRY_RUN="1")
     assert not w.restarts() and not w.telegrams()
     assert "DRY-RUN" in res.stderr
+
+
+def test_recent_unit_start_blocks_restart(w: Env) -> None:
+    ts = time.strftime("%a %Y-%m-%d %H:%M:%S UTC", time.gmtime(time.time() - 60))
+    (w.shim / "active_enter").write_text(ts + "\n")
+    w.set_probe("10.0.0.1", 28)
+    w.run()
+    w.run()
+    assert not w.restarts()
+    tg = w.telegrams()
+    assert len(tg) == 1
+    assert "(re)iniciado" in tg[0] and "não resolveu" not in tg[0]
+
+
+def test_zero_cooldown_restarts_again_and_stops_unresolved_noise(w: Env) -> None:
+    w.set_probe("10.0.0.1", 28)
+    w.run(FUNNEL_RESTART_COOLDOWN_S="0")
+    w.run(FUNNEL_RESTART_COOLDOWN_S="0")
+    w.run(FUNNEL_RESTART_COOLDOWN_S="0")
+    assert len(w.restarts()) == 2
+    tg = w.telegrams()
+    assert len(tg) == 2
+    assert "nº 1" in tg[0] and "nº 2" in tg[1]
+    assert not any("não resolveu" in t for t in tg)
+
+
+def test_cooldown_doubles_per_restart(w: Env) -> None:
+    w.set_probe("10.0.0.1", 28)
+    w.run(FUNNEL_RESTART_COOLDOWN_S="100")
+    w.run(FUNNEL_RESTART_COOLDOWN_S="100")
+    assert len(w.restarts()) == 1
+    # after restart 1 the gap is the base 100 s; after restart 2 it doubles to 200 s
+    (w.state / "last_restart_epoch").write_text(str(int(time.time()) - 150))
+    w.run(FUNNEL_RESTART_COOLDOWN_S="100")
+    assert len(w.restarts()) == 2
+    (w.state / "last_restart_epoch").write_text(str(int(time.time()) - 150))
+    w.run(FUNNEL_RESTART_COOLDOWN_S="100")
+    assert len(w.restarts()) == 2
+    (w.state / "last_restart_epoch").write_text(str(int(time.time()) - 250))
+    w.run(FUNNEL_RESTART_COOLDOWN_S="100")
+    assert len(w.restarts()) == 3
+
+
+def test_restart_failure_reported(w: Env) -> None:
+    (w.shim / "restart_rc").write_text("5")
+    w.set_probe("10.0.0.1", 28)
+    w.run()
+    w.run()
+    tg = w.telegrams()
+    assert len(tg) == 2 and "FALHOU (rc=5)" in tg[1]
+    assert (w.state / "last_restart_epoch").exists()
+
+
+def test_corrupt_state_is_tolerated(w: Env) -> None:
+    w.state.mkdir()
+    (w.state / "fails").write_text("garbage\n")
+    (w.state / "last_restart_epoch").write_text("1x\n")
+    w.set_probe("10.0.0.1", 28)
+    w.run()
+    assert w.fails() == 1
+
+
+def test_missing_token_no_telegram(w: Env) -> None:
+    w.envfile.write_text("OTHER=1\n")
+    w.set_probe("10.0.0.1", 28)
+    w.run()
+    w.run()
+    assert len(w.restarts()) == 1
+    assert not w.telegrams()
+
+
+def test_env_parsing_variants(w: Env) -> None:
+    w.envfile.write_text("export TELEGRAM_BOT_TOKEN='1:x'\nTELEGRAM_CHAT_ID=42 # me\n")
+    w.set_probe("10.0.0.1", 28)
+    w.run()
+    w.run()
+    tg = w.telegrams()
+    assert len(tg) == 1
+    assert "bot1:x/sendMessage" in tg[0]
+    assert "chat_id=42" in tg[0] and "#" not in tg[0].split("chat_id=")[1].split()[0]
+
+
+def test_dry_run_without_state_dir_uses_throwaway(w: Env) -> None:
+    w.set_probe("10.0.0.1", 28)
+    res = w.run(state=False, FUNNEL_DRY_RUN="1")
+    assert "throwaway state dir" in res.stderr
+    assert not w.state.exists()
+
+
+def test_script_does_not_source_defaults_file() -> None:
+    text = SCRIPT.read_text()
+    code = [x for x in text.splitlines() if not x.lstrip().startswith("#")]
+    assert not any("/etc/default" in x for x in code)

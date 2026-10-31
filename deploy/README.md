@@ -443,16 +443,23 @@ install -m 644 deploy/hem-funnel-watchdog.{service,timer} /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now hem-funnel-watchdog.timer
 ```
 
-Teste único:
+Teste único (o script NÃO lê `/etc/default/hem-funnel-watchdog`; só o systemd o
+carrega via `EnvironmentFile`. Em execução manual: `set -a; . /etc/default/hem-funnel-watchdog; set +a`
+antes, ou use `systemctl start hem-funnel-watchdog.service`). O dry-run usa um
+diretório de estado descartável (`mktemp -d`) salvo se `FUNNEL_STATE_DIR` for passado:
 
 ```bash
 FUNNEL_DRY_RUN=1 /usr/local/sbin/hem-funnel-watchdog.sh   # só imprime as ações
 systemctl start hem-funnel-watchdog.service; journalctl -u hem-funnel-watchdog -n 20
 ```
 
+Reinícios repetidos: o cooldown dobra a cada reinício (30 -> 60 -> 120 -> 240 min,
+teto `FUNNEL_RESTART_COOLDOWN_MAX_S`=14400); a mensagem traz "reinício nº N" e o
+alerta "não resolveu" some a partir do 2º reinício. O contador zera quando o funnel volta.
+
 Ajustes em `/etc/default/hem-funnel-watchdog` (formato `CHAVE=valor`): `FUNNEL_HOST`,
 `FUNNEL_PORT`, `FUNNEL_PATH`, `FUNNEL_RESOLVERS`, `FUNNEL_TIMEOUT_S` (20),
-`FUNNEL_FAIL_THRESHOLD` (2), `FUNNEL_RESTART_COOLDOWN_S` (1800),
+`FUNNEL_FAIL_THRESHOLD` (2), `FUNNEL_RESTART_COOLDOWN_S` (1800), `FUNNEL_RESTART_COOLDOWN_MAX_S`,
 `FUNNEL_STATE_DIR`, `HEM_ENV_FILE` (lê `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`,
 sem `source`), `FUNNEL_DRY_RUN`.
 
