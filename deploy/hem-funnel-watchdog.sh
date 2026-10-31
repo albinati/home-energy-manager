@@ -116,17 +116,19 @@ resolve_ips() {
 }
 
 probe_ip() { # ip -> 0 when TLS+HTTP completed with any status
-  local code rc=0 errf
+  local out code secs rc=0 errf
   errf="$(mktemp)"
-  code="$(curl -sS -m "$FUNNEL_TIMEOUT_S" \
-    --resolve "${FUNNEL_HOST}:${FUNNEL_PORT}:$1" -o /dev/null -w '%{http_code}' \
+  out="$(curl -sS -m "$FUNNEL_TIMEOUT_S" \
+    --resolve "${FUNNEL_HOST}:${FUNNEL_PORT}:$1" -o /dev/null -w '%{http_code} %{time_total}' \
     "https://${FUNNEL_HOST}:${FUNNEL_PORT}${FUNNEL_PATH}" 2>"$errf")" || rc=$?
+  read -r code secs <<<"$out" || true
   if [ "$rc" -ne 0 ] || [ -z "$code" ] || [ "$code" = "000" ]; then
     log "ingress $1 failed (curl rc=$rc: $(tr '\n' ' ' <"$errf"))"
     rm -f "$errf"
     return 1
   fi
   rm -f "$errf"
+  log "alive: $1 answered HTTP $code in ${secs:-?}s"
 }
 
 if ! ips="$(resolve_ips)"; then
@@ -148,6 +150,7 @@ fails="$(read_num fails 0)"
 if [ "$alive" = "1" ]; then
   if [ -n "$(read_state alerted "")" ]; then
     telegram "Funnel voltou: ingresso público respondendo de novo."
+    log "recovered after $fails failures / $(read_num restarts 0) restarts"
   fi
   if [ "$fails" -gt 0 ]; then
     log "funnel recovered after $fails failure(s)"
