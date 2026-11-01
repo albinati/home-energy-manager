@@ -28,6 +28,7 @@ export interface FoxHealth { in_sync?: boolean | null; actuation_stale?: boolean
 const DEAD_BAND_KW = 0.05;
 const FOX_STALE_S = 300;   // same threshold as agoraStale
 const RESERVE_TOL = 0.5;
+const SOON_MS = 2 * 3600_000;
 
 export function foxModePhrase(mode: string | null | undefined, band?: PlanFrontsTariffWindow | null): string | null {
   switch (mode) {
@@ -42,7 +43,7 @@ export function foxModePhrase(mode: string | null | undefined, band?: PlanFronts
 export function stateWord(
   kw: number | null | undefined, soc?: number | null, reserve?: number | null,
 ): { word: StateWord | null; tone: BatteryCardModel["stateTone"] } {
-  if (soc != null && reserve != null && soc <= reserve + RESERVE_TOL) return { word: "na reserva", tone: "warn" };
+  if (soc != null && reserve != null && soc <= reserve + RESERVE_TOL && (kw == null || kw < DEAD_BAND_KW)) return { word: "na reserva", tone: "warn" };
   if (kw == null || !Number.isFinite(kw)) return { word: null, tone: "idle" };
   if (Math.abs(kw) < DEAD_BAND_KW) return { word: "parada", tone: "idle" };
   return kw > 0 ? { word: "carregando", tone: "charge" } : { word: "descarregando", tone: "discharge" };
@@ -58,7 +59,7 @@ const discharges = (w: BatteryPlanWindow) => (w.discharge_kwh ?? 0) > 0.05 || w.
  *  charge windows from now up to the next discharge or peak. An idle gap
  *  inside the run does not end it, and a PV intermediate is not the target. */
 export function nextTarget(
-  b: PlanFrontsBattery | null, tariff: PlanFrontsResponse["tariff"], nowMs: number,
+  b: PlanFrontsBattery | null, tariff: PlanFrontsResponse["tariff"], nowMs: number, tz?: string,
 ): BatteryCardModel["target"] {
   if (!b) return null;
   const ws = [...(b.windows ?? [])]
@@ -77,7 +78,7 @@ export function nextTarget(
     if (!isCharge(w) || w.soc_end_pct == null || Date.parse(w.start_utc) >= stop) continue;
     if (!best || w.soc_end_pct > (best.soc_end_pct as number)) best = w;
   }
-  return best ? { pct: Math.round(best.soc_end_pct as number), at: best.end_local || localHHMM(best.end_utc) } : null;
+  return best ? { pct: Math.round(best.soc_end_pct as number), at: best.end_local || localHHMM(best.end_utc, tz) } : null;
 }
 
 /** First peak band that has not ended yet (Cosy or Agile tier keys alike). */
@@ -120,10 +121,31 @@ export function nightRow(
 
 /** Planned to hit the reserve before the next charge (not "already there": the state word covers that). */
 export function runwayRow(b: PlanFrontsBattery | null, tariff: PlanFrontsResponse["tariff"], nowMs: number, tz?: string): BatteryRow | null {
-  if (!b) return null;
+  if (!b || b.reserve_pct == null) return null;
   const r = batteryRunway(b, tariff, nowMs, tz);
   if (r.kind !== "empty" || r.now || !r.at) return null;
-  return { key: "autonomia", label: "Autonomia", text: `Pode chegar à reserva às ${r.at}, antes da próxima carga`, tone: "warn" };
+  // Next grid charge after the crossing: within 2 h it is the planned drain before a cheap band.
+  const cross = runwayCrossingMs(b, nowMs);
+  const nextCharge = (b.windows ?? []).filter((w) => w.kind === "grid_charge" && Date.parse(w.start_utc) >= (cross ?? nowMs))
+    .map((w) => Date.parse(w.start_utc)).sort((a, c) => a - c)[0];
+  const soon = cross != null && nextCharge != null && nextCharge - cross <= SOON_MS;
+  return { key: "autonomia", label: "Autonomia", text: `Pode chegar à reserva às ${r.at}, antes da próxima carga`, tone: soon ? "dim" : "warn" };
+}
+
+/** When the plan crosses the reserve (same interpolation as batteryRunway). */
+function runwayCrossingMs(b: PlanFrontsBattery, nowMs: number): number | null {
+  const reserve = b.reserve_pct ?? 10;
+  const ws = [...(b.windows ?? [])].sort((a, c) => Date.parse(a.start_utc) - Date.parse(c.start_utc));
+  for (const w of ws) {
+    const st = Date.parse(w.start_utc), e = Date.parse(w.end_utc);
+    if (e <= nowMs) continue;
+    const a = w.soc_start_pct, c = w.soc_end_pct;
+    if (a != null && c != null && c <= reserve + RESERVE_TOL && a > c) {
+      const f = a <= reserve ? 0 : (a - reserve) / (a - c);
+      return st + f * (e - st);
+    }
+  }
+  return null;
 }
 
 export function agoraRow(now: CockpitNow, tariff: PlanFrontsResponse["tariff"], nowMs: number): BatteryRow | null {
@@ -156,6 +178,6 @@ export function batteryCardModel(
     agoraRow(now, tariff, nowMs), peakRow(b, tariff, nowMs), nightRow(b, tariff, nowMs, isAway(now)),
     runwayRow(b, tariff, nowMs, tz), inversorRow(now, health),
   ].filter((r): r is BatteryRow => r != null);
-  return { socPct: soc, stateWord: sw.word, stateTone: sw.tone, reservePct: reserve, target: nextTarget(b, tariff, nowMs), rows };
+  return { socPct: soc, stateWord: sw.word, stateTone: sw.tone, reservePct: reserve, target: nextTarget(b, tariff, nowMs, tz), rows };
 }
 

@@ -80,12 +80,19 @@ test("SoC at the reserve: warn state 'na reserva'", () => {
   assert.equal(m.stateWord, "na reserva");
   assert.equal(m.stateTone, "warn");
   assert.equal(batteryCardModel(now({ state: { soc_pct: 16, battery_kw: -0.3 } }), mkFronts()).stateWord, "descarregando");
+  const ch = batteryCardModel(now({ state: { soc_pct: 15, battery_kw: 3 } }), mkFronts());
+  assert.equal(ch.stateWord, "carregando");
+  assert.equal(ch.stateTone, "charge");
 });
 
 test("runway warns when the plan empties the battery before the next charge", () => {
-  const f = mkFronts({ windows: [win("self_use", "15:00", "20:00", 60, 15, 4), win("grid_charge", "22:00", "00:00", 15, 40)] });
+  const f = mkFronts({ windows: [win("self_use", "15:00", "20:00", 60, 15, 4), win("grid_charge", "23:00", "00:00", 15, 40)] });
   const r = row(batteryCardModel(now({ state: { soc_pct: 60, battery_kw: -1 } }), f), "autonomia");
-  assert.equal(r.tone, "warn");
+  assert.equal(r.tone, "warn");   // reserve crossed 20:00, next charge 23:00 (>2 h)
+  const near = mkFronts({ windows: [win("self_use", "15:00", "20:00", 60, 15, 4), win("grid_charge", "21:00", "00:00", 15, 40)] });
+  assert.equal(row(batteryCardModel(now({ state: { soc_pct: 60, battery_kw: -1 } }), near), "autonomia").tone, "dim");
+  const noRes = mkFronts({ windows: f.battery.windows, reserve_pct: null });
+  assert.equal(row(batteryCardModel(now({ state: { soc_pct: 60, battery_kw: -1 } }), noRes), "autonomia"), undefined);
   assert.match(r.text, /reserva às \d\d:\d\d/);
   assert.equal(row(batteryCardModel(now(), mkFronts()), "autonomia"), undefined);
 });
@@ -107,10 +114,10 @@ test("target: highest SoC of the run, not a PV intermediate or an idle split; st
 });
 
 test("Pico: Agile tier keys, first peak not ended, 'buys' drops the kWh", () => {
-  const agile = cosy("dyn_cheap", "dyn_peak", "dyn_std");
-  const f = mkFronts({ by_band: bands("dyn_peak", "dyn_cheap") }, agile);
+  const agile = cosy("very_cheap", "severe_peak", "mid");
+  const f = mkFronts({ by_band: bands("severe_peak", "very_cheap") }, agile);
   assert.equal(row(batteryCardModel(now(), f), "pico").tone, "ok");
-  const buys = mkFronts({ by_band: bands("dyn_peak", "dyn_cheap").map((b, i) => (i === 1 ? { ...b, planned_import_kwh: 1.34 } : b)) }, agile);
+  const buys = mkFronts({ by_band: bands("severe_peak", "very_cheap").map((b, i) => (i === 1 ? { ...b, planned_import_kwh: 1.34 } : b)) }, agile);
   const r = row(batteryCardModel(now(), buys), "pico");
   assert.equal(r.text, "Precisa comprar da rede");
   assert.equal(r.tone, "warn");
