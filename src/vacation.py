@@ -756,10 +756,10 @@ def set_preset(
 
 
 def persist_setting(key: str, value: Any, *, actor: str = "api") -> Any:
-    """``rts.set_setting`` that first drops an in-memory ``config`` override of the
-    preset / return-time keys (an override shadows the DB for the process lifetime)."""
+    """``rts.set_setting`` that first drops any in-memory ``config`` override of the
+    key (an override shadows the DB for the process lifetime; an owner write must
+    win, #790)."""
     from . import runtime_settings as rts
 
-    if key in ("OPTIMIZATION_PRESET", "VACATION_RETURN_AT"):
-        config.clear_override(key)
+    config.clear_override(key)
     return rts.set_setting(key, value, actor=actor)

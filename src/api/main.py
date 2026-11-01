@@ -2408,6 +2408,7 @@ async def settings_put(key: str, payload: dict, x_simulation_id: str | None = He
         info = _vac.after_settings_applied(prev_preset, vac_changes, actor="api")
         if info is not None:
             out["vacation"] = info
+    _invalidate_plan_fronts()
     return out
 
 
@@ -4236,6 +4237,7 @@ async def optimization_propose(include_plan: bool = False, x_simulation_id: str 
         summary=result.get("strategy") or "",
         plan=result if include_plan else None,
     )
+    _invalidate_plan_fronts()
     return resp
 
 
@@ -4958,6 +4960,17 @@ async def settings_simulate(key: str, body: dict):
     return _register_diff(_diffs.diff_setting_change(key, body.get("value")))
 
 
+def _invalidate_plan_fronts() -> None:
+    """A settings write or replan must show on the next /plan/fronts read, not
+    after the 60 s response cache expires. Never blocks the write."""
+    try:
+        from ..analytics import plan_fronts as _pf
+
+        _pf.invalidate_cache()
+    except Exception:  # noqa: BLE001
+        logger.debug("plan_fronts cache invalidation failed (non-fatal)", exc_info=True)
+
+
 @app.post("/api/v1/settings/batch/simulate")
 async def settings_batch_simulate(body: dict):
     """Simulate N settings changes in one diff. Body: ``{changes: {KEY: value, ...}}``."""
@@ -5041,6 +5054,7 @@ async def settings_batch_apply(
         info = _vac.after_settings_applied(prev_preset, changes, actor="api_batch")
         if info is not None:
             out["vacation"] = info
+    _invalidate_plan_fronts()
     return out
 
 
