@@ -15,7 +15,7 @@
     "exactOptionalPropertyTypes": false,
 
     "isolatedModules": true,
-    "allowImportingTsExtensions": false,
+    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

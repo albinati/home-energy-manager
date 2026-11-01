@@ -1,0 +1,17 @@
+/* Home v3 Bateria card (#899). Tokens only. */
+.hv3-batt { background: var(--bg-card); border-radius: var(--radius-lg); padding: var(--space-5); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: var(--space-3); }
+.hv3-batt .hs-eyebrow { margin-bottom: 0; }
+.hv3-batt-state { margin-left: var(--space-3); font-size: var(--font-md); font-weight: 600; color: var(--text-dim); }
+.hv3-batt-state--charge { color: var(--batt); }
+.hv3-batt-state--discharge { color: var(--text); }
+.hv3-batt-bar { position: relative; height: 10px; border-radius: var(--radius-sm); background: var(--bg-card-3); }
+.hv3-batt-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: var(--radius-sm); background: var(--batt); }
+.hv3-batt-reserve { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text); opacity: 0.6; }
+.hv3-batt-scale { display: flex; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-2); font-size: var(--font-2xs); color: var(--text-mute); }
+.hv3-batt-rows { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: var(--space-2) var(--space-4); font-size: var(--font-sm); }
+.hv3-batt-rows dt { color: var(--text-mute); }
+.hv3-batt-rows dd { margin: 0; color: var(--text); }
+.hv3-batt-rows dd.hv3-tone-ok { color: var(--ok); }
+.hv3-batt-rows dd.hv3-tone-warn { color: var(--warn); }
+.hv3-batt-note { margin: 0; font-size: var(--font-2xs); color: var(--text-mute); }
+.hv3-batt-state--warn { color: var(--warn); }
