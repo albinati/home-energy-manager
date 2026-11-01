@@ -2739,16 +2739,25 @@ async def dhw_boost_status():
 @app.post("/api/v1/dhw/boost/simulate")
 async def dhw_boost_simulate():
     try:
-        return _register_diff(dhw_boost.simulate()["diff"])
+        return _register_diff((await asyncio.to_thread(dhw_boost.simulate))["diff"])
     except dhw_boost.BoostBlocked as exc:
         raise _boost_http(exc)
+
+
+def _boost_rate_limit(action_type: str) -> None:
+    allowed, wait_time = safeguards.check_rate_limit(action_type)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=f"Rate limited. Try again in {wait_time:.1f} seconds.")
 
 
 @app.post("/api/v1/dhw/boost")
 async def dhw_boost_apply(x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     _enforce_simulation_id("dhw.boost", x_simulation_id)
+    _boost_rate_limit("dhw.boost")
     try:
-        return await asyncio.to_thread(dhw_boost.apply)
+        out = await asyncio.to_thread(dhw_boost.apply)
+        safeguards.record_action_time("dhw.boost")
+        return out
     except dhw_boost.BoostBlocked as exc:
         raise _boost_http(exc)
     except ValueError as exc:
@@ -2760,7 +2769,7 @@ async def dhw_boost_apply(x_simulation_id: str | None = Header(None, alias="X-Si
 @app.post("/api/v1/dhw/boost/undo/simulate")
 async def dhw_boost_undo_simulate():
     try:
-        return _register_diff(dhw_boost.simulate_undo()["diff"])
+        return _register_diff((await asyncio.to_thread(dhw_boost.simulate_undo))["diff"])
     except dhw_boost.BoostBlocked as exc:
         raise _boost_http(exc)
 
@@ -2768,8 +2777,11 @@ async def dhw_boost_undo_simulate():
 @app.post("/api/v1/dhw/boost/undo")
 async def dhw_boost_undo(x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     _enforce_simulation_id("dhw.boost_undo", x_simulation_id)
+    _boost_rate_limit("dhw.boost_undo")
     try:
-        return await asyncio.to_thread(dhw_boost.undo)
+        out = await asyncio.to_thread(dhw_boost.undo)
+        safeguards.record_action_time("dhw.boost_undo")
+        return out
     except dhw_boost.BoostBlocked as exc:
         raise _boost_http(exc)
 

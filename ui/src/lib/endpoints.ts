@@ -286,10 +286,15 @@ export interface DhwBoostStatus {
   blocked: { error: string; message: string } | null;
   target_c: number;
   hold_hours: number;
+  /** Inside the firmware reheat deadband the boost also turns Powerful on. */
+  uses_powerful: boolean;
+  /** Calibrated reheat differential (C). */
+  reheat_differential_c: number;
   /** Next weekly firmware stand-off window; null when not configured. */
   legionella: { start_utc: string; end_utc: string } | null;
 }
-export interface DhwBoostApplied { success: boolean; row_id: number; target_c: number; until_utc: string }
+export interface DhwBoostApplied { success: boolean; row_id: number; target_c: number; until_utc: string; powerful?: boolean }
+export interface DhwBoostUndone { success: boolean; restored: boolean; skipped: string | null; pending: boolean }
 
 export const getDhwBoost = () => getJson<DhwBoostStatus>("/dhw/boost");
 export const simulateDhwBoost = () => postJson<ActionDiffResponse>("/dhw/boost/simulate", {});
@@ -297,4 +302,4 @@ export const applyDhwBoost = (simulationId: string) =>
   postWithSimId<DhwBoostApplied>("/dhw/boost", simulationId);
 export const simulateDhwBoostUndo = () => postJson<ActionDiffResponse>("/dhw/boost/undo/simulate", {});
 export const applyDhwBoostUndo = (simulationId: string) =>
-  postWithSimId<{ success: boolean }>("/dhw/boost/undo", simulationId);
+  postWithSimId<DhwBoostUndone>("/dhw/boost/undo", simulationId);

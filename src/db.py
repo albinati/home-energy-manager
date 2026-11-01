@@ -436,6 +436,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     as_cols = {str(r[1]) for r in cur.fetchall()}
     if "overridden_by_user_at" not in as_cols:
         conn.execute("ALTER TABLE action_schedule ADD COLUMN overridden_by_user_at TEXT")
+    # #901: at most ONE live "Banho extra hoje" row (active = holding or restore
+    # still pending), enforced by the DB, not by a check-then-insert race.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_action_schedule_one_user_boost "
+        "ON action_schedule(action_type) "
+        "WHERE action_type = 'tank_user_boost' AND status = 'active'"
+    )
 
     # V2: meteo_forecast (may already exist via SCHEMA constant)
     conn.execute(
@@ -2060,11 +2067,58 @@ def finish_user_boost(action_id: int, *, end_time_iso: str, note: str) -> None:
             conn.close()
 
 
+def insert_user_boost_row(
+    *,
+    plan_date: str,
+    start_time: str,
+    end_time: str,
+    params: dict[str, Any],
+    overridden_at: str,
+) -> int:
+    """ONE atomic INSERT of the boost row, already ``active`` and flagged
+    overridden (no window in which the reconciler sees it half-built). The
+    partial unique index ``idx_action_schedule_one_user_boost`` rejects a second
+    live boost: raises ``sqlite3.IntegrityError``."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """INSERT INTO action_schedule
+                   (date, start_time, end_time, device, action_type, params, status,
+                    created_at, overridden_by_user_at)
+                   VALUES (?, ?, ?, 'daikin', ?, ?, 'active', ?, ?)""",
+                (plan_date, start_time, end_time, USER_BOOST_ACTION_TYPE,
+                 json.dumps(params), overridden_at, overridden_at),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+
+def expire_user_boost(action_id: int, *, end_time_iso: str, note: str) -> None:
+    """The hold is over but the tank has NOT been handed back yet: cut the window
+    to ``end_time_iso`` and CLEAR the override flag (the plan is no longer held),
+    yet keep the row ``active`` so the heartbeat retries the restore."""
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "UPDATE action_schedule SET end_time = ?, overridden_by_user_at = NULL, "
+                "error_msg = ? WHERE id = ? AND status = 'active'",
+                (end_time_iso, note, action_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def find_recent_user_override(
     device: str,
     *,
     within_hours: float,
     now_utc: datetime | None = None,
+    exclude_action_types: tuple[str, ...] = (),
     respect_until_window_end: bool = False,
 ) -> dict[str, Any] | None:
     """Epic 14 (#386): the most-recent ``user_overridden`` action_schedule row
@@ -2090,6 +2144,9 @@ def find_recent_user_override(
     now = now_utc or datetime.now(UTC)
     clauses: list[str] = ["device = ?", "overridden_by_user_at IS NOT NULL"]
     params: list[Any] = [device]
+    if exclude_action_types:
+        clauses.append("action_type NOT IN (" + ",".join("?" * len(exclude_action_types)) + ")")
+        params.extend(exclude_action_types)
     time_terms: list[str] = []
     if within_hours > 0:
         # overridden_by_user_at is stored in +00:00 form (datetime.isoformat).
@@ -4988,6 +5045,9 @@ def get_dhw_boost_windows(start_date: str, end_date: str) -> list[tuple[str, str
       forecast budgets separately (the boost ramp in dhw_policy). ``skipped``
       is included: a skipped boost leaves boost-sized COMMITTED forecast
       against ordinary actuals, poisoning the ratio the other way.
+    * every ``tank_user_boost`` ("Banho extra hoje", #901) in any terminal
+      status: the finished row no longer carries the override flag, yet the
+      Powerful/hot-tank energy it caused is not the ordinary schedule's.
     * any tank action a user manually overrode (``overridden_by_user_at``) —
       hand-set tank state produces energy the schedule never predicted.
 
@@ -5003,6 +5063,8 @@ def get_dhw_boost_windows(start_date: str, end_date: str) -> list[tuple[str, str
                      AND (
                        (action_type = 'tank_negative_boost'
                         AND status IN ('completed', 'active', 'failed', 'skipped'))
+                       OR (action_type = 'tank_user_boost'
+                           AND status IN ('completed', 'active', 'failed', 'skipped'))
                        OR (action_type LIKE 'tank_%'
                            AND overridden_by_user_at IS NOT NULL)
                      )""",

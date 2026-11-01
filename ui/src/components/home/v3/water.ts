@@ -31,7 +31,7 @@ export function waterHead(
   tk: PlanFrontsTank | null | undefined,
   tankNow: number | null | undefined,
   nowMs: number,
-  opts: { holidayOff: boolean; boostUntil?: string | null; boostTarget?: number | null } = { holidayOff: false },
+  opts: { holidayOff: boolean; boostUntil?: string | null; boostTarget?: number | null; differential?: number | null } = { holidayOff: false },
 ): WaterHead {
   const tank = tankNow ?? tk?.tank_now_c ?? null;
   if (opts.holidayOff) return { tank, state: "off", text: "desligada (modo férias)", target: null };
@@ -46,10 +46,15 @@ export function waterHead(
     (w) => Date.parse(w.start_utc) <= nowMs && nowMs < Date.parse(w.end_utc),
   );
   if (win?.kind === "setback") return { tank, state: "eco", text: `economia (meta ${c0(target)} °C)`, target };
-  const heating = (win?.kind === "warmup" || win?.kind === "boost") && tank != null && tank <= target - 1;
+  // "aquecendo" is only claimed when the firmware really reheats: a warm-up/boost
+  // window is open AND the tank is further under target than the calibrated
+  // reheat differential. Otherwise just state the target.
+  const diff = opts.differential;
+  const heating = diff != null && (win?.kind === "warmup" || win?.kind === "boost")
+    && tank != null && tank <= target - diff;
   return heating
     ? { tank, state: "heating", text: `aquecendo até ${c0(target)} °C`, target }
-    : { tank, state: "holding", text: `mantendo ${c0(target)} °C`, target };
+    : { tank, state: "holding", text: `meta ${c0(target)} °C`, target };
 }
 
 /** "Depois" row. aguaTile().next is "Próximo: 16:00 baixa para 37 ..."; the row
@@ -60,7 +65,7 @@ export function afterRow(
   boost: { until: string | null; target: number | null } | null,
 ): string | null {
   if (boost?.until) {
-    return `Banho extra segura a meta até ${boost.until}, depois volta ao plano`;
+    return "Volta ao plano quando o banho extra acabar";
   }
   if (!next) return null;
   const s = next.replace(/^Próximo:\s*/, "").trim();
@@ -115,18 +120,31 @@ export function boostView(
 
 export const hhmm = (iso: string, tz?: string): string => localHHMM(iso, tz);
 
-/** Confirm copy: says exactly what the backend does (target now, plan hands
- *  off for `holdHours`, then resumes). No money figure: none is computed. */
+/** Explicit band wording; unknown kinds say nothing. */
+export function bandText(kind: string | undefined): string {
+  switch (kind) {
+    case "negative": return "Agora o preço é negativo.";
+    case "solar_charge": return "Agora há sobra de sol.";
+    case "cheap": return "Agora é faixa barata.";
+    case "standard": return "Agora é faixa dia: custa mais que na barata.";
+    case "peak":
+    case "peak_export": return "Agora é pico: custa mais.";
+    default: return "";
+  }
+}
+
+/** Confirm copy: says exactly what the backend does (target now, Powerful when
+ *  the gap is inside the firmware deadband, plan hands off for `hold_hours`,
+ *  then resumes). No money figure: none is computed. */
 export function confirmCopy(
-  st: { target_c: number; hold_hours: number },
+  st: { target_c: number; hold_hours: number; uses_powerful?: boolean },
   until: string | null,
   bandKind: string | undefined,
 ): string {
   const hold = `${String(st.hold_hours).replace(".", ",")} h`;
-  const band =
-    bandKind === "cheap" ? " Agora é faixa barata."
-    : bandKind === "peak" ? " Agora é horário de pico: aquecer agora custa mais."
-    : bandKind ? " Agora é faixa dia: aquecer agora custa mais que na barata."
-    : "";
-  return `Aquece o tanque até ${c0(st.target_c)} °C agora. O plano não mexe nele por ${hold}${until ? ` (até ${until})` : ""} e depois volta ao normal.${band}`;
+  const heat = st.uses_powerful
+    ? `Liga o modo Powerful e aquece até ${c0(st.target_c)} °C agora (pode usar a resistência, mais cara).`
+    : `Aquece o tanque até ${c0(st.target_c)} °C agora.`;
+  const band = bandText(bandKind);
+  return `${heat} O plano não mexe no tanque por ${hold}${until ? ` (até ${until})` : ""} e depois volta ao normal.${band ? ` ${band}` : ""}`;
 }

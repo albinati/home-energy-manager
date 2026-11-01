@@ -12,6 +12,7 @@ from . import db, dhw_policy
 from .config import config
 from .daikin.client import DaikinClient, DaikinError
 from .daikin_bulletproof import (
+    TANK_WRITE_LOCK,
     apply_comfort_restore,
     apply_scheduled_daikin_params,
     daikin_device_matches_params,
@@ -159,22 +160,90 @@ _DEADBAND_FORCE_LOGGED: set[int] = set()
 # audit row per held plan row, not one per heartbeat tick).
 _BOOST_HOLD_LOGGED: set[int] = set()
 
-# Cloud-echo grace after a boost write: right after the PATCH a stale Onecta
-# snapshot can still show the old target, which would make the hold look
-# "reverted" and let a planned row overwrite the boost.
-_BOOST_FRESH_MINUTES = 5
+# Right after a boost write the Onecta cache is stale until its next refresh, so
+# the hold must NOT depend on a fresh device read: the boost counts as in effect
+# for as long as its row is active, UNLESS a device read taken well AFTER the
+# write shows a target that is no longer the boost's (the user changed it).
+_BOOST_READ_MARGIN_S = 120.0
 
 
-def _boost_fresh(src: dict[str, Any], now_utc: datetime) -> bool:
+def _device_read_wall() -> float | None:
+    """Epoch seconds of the device snapshot the heartbeat is looking at."""
     try:
-        at = _parse_utc(str(src.get("overridden_by_user_at")))
+        from .daikin import service as _svc
+
+        return _svc.get_cached_devices(allow_refresh=False, actor="boost_hold").fetched_at_wall
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _boost_params(row: dict[str, Any]) -> dict[str, Any]:
+    p = row.get("params") or {}
+    if isinstance(p, str):
+        try:
+            p = json.loads(p)
+        except (json.JSONDecodeError, TypeError):
+            p = {}
+    return p
+
+
+def _active_boost_row(now_utc: datetime) -> dict[str, Any] | None:
+    """The boost row currently HOLDING the plan (flagged, window still open)."""
+    try:
+        for row in db.get_active_user_boost_rows():
+            if not row.get("overridden_by_user_at"):
+                continue
+            if _parse_utc(row["end_time"]) > now_utc:
+                return row
+    except Exception as exc:  # noqa: BLE001 - never block a fire on this lookup
+        logger.debug("boost lookup failed (non-fatal): %s", exc)
+    return None
+
+
+def _boost_in_effect(row: dict[str, Any], dev: Any) -> bool:
+    p = _boost_params(row)
+    tgt = p.get("boost_target_c")
+    live = getattr(dev, "tank_target", None)
+    read = _device_read_wall()
+    try:
+        at = _parse_utc(str(row.get("overridden_by_user_at"))).timestamp()
     except (ValueError, TypeError):
+        return True
+    if (
+        read is not None and read > at + _BOOST_READ_MARGIN_S
+        and live is not None and tgt is not None
+        and abs(float(live) - float(tgt)) > float(config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C)
+    ):
+        return False  # a post-write read shows someone moved it: not ours to hold
+    return True
+
+
+def _boost_holds_row(row: dict[str, Any], apply_params: dict[str, Any], dev: Any) -> bool:
+    """Hold only rows that would UNDO the boost: turn the tank off or lower its
+    target under the boost's. Rows at/above the boost target and Powerful rows
+    (a paid negative-price boost) still fire."""
+    if not _is_tank_action(apply_params):
         return False
-    return timedelta(0) <= now_utc - at < timedelta(minutes=_BOOST_FRESH_MINUTES)
+    if apply_params.get("tank_powerful"):
+        return False
+    if not _boost_in_effect(row, dev):
+        return False
+    tol = float(config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C)
+    tgt = _boost_params(row).get("boost_target_c")
+    if "tank_power" in apply_params and not bool(apply_params["tank_power"]):
+        return True
+    if "tank_temp" in apply_params and tgt is not None:
+        return float(apply_params["tank_temp"]) < float(tgt) - tol
+    return False
 
 
 def _iso_z(dt: datetime) -> str:
     return dt.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+#: A restore that still cannot be written this long after the hold ended is
+#: abandoned (the plan's own rows have long since taken the tank over).
+_BOOST_RESTORE_GIVE_UP_HOURS = 12.0
 
 
 def end_user_boost(
@@ -188,56 +257,71 @@ def end_user_boost(
 ) -> dict[str, Any]:
     """End a "Banho extra hoje" row and hand the tank back to the plan.
 
-    ``reason`` is ``"expired"`` (the hold ran out) or ``"undo"`` (the owner
-    asked). The row is closed FIRST (completed, window cut to now, override flag
-    cleared) so ``_scheduled_tank_state`` no longer sees the boost as the owner
-    of the tank; then the tank target is re-commanded to whatever the schedule
-    says right now (``NORMAL_C`` when no row covers now - the same fallback as
-    boot recovery). Honours the usual gates: read-only, passive, holiday (via
-    ``apply_scheduled_daikin_params``) and the legionella stand-off (the
-    firmware owns the tank, nothing is written). Returns ``{"restored": bool,
-    "target_c": float | None, "skipped": str | None}``.
+    ``reason`` is ``"expired"`` or ``"undo"``. The hold is released FIRST (window
+    cut to now, override flag cleared) so the plan is no longer held and
+    ``_scheduled_tank_state`` does not see the boost as the tank's owner. Then
+    the target the schedule asks for right now (``NORMAL_C`` when no row covers
+    now, as boot recovery does) is re-commanded, with Powerful off.
+
+    The row is only CLOSED once the tank is really handed back (written, or the
+    device already matches). If the write is not possible (read-only, passive,
+    holiday, legionella stand-off, write error) the row stays ``active`` with
+    ``out["pending"] = True`` and ``_check_user_boost_expiry`` retries on later
+    ticks until it can write, or until a plan row that started after the hold has
+    taken the tank over. Returns ``{"restored", "target_c", "skipped", "error",
+    "pending"}``.
     """
     aid = int(row["id"])
-    db.finish_user_boost(aid, end_time_iso=_iso_z(now_utc), note=f"boost {reason}")
+    db.expire_user_boost(aid, end_time_iso=_iso_z(now_utc), note=f"boost {reason}: restore pending")
     _BOOST_HOLD_LOGGED.clear()
-    out: dict[str, Any] = {"restored": False, "target_c": None, "skipped": None}
-    skipped: str | None = None
+    out: dict[str, Any] = {
+        "restored": False, "target_c": None, "skipped": None, "error": None, "pending": False,
+    }
     planned: dict[str, Any] | None = None
     if config.OPENCLAW_READ_ONLY:
-        skipped = "read_only"
+        out["skipped"] = "read_only"
     elif config.DAIKIN_CONTROL_MODE != "active":
-        skipped = "passive"
+        out["skipped"] = "passive"
     elif in_legionella_standoff(now_utc):
-        skipped = "legionella_standoff"
+        out["skipped"] = "legionella_standoff"
     else:
         planned, source, _row = _scheduled_tank_state(now_utc)
         if source == "user_override":
-            skipped = "user_override"
+            # A user hand-set the tank after the hold: theirs to keep, nothing to restore.
+            out["restored"] = True
+            out["skipped"] = "user_override"
+            planned = None
         elif planned is None:
             planned = {
                 "tank_powerful": False,
                 "tank_temp": float(config.DHW_TEMP_NORMAL_C),
                 "tank_power": True,
             }
-    error: str | None = None
-    if skipped is None and planned is not None:
+        if planned is not None and holiday_blocks_params(dev, planned):
+            out["skipped"] = "holiday"
+            planned = None
+    if planned is not None:
+        out["target_c"] = float(planned.get("tank_temp", config.DHW_TEMP_NORMAL_C))
         try:
-            out["restored"] = bool(
+            if daikin_device_matches_params(dev, planned):
+                out["restored"] = True  # the device already holds the plan's state
+            else:
                 apply_scheduled_daikin_params(dev, client, planned, trigger=trigger)
-            )
-            out["target_c"] = float(planned.get("tank_temp", config.DHW_TEMP_NORMAL_C))
+                out["restored"] = True
         except (DaikinError, ValueError) as exc:
-            error = str(exc)
+            out["error"] = str(exc)
             logger.warning("boost %s: restoring the planned tank target failed: %s", reason, exc)
-    out["skipped"] = skipped
+    out["pending"] = not out["restored"]
+    if out["restored"]:
+        db.finish_user_boost(aid, end_time_iso=_iso_z(now_utc), note=f"boost {reason}")
     db.log_action(
         device="daikin",
         action="dhw_user_boost_end",
         params={"row_id": aid, "reason": reason, **out},
-        result="failure" if error else ("skipped" if skipped else "success"),
+        # Only a real hand-back is "success"; a skipped/failed one is not.
+        result="success" if out["restored"] else ("failure" if out["error"] else "skipped"),
         trigger=trigger,
-        error_msg=error or skipped,
+        error_msg=out["error"] or out["skipped"],
     )
     return out
 
@@ -245,7 +329,8 @@ def end_user_boost(
 def _check_user_boost_expiry(
     dev: Any, client: DaikinClient, now_utc: datetime, *, trigger: str,
 ) -> None:
-    """Close boost rows whose hold has run out (any plan date)."""
+    """Release boost rows whose hold ran out, and keep retrying the hand-back of
+    those whose restore could not be written yet (any plan date)."""
     try:
         rows = db.get_active_user_boost_rows()
     except Exception as exc:  # noqa: BLE001 - a broken read must not stop the tick
@@ -255,9 +340,29 @@ def _check_user_boost_expiry(
         try:
             end = _parse_utc(row["end_time"])
         except (ValueError, KeyError, TypeError):
-            end = now_utc  # unusable window: close it rather than hold forever
+            end = now_utc  # unusable window: release it rather than hold forever
         if now_utc < end:
             continue
+        if not row.get("overridden_by_user_at"):
+            # Already released, restore still pending. Done when a plan row that
+            # started after the hold now owns the tank (it fired / matched), or
+            # after the give-up horizon.
+            _p, _src, owner = _scheduled_tank_state(now_utc)
+            superseded = False
+            try:
+                superseded = (
+                    owner is not None
+                    and (owner.get("status") or "") in ("active", "completed")
+                    and _parse_utc(owner["start_time"]) >= end
+                )
+            except (ValueError, KeyError, TypeError):
+                pass
+            if superseded or now_utc - end > timedelta(hours=_BOOST_RESTORE_GIVE_UP_HOURS):
+                db.finish_user_boost(
+                    int(row["id"]), end_time_iso=_iso_z(end),
+                    note="boost restore superseded by plan" if superseded else "boost restore abandoned",
+                )
+                continue
         end_user_boost(row, dev, client, now_utc, reason="expired", trigger=f"{trigger}:boost_expiry")
 
 
@@ -818,15 +923,16 @@ def _reconcile_daikin_actions(
         aid = int(act["id"])
         status = act["status"]
 
+        # "Banho extra hoje" rows own their whole lifecycle (hold, release,
+        # restore retries: _check_user_boost_expiry). The loop must never
+        # complete or apply them - completing one would drop a pending restore.
+        if act.get("action_type") == db.USER_BOOST_ACTION_TYPE:
+            continue
+
         # Phase 4.3 — user-override rows skip re-apply but still transition to
         # terminal status when their window ends; otherwise they'd stay 'active'
         # forever and pollute every "latest active row" query.
         if act.get("overridden_by_user_at"):
-            # "Banho extra hoje" rows own their lifecycle (expiry restores the
-            # plan's tank state, see _check_user_boost_expiry) - completing
-            # them here would skip that restore.
-            if act.get("action_type") == db.USER_BOOST_ACTION_TYPE:
-                continue
             if now_utc >= end and status in ("pending", "active"):
                 db.mark_action(aid, "completed")
             continue
@@ -1072,12 +1178,30 @@ def _reconcile_daikin_actions(
             #     replan rows that would reverse it (bug C). Restore rows are
             #     exempted so the system can return to baseline once the
             #     gesture either ages out or is reverted.
+            # "Banho extra hoje" (#901): checked on its own - a newer unrelated
+            # override must not mask the boost, and tank `restore` rows (the
+            # LP-owned path) are held too. The held row is NOT marked overridden
+            # (that would chain the hold to its window end): it stays
+            # pending/active and fires normally once the boost ends.
+            _boost = _active_boost_row(now_utc) if _is_tank_action(apply_params) else None
+            if _boost is not None and int(_boost["id"]) != aid and _boost_holds_row(_boost, apply_params, dev):
+                if aid not in _BOOST_HOLD_LOGGED:
+                    _BOOST_HOLD_LOGGED.add(aid)
+                    db.log_action(
+                        device="daikin",
+                        action="prefire_boost_hold",
+                        params={"row_id": aid, "source_row_id": int(_boost["id"]), "kind": atype},
+                        result="skipped",
+                        trigger=trigger,
+                    )
+                continue
             if atype != "restore":
                 try:
                     src = db.find_recent_user_override(
                         device="daikin",
                         within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
                         now_utc=now_utc,
+                        exclude_action_types=(db.USER_BOOST_ACTION_TYPE,),
                         respect_until_window_end=bool(
                             config.USER_OVERRIDE_RESPECT_UNTIL_WINDOW_END
                         ),
@@ -1098,28 +1222,7 @@ def _reconcile_daikin_actions(
                         # idempotency feature flag is disabled.
                         gesture_active = user_gesture_still_in_effect(dev, src_params)
                         would_change_state = not daikin_device_matches_params(dev, apply_params)
-                        if src.get("action_type") == db.USER_BOOST_ACTION_TYPE:
-                            # "Banho extra hoje": HOLD tank rows only while the
-                            # boost lasts. Unlike a detected manual gesture the
-                            # held row is NOT marked overridden (that would chain
-                            # the hold to the row's window end) - it stays
-                            # pending/active and fires normally once the boost
-                            # row ends. LWT-only rows are never held.
-                            if not gesture_active:
-                                gesture_active = _boost_fresh(src, now_utc)
-                            if _is_tank_action(apply_params) and gesture_active and would_change_state:
-                                if aid not in _BOOST_HOLD_LOGGED:
-                                    _BOOST_HOLD_LOGGED.add(aid)
-                                    db.log_action(
-                                        device="daikin",
-                                        action="prefire_boost_hold",
-                                        params={"row_id": aid, "source_row_id": int(src.get("id") or 0),
-                                                "kind": atype},
-                                        result="skipped",
-                                        trigger=trigger,
-                                    )
-                                continue
-                        elif gesture_active and would_change_state:
+                        if gesture_active and would_change_state:
                             db.mark_action_user_overridden(aid)
                             src_id = int(src.get("id") or 0)
                             db.log_action(
@@ -1876,6 +1979,7 @@ def _check_tank_power_drift(
     try:
         src = db.find_recent_user_override(
             device="daikin",
+            exclude_action_types=(db.USER_BOOST_ACTION_TYPE,),
             within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
             now_utc=now_utc,
             respect_until_window_end=bool(
@@ -2382,6 +2486,7 @@ def _check_negative_boost_powerful(
     try:
         src = db.find_recent_user_override(
             device="daikin",
+            exclude_action_types=(db.USER_BOOST_ACTION_TYPE,),
             within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
             now_utc=now_utc,
             respect_until_window_end=bool(config.USER_OVERRIDE_RESPECT_UNTIL_WINDOW_END),
@@ -2551,6 +2656,7 @@ def _check_lwt_offset_drift(
     try:
         src = db.find_recent_user_override(
             device="daikin",
+            exclude_action_types=(db.USER_BOOST_ACTION_TYPE,),
             within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
             now_utc=now_utc,
             respect_until_window_end=bool(
@@ -2652,9 +2758,11 @@ def reconcile_daikin_schedule_for_date(
             return  # hard gate: no Daikin actions until approved
 
     actions = db.get_actions_for_plan_date(plan_date, device="daikin")
-    _reconcile_daikin_actions(
-        actions, client, dev, now_utc, trigger=trigger, outdoor_c=outdoor_c
-    )
+    # One tank writer at a time: "Banho extra hoje" apply/undo take the same lock.
+    with TANK_WRITE_LOCK:
+        _reconcile_daikin_actions(
+            actions, client, dev, now_utc, trigger=trigger, outdoor_c=outdoor_c
+        )
 
 
 def heartbeat_repair_fox_scheduler(fox: FoxESSClient) -> None:

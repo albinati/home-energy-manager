@@ -35,6 +35,7 @@ export function WaterCard({ now, fronts, nowMs, tz, onChanged }: {
   }, 60_000);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<ActionDiffResponse | null>(null);
+  const [confirmUndo, setConfirmUndo] = useState(false);
 
   const tk = fronts?.tank && !fronts.tank.error ? fronts.tank : null;
   const off = holidayFlags(now).tank;
@@ -45,6 +46,7 @@ export function WaterCard({ now, fronts, nowMs, tz, onChanged }: {
     holidayOff: off,
     boostUntil: st?.active ? st.until_utc : null,
     boostTarget: st?.active ? st.boost_target_c : null,
+    differential: st?.reheat_differential_c ?? null,
   });
   const untilText = st?.until_utc ? hhmm(st.until_utc, tz) : null;
   const after = afterRow(tile.next, st?.active ? { until: untilText, target: st.boost_target_c } : null);
@@ -91,13 +93,16 @@ export function WaterCard({ now, fronts, nowMs, tz, onChanged }: {
     refreshAll();
   });
   const undo = () => void run(async () => {
+    let restored = true;
     if (import.meta.env.DEV && MOCK) {
       (await import("../../../lib/mock/dhwBoost")).mockDhwBoostSet(false);
     } else {
       const sim = await simulateDhwBoostUndo();
-      await applyDhwBoostUndo(sim.simulation_id);
+      restored = (await applyDhwBoostUndo(sim.simulation_id)).restored;
     }
-    toast.success("Banho extra desfeito");
+    setConfirmUndo(false);
+    if (restored) toast.success("Banho extra desfeito");
+    else toast.info("Banho extra encerrado", "O tanque volta ao plano assim que o Daikin puder receber o comando.");
     refreshAll();
   });
 
@@ -145,10 +150,20 @@ export function WaterCard({ now, fronts, nowMs, tz, onChanged }: {
             </div>
           )}
           {view.kind === "active" && (
-            <p class="hw-note">
-              Banho extra ativo{view.until ? `: o plano espera até ${view.until}` : ""}.{" "}
-              <button type="button" class="btn btn--sm" disabled={busy} onClick={undo}>Desfazer</button>
-            </p>
+            confirmUndo ? (
+              <div class="hw-confirm">
+                <span>Devolve o tanque ao plano agora e desliga o Powerful.</span>
+                <div class="hw-actions">
+                  <button type="button" class="btn btn--sm btn--primary" disabled={busy} onClick={undo}>{busy ? "Desfazendo…" : "Confirmar"}</button>
+                  <button type="button" class="btn btn--sm" disabled={busy} onClick={() => setConfirmUndo(false)}>Cancelar</button>
+                </div>
+              </div>
+            ) : (
+              <p class="hw-note">
+                Banho extra ativo{view.until ? `: o plano espera até ${view.until}` : ""}.{" "}
+                <button type="button" class="btn btn--sm" disabled={busy} onClick={() => setConfirmUndo(true)}>Desfazer</button>
+              </p>
+            )
           )}
         </div>
       )}

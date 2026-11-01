@@ -4,7 +4,7 @@ import type { DhwBoostStatus } from "../endpoints";
 // buttons can be exercised without a backend.
 const base: DhwBoostStatus = {
   active: false, row_id: null, started_utc: null, until_utc: null, boost_target_c: null,
-  available: true, blocked: null, target_c: 50, hold_hours: 4,
+  available: true, blocked: null, target_c: 50, hold_hours: 4, uses_powerful: true, reheat_differential_c: 6,
   legionella: { start_utc: "2026-10-11T11:00:00Z", end_utc: "2026-10-11T13:00:00Z" },
 };
 let state: DhwBoostStatus = { ...base };

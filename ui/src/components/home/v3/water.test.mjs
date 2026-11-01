@@ -1,7 +1,7 @@
 // Unit tests for the Home v3 "Água quente" pure helpers. Run: `npm test`.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { barPct, waterHead, afterRow, legionellaRow, boostView, confirmCopy, hhmm } from "./water.ts";
+import { barPct, waterHead, afterRow, legionellaRow, boostView, confirmCopy, bandText, hhmm } from "./water.ts";
 
 const NOW = Date.parse("2026-10-07T13:30:00Z"); // 14:30 BST
 const win = (kind, s, e, t) => ({ kind, start_utc: s, end_utc: e, start_local: "", end_local: "", tank_target_c: t });
@@ -18,10 +18,15 @@ test("barPct clamps to the 30-60 bar", () => {
   assert.equal(barPct(null), null);
 });
 
-test("waterHead: heating only when a warm-up is open and tank is clearly below target", () => {
-  assert.deepEqual(waterHead(tk(), 42.8, NOW), { tank: 42.8, state: "heating", text: "aquecendo até 47 °C", target: 47 });
-  assert.equal(waterHead(tk(), 46.5, NOW).state, "holding");
-  assert.equal(waterHead(tk(), 46.5, NOW).text, "mantendo 47 °C");
+test("waterHead: heating only past the calibrated differential, else just the target", () => {
+  const o = { holidayOff: false, differential: 4 };
+  assert.deepEqual(waterHead(tk(), 42.8, NOW, o), { tank: 42.8, state: "heating", text: "aquecendo até 47 °C", target: 47 });
+  // 5 C under target but inside a 6 C differential: the unit is NOT heating.
+  const inside = waterHead(tk(), 42, NOW, { holidayOff: false, differential: 6 });
+  assert.equal(inside.state, "holding");
+  assert.equal(inside.text, "meta 47 °C");
+  // No calibrated differential available: never claim "aquecendo".
+  assert.equal(waterHead(tk(), 40, NOW).state, "holding");
 });
 
 test("waterHead: setback is economia, power off and holiday say so", () => {
@@ -46,7 +51,7 @@ test("afterRow strips the prefix; boost replaces the planned step", () => {
   assert.equal(afterRow("Próximo: 16:00 baixa para 37", null), "16:00 baixa para 37");
   assert.equal(afterRow("", null), null);
   assert.equal(afterRow("Próximo: 16:00 baixa para 37", { until: "18:30", target: 50 }),
-    "Banho extra segura a meta até 18:30, depois volta ao plano");
+    "Volta ao plano quando o banho extra acabar");
 });
 
 test("legionellaRow: next window, hidden when absent or already over", () => {
@@ -79,12 +84,25 @@ test("boostView: active shows the real end time; unknown status hides", () => {
   assert.deepEqual(boostView(null, 44), { kind: "hidden" });
 });
 
-test("confirmCopy states the real hold and never a price", () => {
-  const c = confirmCopy({ target_c: 50, hold_hours: 4 }, "18:30", "cheap");
-  assert.equal(c, "Aquece o tanque até 50 °C agora. O plano não mexe nele por 4 h (até 18:30) e depois volta ao normal. Agora é faixa barata.");
+test("confirmCopy: Powerful wording is honest about the resistance, no price", () => {
+  const c = confirmCopy({ target_c: 50, hold_hours: 4, uses_powerful: true }, "18:30", "cheap");
+  assert.equal(c, "Liga o modo Powerful e aquece até 50 °C agora (pode usar a resistência, mais cara). O plano não mexe no tanque por 4 h (até 18:30) e depois volta ao normal. Agora é faixa barata.");
   assert.doesNotMatch(c, /£|p\/kWh/);
-  assert.match(confirmCopy({ target_c: 50, hold_hours: 4 }, null, "peak"), /pico/);
-  assert.match(confirmCopy({ target_c: 50, hold_hours: 2.5 }, null, undefined), /2,5 h/);
+  const plain = confirmCopy({ target_c: 50, hold_hours: 2.5, uses_powerful: false }, null, undefined);
+  assert.match(plain, /^Aquece o tanque até 50 °C agora\./);
+  assert.match(plain, /2,5 h/);
+  assert.doesNotMatch(plain, /Powerful/);
+});
+
+test("bandText maps every cockpit kind explicitly; unknown says nothing", () => {
+  assert.match(bandText("negative"), /negativo/);
+  assert.match(bandText("solar_charge"), /sol/);
+  assert.match(bandText("cheap"), /barata/);
+  assert.match(bandText("standard"), /dia/);
+  assert.match(bandText("peak"), /pico/);
+  assert.match(bandText("peak_export"), /pico/);
+  assert.equal(bandText("whatever"), "");
+  assert.equal(bandText(undefined), "");
 });
 
 test("hhmm renders in the planner timezone", () => {

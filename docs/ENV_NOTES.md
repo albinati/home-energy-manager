@@ -56,6 +56,14 @@ TARGET_DHW_TEMP_MIN_GUESTS_C=48.0              # guest-mode LP floor (multiple s
 # rides the LP's own target up to DHW_TEMP_MAX_C. Peak avoidance does NOT
 # trigger pre-charging — see issue #322 for conditional shutdown commit.
 DHW_TEMP_MAX_C=60                               # hard tank ceiling (code default 60 °C in src/config.py)
+# "Banho extra hoje" (#901, Home Água quente card, admin): tank target the one-tap boost
+# commands. Clamped to min(DHW_TEMP_MAX_C, t_hp_max_c=50): above the cliff every degree is
+# immersion. The firmware only reheats when target - tank > the reheat differential (~6 C,
+# resolve_reheat_differential_c), so inside that band the boost also turns DHW Powerful on
+# (resistance, COP ~1); beyond it the plain target suffices (heat pump). The plan then leaves
+# the tank alone for USER_OVERRIDE_RESPECT_HOURS (4 h), except rows at/above this target and
+# Powerful rows (negative-price boosts); afterwards the schedule's target is re-commanded.
+DHW_USER_BOOST_TARGET_C=50
 DHW_TEMP_COMFORT_C=48                           # tank floor whenever the LP plans DHW heat (runtime-tunable)
 DHW_TEMP_PV_ABUNDANCE_TARGET_C=60               # tank ceiling during solar_charge / solar_preheat slots. Code
                                                  # default = 60 (src/runtime_settings.py); runtime-tunable via

@@ -425,6 +425,22 @@ def invalidate_after_write() -> None:
     logger.debug("Daikin device cache invalidated after write")
 
 
+def note_predicted_tank_state(target_c: float | None = None, powerful: bool | None = None) -> None:
+    """Mirror a tank write we just made onto the CURRENT cache objects.
+
+    The Onecta cache refreshes on its own slow cadence; until then the
+    heartbeat would read the pre-write target. Callers must go through here
+    (not a reference taken before the write): a refresh in between swaps the
+    cached list, and a stale reference would then update an orphan.
+    """
+    with _lock:
+        for d in _devices_cache or []:
+            if target_c is not None:
+                d.tank_target = float(target_c)
+            if powerful is not None:
+                d.tank_powerful = bool(powerful)
+
+
 def get_quota_status_daikin() -> dict:
     """Return cache and quota info for dashboard / status endpoints."""
     from ..api_quota import get_quota_status as _qs
