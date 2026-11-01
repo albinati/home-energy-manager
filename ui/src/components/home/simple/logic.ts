@@ -78,7 +78,9 @@ export const FAIXA_WORD: Record<Tier, string> = { cheap: "barata", standard: "di
  *  cheap/standard/peak tiers; a negative-price tier reads as cheap). */
 export function tierOf(w: { key?: string | null; label?: string | null }): Tier {
   const s = `${w.key ?? ""} ${w.label ?? ""}`.toLowerCase();
-  if (s.includes("peak") || s.includes("pico")) return "peak";
+  // Agile's top-but-one tier `expensive` counts as peak, like the optimizer's
+  // peak_keys (expensive, severe_peak, band_peak) in src/scheduler/optimizer.py.
+  if (/\bexpensive\b/.test(s) || s.includes("peak") || s.includes("pico")) return "peak";
   if (s.includes("cheap") || s.includes("neg") || s.includes("barato")) return "cheap";
   return "standard";
 }

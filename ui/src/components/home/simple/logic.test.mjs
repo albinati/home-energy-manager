@@ -47,6 +47,17 @@ test("tier classification, cosy and dynamic tiers", () => {
   assert.equal(tierOf({ key: "band_day", label: "day" }), "standard");
 });
 
+test("tierOf: real Agile keys from google_calendar/tiers.py", () => {
+  assert.equal(tierOf({ key: "expensive", label: "Expensive" }), "peak");
+  assert.equal(tierOf({ key: "severe_peak", label: "Severe peak" }), "peak");
+  assert.equal(tierOf({ key: "very_cheap", label: "Very cheap" }), "cheap");
+  assert.equal(tierOf({ key: "band_cheap", label: "cheap" }), "cheap");
+  for (const [key, label] of [["green_light", "Green light"], ["moderate", "Moderate"], ["above_avg", "Above average"]]) {
+    assert.equal(tierOf({ key, label }), "standard");
+  }
+  assert.equal(tierOf({ key: "expensive" }), "peak");
+});
+
 test("day axis spans the tariff and tariff segments tile it", () => {
   const axis = dayAxis(tariff);
   const segs = tariffSegments(tariff, axis);
