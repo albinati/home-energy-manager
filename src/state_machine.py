@@ -263,6 +263,11 @@ def _quota_blocked() -> bool:
         return False
 
 
+def _count_restore_attempt(row: dict[str, Any], now_utc: datetime) -> None:
+    attempts = int(_boost_params(row).get("restore_attempts", 0)) + 1
+    db.update_user_boost_meta(int(row["id"]), restore_attempts=attempts, last_attempt_at=_iso_z(now_utc))
+
+
 def end_user_boost(
     row: dict[str, Any],
     dev: Any,
@@ -290,8 +295,6 @@ def end_user_boost(
     """
     aid = int(row["id"])
     db.expire_user_boost(aid, end_time_iso=_iso_z(now_utc), note=f"boost {reason}: restore pending")
-    attempts = int(_boost_params(row).get("restore_attempts", 0)) + 1
-    db.update_user_boost_meta(aid, restore_attempts=attempts, last_attempt_at=_iso_z(now_utc))
     # Did HEM itself switch Powerful on? Only then is there a Powerful to clear.
     hem_powerful = bool(_boost_params(row).get("powerful"))
     _BOOST_HOLD_LOGGED.clear()
@@ -299,6 +302,7 @@ def end_user_boost(
         "restored": False, "target_c": None, "skipped": None, "error": None, "pending": False,
     }
     planned: dict[str, Any] | None = None
+    attempted = False
     if config.OPENCLAW_READ_ONLY:
         out["skipped"] = "read_only"
     elif config.DAIKIN_CONTROL_MODE != "active":
@@ -340,23 +344,36 @@ def end_user_boost(
             if daikin_device_matches_params(dev, planned):
                 out["restored"] = True  # the device already holds the plan's state
             else:
+                # Only a REAL write attempt consumes one of the capped retries; a tick
+                # skipped by a gate (stand-off, holiday, quota...) never gets here.
+                attempted = True
+                _count_restore_attempt(row, now_utc)
                 apply_scheduled_daikin_params(dev, client, planned, trigger=trigger)
                 out["restored"] = True
-        except (DaikinError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 - URLError/OSError must not escape the heartbeat
             out["error"] = str(exc)
             logger.warning("boost %s: restoring the planned tank target failed: %s", reason, exc)
     out["pending"] = not out["restored"]
     if out["restored"]:
         db.finish_user_boost(aid, end_time_iso=_iso_z(now_utc), note=f"boost {reason}")
-    db.log_action(
-        device="daikin",
-        action="dhw_user_boost_end",
-        params={"row_id": aid, "reason": reason, **out},
-        # Only a real hand-back is "success"; a skipped/failed one is not.
-        result="success" if out["restored"] else ("failure" if out["error"] else "skipped"),
-        trigger=trigger,
-        error_msg=out["error"] or out["skipped"],
+    # Log real attempts and the final outcome always; a purely GATED tick only when the
+    # skip reason changed (otherwise every heartbeat tick would add a "skipped" row).
+    gated_repeat = (
+        not attempted and not out["restored"]
+        and _boost_params(row).get("last_skip") == (out["skipped"] or "")
     )
+    if not attempted and not out["restored"] and not gated_repeat:
+        db.update_user_boost_meta(aid, last_skip=out["skipped"] or "")
+    if not gated_repeat:
+        db.log_action(
+            device="daikin",
+            action="dhw_user_boost_end",
+            params={"row_id": aid, "reason": reason, **out},
+            # Only a real hand-back is "success"; a skipped/failed one is not.
+            result="success" if out["restored"] else ("failure" if out["error"] else "skipped"),
+            trigger=trigger,
+            error_msg=out["error"] or out["skipped"],
+        )
     return out
 
 
@@ -372,54 +389,73 @@ def _check_user_boost_expiry(
         return
     for row in rows:
         try:
-            end = _parse_utc(row["end_time"])
+            _check_one_boost_row(row, dev, client, now_utc, trigger=trigger)
+        except Exception as exc:  # noqa: BLE001 - one bad row must not skip the rest of the tick
+            logger.warning("boost expiry check failed for row %s (non-fatal): %s", row.get("id"), exc)
+
+
+def _check_one_boost_row(
+    row: dict[str, Any], dev: Any, client: DaikinClient, now_utc: datetime, *, trigger: str,
+) -> None:
+    try:
+        end = _parse_utc(row["end_time"])
+    except (ValueError, KeyError, TypeError):
+        end = now_utc  # unusable window: release it rather than hold forever
+    if now_utc < end:
+        return
+    if not row.get("overridden_by_user_at"):
+        # Already released, restore still pending. Done when a plan row that
+        # started after the hold now owns the tank (it fired / matched);
+        # otherwise retry on a bounded backoff, then give up LOUDLY.
+        p = _boost_params(row)
+        try:
+            released = _parse_utc(str(p.get("released_at") or row["end_time"]))
+        except (ValueError, TypeError):
+            released = end
+        _p, _src, owner = _scheduled_tank_state(now_utc)
+        superseded = False
+        try:
+            superseded = (
+                owner is not None
+                and (owner.get("status") or "") in ("active", "completed")
+                and _parse_utc(owner["start_time"]) >= released
+            )
         except (ValueError, KeyError, TypeError):
-            end = now_utc  # unusable window: release it rather than hold forever
-        if now_utc < end:
-            continue
-        if not row.get("overridden_by_user_at"):
-            # Already released, restore still pending. Done when a plan row that
-            # started after the hold now owns the tank (it fired / matched);
-            # otherwise retry on a bounded backoff, then give up LOUDLY.
-            p = _boost_params(row)
+            pass
+        attempts = int(p.get("restore_attempts", 0))
+        expired_horizon = now_utc - released > timedelta(hours=_BOOST_RESTORE_GIVE_UP_HOURS)
+        if superseded:
+            db.finish_user_boost(int(row["id"]), end_time_iso=_iso_z(released),
+                                 note="boost restore superseded by plan")
+            return
+        if expired_horizon or attempts >= len(_BOOST_RESTORE_BACKOFF_MIN):
+            db.finish_user_boost(int(row["id"]), end_time_iso=_iso_z(released),
+                                 note="boost restore abandoned")
+            db.log_action(device="daikin", action="dhw_user_boost_end",
+                          params={"row_id": int(row["id"]), "attempts": attempts},
+                          result="failure", trigger=trigger, error_msg="restore abandoned")
             try:
-                released = _parse_utc(str(p.get("released_at") or row["end_time"]))
-            except (ValueError, TypeError):
-                released = end
-            _p, _src, owner = _scheduled_tank_state(now_utc)
-            superseded = False
-            try:
-                superseded = (
-                    owner is not None
-                    and (owner.get("status") or "") in ("active", "completed")
-                    and _parse_utc(owner["start_time"]) >= released
+                notify_risk(
+                    "Extra shower boost ended but the tank could not be handed back to the "
+                    "plan (Daikin unavailable or restricted). The tank may still be at the "
+                    "boost target; check the Daikin app."
                 )
-            except (ValueError, KeyError, TypeError):
-                pass
-            attempts = int(p.get("restore_attempts", 0))
-            expired_horizon = now_utc - released > timedelta(hours=_BOOST_RESTORE_GIVE_UP_HOURS)
-            if superseded:
-                db.finish_user_boost(int(row["id"]), end_time_iso=_iso_z(released),
-                                     note="boost restore superseded by plan")
-                continue
-            if expired_horizon or attempts >= len(_BOOST_RESTORE_BACKOFF_MIN):
-                db.finish_user_boost(int(row["id"]), end_time_iso=_iso_z(released),
-                                     note="boost restore abandoned")
-                db.log_action(device="daikin", action="dhw_user_boost_end",
-                              params={"row_id": int(row["id"]), "attempts": attempts},
-                              result="failure", trigger=trigger, error_msg="restore abandoned")
-                try:
-                    notify_risk(
-                        "O banho extra terminou mas não consegui devolver o tanque ao plano "
-                        "(Daikin indisponível ou em modo restrito). O tanque pode continuar na "
-                        "meta do banho extra; confira no app do Daikin."
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("boost give-up notify failed (non-fatal): %s", exc)
-                continue
-            if now_utc < released + timedelta(minutes=_BOOST_RESTORE_BACKOFF_MIN[attempts]):
-                continue
-        end_user_boost(row, dev, client, now_utc, reason="expired", trigger=f"{trigger}:boost_expiry")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("boost give-up notify failed (non-fatal): %s", exc)
+            return
+        if attempts > 0:
+            # Space real attempts from the LAST one, not from the release: after a long
+            # gate the schedule must not fire all remaining attempts on consecutive ticks.
+            try:
+                last = _parse_utc(str(p.get("last_attempt_at") or ""))
+            except (ValueError, TypeError):
+                last = released
+            gap = _BOOST_RESTORE_BACKOFF_MIN[attempts] - _BOOST_RESTORE_BACKOFF_MIN[attempts - 1]
+            if now_utc < last + timedelta(minutes=gap):
+                return
+        elif now_utc < released + timedelta(minutes=_BOOST_RESTORE_BACKOFF_MIN[0]):
+            return
+    end_user_boost(row, dev, client, now_utc, reason="expired", trigger=f"{trigger}:boost_expiry")
 
 
 def _is_tank_action(params: dict[str, Any]) -> bool:

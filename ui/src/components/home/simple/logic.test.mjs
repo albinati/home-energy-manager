@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  fmt, pp, mergeRuns, dayAxis, frac, hourTicks, waterSegments, tariffSegments, heatingCell,
+  fmt, pp, mergeRuns, dayAxis, frac, hourTicks, waterSegments, waterBoostOf, tariffSegments, heatingCell,
   batteryRunway, buildStatus, tierOf, billingVerdict, cycleLabel, nextHeating, aguaTile, casaTile,
   peakCoverage, peakSpans, powerSource, spendVerdict, spendLine, vacationHelp, holidayFlags,
   isAwayPreset, localHHMM, sgbp, hourWord, agoraStale,
@@ -393,4 +393,22 @@ test("Agora stale suffix", () => {
   assert.equal(agoraStale(cockpit({ freshness: { fox: { age_s: 7500, stale: true, fetched_at_utc: null } } })), " (há 2 h)");
   assert.equal(agoraStale(cockpit({ freshness: { fox: { age_s: 200, stale: false, fetched_at_utc: null } } })), "");
   assert.equal(agoraStale(cockpit({ freshness: { fox: { age_s: 420, stale: true, fetched_at_utc: null } } })), " (há 7 min)");
+});
+
+test("water lane: an active boost replaces the planned step during the hold only", () => {
+  const axis = dayAxis(tariff);
+  const w = (kind, s, e, t) => ({ kind, start_utc: utc(s), end_utc: utc(e), start_local: s, end_local: e, tank_target_c: t });
+  const tank = { windows: [w("warmup", "13:00", "15:00", 47), w("setback", "15:00", "24:00", 37)] };
+  const boost = waterBoostOf({ active: true, started_utc: utc("14:30"), until_utc: utc("18:30"), boost_target_c: 50 });
+  const segs = waterSegments(tank, axis, boost);
+  assert.deepEqual(segs.map((s) => s.text), ["47 °C (aquece)", "50 °C (banho extra)", "37 °C (economia)"]);
+  assert.ok(Math.abs(segs[1].startMs - Date.parse(utc("14:30"))) < 1000);
+  assert.ok(Math.abs(segs[1].endMs - Date.parse(utc("18:30"))) < 1000);
+  assert.equal(segs[1].warm, true);
+  assert.deepEqual(waterSegments(tank, axis, null), waterSegments(tank, axis));
+  assert.equal(waterBoostOf({ active: false, until_utc: utc("18:30"), boost_target_c: 50 }), null);
+  assert.equal(waterBoostOf({ active: true, until_utc: null, boost_target_c: 50 }), null);
+  assert.equal(waterBoostOf(null), null);
+  const other = waterBoostOf({ active: true, started_utc: "2026-10-09T10:00:00Z", until_utc: "2026-10-09T14:00:00Z", boost_target_c: 50 });
+  assert.deepEqual(waterSegments(tank, axis, other).map((s) => s.text), ["47 °C (aquece)", "37 °C (economia)"]);
 });

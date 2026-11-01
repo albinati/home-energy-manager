@@ -1,6 +1,6 @@
 import { useEffect } from "preact/hooks";
 import { usePoll } from "../lib/poll";
-import { getCockpitNow, getPlanFronts, getStatusAlerts } from "../lib/endpoints";
+import { getCockpitNow, getPlanFronts, getStatusAlerts, getDhwBoost } from "../lib/endpoints";
 import { Spinner } from "../components/common/Spinner";
 import { computeChips, type Chip } from "../components/shell/AlertStrip";
 import { StatusLine } from "../components/home/simple/StatusLine";
@@ -25,7 +25,8 @@ import "../styles/home-v3.css";
 const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "1";
 
 // Home (#879, v3 #897): reads /cockpit/now (10 s),
-// /plan/fronts (60 s), /status/alerts (60 s) and, inside the O dia card, /pv/today, /execution/today,
+// /plan/fronts (60 s), /status/alerts (60 s), /dhw/boost (60 s, shared by the O dia Água lane and
+// the Água quente card) and, inside the O dia card, /pv/today, /execution/today,
 // /scheduler/timeline (120 s) and /plan/fronts?date=tomorrow; /whoami is fetched by the app
 // shell. No chart library is imported on this route.
 export default function Landing() {
@@ -38,6 +39,11 @@ export default function Landing() {
     return getPlanFronts();
   }, 60_000);
   const alerts = usePoll(getStatusAlerts, 60_000);
+  // One /dhw/boost poll for the whole page: WaterCard (button + state) and the O dia Água lane.
+  const boost = usePoll(async () => {
+    if (import.meta.env.DEV && MOCK) return (await import("../lib/mock/dhwBoost")).mockDhwBoost();
+    return getDhwBoost();
+  }, 60_000);
 
   // Keep the shared freshness map fresh for the alert chips (cleared on unmount).
   useEffect(() => { publishFreshness(now.data?.freshness); }, [now.data]);
@@ -73,12 +79,12 @@ export default function Landing() {
       <h1 class="sr-only">Casa</h1>
       <StatusLine chips={chips} text={buildStatus({ now: data, fronts: f })} />
       <AgoraFlow now={data} />
-      <DayCard now={data} fronts={f} holiday={holiday} />
+      <DayCard now={data} fronts={f} holiday={holiday} boost={boost.data} />
 
       <div class="hv3-cards">
         <BatteryCard now={data} fronts={f} health={{ in_sync: alerts.data?.fox_drift?.in_sync, actuation_stale: alerts.data?.actuation?.fox?.stale }} />
         <HeatingCard now={data} fronts={f} onChanged={() => fronts.refresh()} />
-        <WaterCard now={data} fronts={f} nowMs={nowMs} tz={data.planner_tz}
+        <WaterCard now={data} fronts={f} nowMs={nowMs} tz={data.planner_tz} boost={boost}
                    onChanged={() => { void now.refresh(); void fronts.refresh(); }} />
       </div>
 

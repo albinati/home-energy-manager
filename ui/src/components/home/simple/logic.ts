@@ -211,20 +211,52 @@ export function waterLabel(kind: string, target: number | null): string {
     case "setback": return `${tt} (economia)`.trim();
     case "boost": return `${tt} (carga barata)`.trim();
     case "warmup": return `${tt} (aquece)`.trim();
+    case "user_boost": return `${tt} (banho extra)`.trim();
     default: return tt;
   }
 }
-export function waterSegments(tank: PlanFrontsTank | null | undefined, axis: Axis | null): WaterSeg[] {
+/** An active "Banho extra hoje" hold, as the viewer-readable GET /dhw/boost reports it. */
+export interface WaterBoost { startMs: number; untilMs: number; target: number }
+/** Boost status -> the hold window, or null when none is active / the window is unusable. */
+export function waterBoostOf(
+  st: { active?: boolean; started_utc?: string | null; until_utc?: string | null; boost_target_c?: number | null } | null | undefined,
+): WaterBoost | null {
+  if (!st?.active || st.boost_target_c == null || !st.until_utc) return null;
+  const untilMs = Date.parse(st.until_utc);
+  const startMs = st.started_utc ? Date.parse(st.started_utc) : Number.NEGATIVE_INFINITY;
+  if (!Number.isFinite(untilMs) || Number.isNaN(startMs)) return null;
+  return { startMs, untilMs, target: st.boost_target_c };
+}
+/** The planned tank windows on the day axis. During an active boost the plan does not
+ *  touch the tank, so the hold window shows the boost target instead of the planned step. */
+export function waterSegments(
+  tank: PlanFrontsTank | null | undefined,
+  axis: Axis | null,
+  boost?: WaterBoost | null,
+): WaterSeg[] {
   if (!tank || tank.error || !axis) return [];
-  const raw = [...(tank.windows ?? [])]
+  type Raw = { startMs: number; endMs: number; kind: string; target: number | null };
+  let wins: Raw[] = [...(tank.windows ?? [])]
     .sort((a, b) => Date.parse(a.start_utc) - Date.parse(b.start_utc))
-    .map((w) => {
-      const startMs = Date.parse(w.start_utc), endMs = Date.parse(w.end_utc);
-      return {
-        start: frac(axis, startMs), end: frac(axis, endMs), startMs, endMs,
-        kind: w.kind, target: w.tank_target_c, text: waterLabel(w.kind, w.tank_target_c), warm: w.kind !== "setback",
-      };
-    })
+    .map((w) => ({ startMs: Date.parse(w.start_utc), endMs: Date.parse(w.end_utc), kind: w.kind, target: w.tank_target_c }));
+  if (boost && boost.untilMs > boost.startMs) {
+    const hs = Math.max(boost.startMs, axis.startMs), he = Math.min(boost.untilMs, axis.endMs);
+    if (he > hs) {
+      const cut: Raw[] = [];
+      for (const w of wins) {
+        if (w.endMs <= hs || w.startMs >= he) { cut.push(w); continue; }
+        if (w.startMs < hs) cut.push({ ...w, endMs: hs });
+        if (w.endMs > he) cut.push({ ...w, startMs: he });
+      }
+      cut.push({ startMs: hs, endMs: he, kind: "user_boost", target: boost.target });
+      wins = cut.sort((a, b) => a.startMs - b.startMs);
+    }
+  }
+  const raw = wins
+    .map((w) => ({
+      start: frac(axis, w.startMs), end: frac(axis, w.endMs), startMs: w.startMs, endMs: w.endMs,
+      kind: w.kind, target: w.target, text: waterLabel(w.kind, w.target), warm: w.kind !== "setback",
+    }))
     .filter((s) => s.end - s.start > 0.004);
   const merged = mergeRuns(raw, (a, b) => a.kind === b.kind && a.target === b.target);
   return merged.map((m) => ({ ...m, startMs: axisMs(axis, m.start), endMs: axisMs(axis, m.end) }));
