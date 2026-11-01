@@ -173,6 +173,7 @@ export function heatingCell(
   w: PlanFrontsTariffWindow,
   heating: PlanFrontsHeating | null | undefined,
   off: boolean,
+  structure?: string | null,
 ): HeatCell | null {
   if (off) return { mode: "off", text: "desligado" };
   if (!heating || heating.error) return null;
@@ -196,7 +197,7 @@ export function heatingCell(
   // No prediction for this band: show the floor that applies (same three levels as the Casa tile).
   const night = isNightStart(w.start_local, heating);
   const floor = night ? heating.night_floor_c
-    : tierOf(w) === "peak" && heating.setpoint_c != null ? heating.setpoint_c - (heating.peak_coast_delta_c ?? 0)
+    : structure === "banded" && tierOf(w) === "peak" && heating.setpoint_c != null ? heating.setpoint_c - (heating.peak_coast_delta_c ?? 0)
     : heating.setpoint_c;
   return { mode: "hold", text: floor != null ? `mantém ≥ ${num(floor)}` : "mantém" };
 }
@@ -254,35 +255,61 @@ export function powerSource(s: { grid_kw?: number; battery_kw?: number; solar_kw
   return null;
 }
 
+/** A run of contiguous peak-tier windows merged into one span (Agile can have an
+ *  `expensive` shoulder around a `severe_peak` core: that is ONE peak). */
+export interface PeakSpan {
+  start_utc: string; end_utc: string; start_local: string; end_local: string;
+  windows: PlanFrontsTariffWindow[];
+}
+export function peakSpans(windows: PlanFrontsTariffWindow[] | null | undefined): PeakSpan[] {
+  const peaks = (windows ?? []).filter((w) => tierOf(w) === "peak")
+    .sort((a, b) => Date.parse(a.start_utc) - Date.parse(b.start_utc));
+  const out: PeakSpan[] = [];
+  for (const w of peaks) {
+    const last = out[out.length - 1];
+    if (last && Date.parse(last.end_utc) === Date.parse(w.start_utc)) {
+      last.end_utc = w.end_utc; last.end_local = w.end_local; last.windows.push(w);
+    } else {
+      out.push({ start_utc: w.start_utc, end_utc: w.end_utc, start_local: w.start_local, end_local: w.end_local, windows: [w] });
+    }
+  }
+  return out;
+}
+/** First peak span that has not ended yet. */
+export function upcomingPeakSpan(tariff: PlanFrontsTariff | null | undefined, nowMs: number): PeakSpan | null {
+  return peakSpans(tariff?.windows).find((p) => Date.parse(p.end_utc) > nowMs) ?? null;
+}
+
 export interface PeakCoverage {
   kind: "covered" | "buys" | "bought";
   until: string;
   kwh: number;
 }
 /** Does the battery carry the house through the peak? Only claimed with a real
- *  basis (non-null planned import, SoC at entry and at exit above the reserve). */
+ *  basis (non-null planned import, SoC at entry and at exit above the reserve).
+ *  The peak is the merged span: imports are summed over every band inside it,
+ *  the entry SoC is the first band's, the exit is the band after the span. */
 export function peakCoverage(
   battery: PlanFrontsBattery | null | undefined,
   tariff: PlanFrontsTariff | null | undefined,
   nowMs: number,
 ): PeakCoverage | null {
-  const peak = [...(tariff?.windows ?? [])]
-    .sort((a, b) => Date.parse(a.start_utc) - Date.parse(b.start_utc))
-    .find((w) => tierOf(w) === "peak" && Date.parse(w.end_utc) > nowMs);
+  const peak = upcomingPeakSpan(tariff, nowMs);
   if (!peak || !battery || battery.error) return null;
   const rows = [...(battery.by_band ?? [])].sort((a, b) => minutesOf(a.start_local) - minutesOf(b.start_local));
-  const i = rows.findIndex((r) => r.start_local === peak.start_local && r.end_local === peak.end_local);
-  if (i < 0) return null;
-  const row = rows[i];
-  const planned = row.planned_import_kwh;
-  if (planned == null) return null;
+  const idx = peak.windows.map((w) => rows.findIndex((r) => r.start_local === w.start_local && r.end_local === w.end_local));
+  if (idx.some((k) => k < 0)) return null;
+  const inRows = idx.map((k) => rows[k]);
+  const row = inRows[0];
+  if (inRows.some((r) => r.planned_import_kwh == null)) return null;
+  const planned = inRows.reduce((acc, r) => acc + (r.planned_import_kwh as number), 0);
   const inside = nowMs >= Date.parse(peak.start_utc);
-  const real = row.realised_import_kwh ?? 0;
+  const real = inRows.reduce((acc, r) => acc + (r.realised_import_kwh ?? 0), 0);
   if (inside && real > 0.1) return { kind: "bought", until: peak.end_local, kwh: real };
   if (planned > 0.1) return { kind: "buys", until: peak.end_local, kwh: planned };
   const reserve = battery.reserve_pct;
   if (reserve == null || row.soc_entry_pct == null || row.soc_entry_pct <= reserve) return null;
-  const after = rows[i + 1];
+  const after = rows[Math.max(...idx) + 1];
   if (after && (after.soc_entry_pct == null || after.soc_entry_pct <= reserve)) return null;
   return { kind: "covered", until: peak.end_local, kwh: 0 };
 }
@@ -383,7 +410,8 @@ export function casaTile(now: CockpitNow, fronts: PlanFrontsResponse | null): Ti
   if (t != null && h) {
     const night = inNightWindow(localMinutes(now.now_utc, tz), h.night_start_hour ?? 22, h.night_end_hour ?? 7);
     const cur = currentWindow(tariff, nowMs);
-    const inPeak = !!cur && tierOf(cur) === "peak";
+    // The LP only applies the peak coast floor on banded tariffs.
+    const inPeak = tariff?.structure === "banded" && !!cur && tierOf(cur) === "peak";
     const setp = h.setpoint_c;
     // Same three-level floor the planner uses: night / peak coast / setpoint.
     const floor = night ? h.night_floor_c : inPeak && setp != null ? setp - (h.peak_coast_delta_c ?? 0) : setp;

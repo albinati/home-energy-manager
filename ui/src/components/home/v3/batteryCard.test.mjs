@@ -172,3 +172,20 @@ test("Inversor: real null freshness shape, stale, plan stale, actuation stale, d
   assert.equal(row(batteryCardModel(now(), mkFronts(), { in_sync: false }), "inversor").tone, "warn");
   assert.equal(row(batteryCardModel(now(), mkFronts(), { in_sync: null }), "inversor").tone, "ok");
 });
+
+test("Agile peak run: one 'Pico 16–20' row that sees the severe_peak core; Noite skips a midday/evening dip", () => {
+  const keys = ["very_cheap", "expensive", "severe_peak", "expensive", "moderate", "very_cheap"];
+  const spec = [["13:00", "16:00"], ["16:00", "17:00"], ["17:00", "19:00"], ["19:00", "20:00"], ["20:00", "22:00"], ["22:00", "00:00"]];
+  const tariff = { display_name: "Agile", structure: "dynamic",
+    windows: spec.map(([s, e], i) => ({ ...tw(keys[i], keys[i].replace("_", " "), s, e, 20 + i)})) };
+  const band = (s, e, planned, soc) => ({ key: "k", label: "l", start_local: s, end_local: e, planned_import_kwh: planned, realised_import_kwh: null, soc_entry_pct: soc });
+  const by_band = [band("13:00", "16:00", 0, 90), band("16:00", "17:00", 0, 90), band("17:00", "19:00", 2, 70),
+    band("19:00", "20:00", 0, 40), band("20:00", "22:00", 0, 35), band("22:00", "00:00", 0, 30)];
+  const m = batteryCardModel(now({ now_utc: utc("12:00") }), mkFronts({ by_band }, tariff));
+  assert.equal(row(m, "pico").label, "Pico 16–20");
+  assert.equal(row(m, "pico").text, "Precisa comprar da rede");
+  // cheap-tier "19:00" dip is not in the night window: Noite is the 22:00 band
+  const dip = { ...tariff, windows: tariff.windows.map((w) => w.start_local === "20:00" ? { ...w, key: "very_cheap", label: "very cheap" } : w) };
+  const m2 = batteryCardModel(now({ now_utc: utc("12:00") }), mkFronts({ by_band }, dip));
+  assert.equal(row(m2, "noite").text.startsWith("Chega a ~30% às 22:00"), true);
+});

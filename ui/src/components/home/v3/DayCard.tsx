@@ -4,7 +4,7 @@ import type { CockpitNow, PlanFrontsResponse } from "../../../lib/types";
 import { usePoll } from "../../../lib/poll";
 import { getPlanFronts, getPvToday, getExecutionToday, getSchedulerTimeline } from "../../../lib/endpoints";
 import {
-  frac, tariffSegments, heatingCell, waterSegments, hourTicks, hourWord, tierOf, span, peakCoverage, pp,
+  frac, tariffSegments, heatingCell, waterSegments, hourTicks, hourWord, tierOf, peakSpans, span, peakCoverage, pp,
   FAIXA_WORD, type HolidayFlags, type Axis,
 } from "../simple/logic.ts";
 import {
@@ -100,7 +100,7 @@ export function DayCard({ now, fronts, holiday }: {
 
   const tariff = dayFronts?.tariff && !dayFronts.tariff.error ? dayFronts.tariff : null;
   const axis: Axis = { startMs: bounds.startMs, endMs: bounds.endMs };
-  const peakWin = tariff?.windows.find((x) => tierOf(x) === "peak") ?? null;
+  const peakWin = peakSpans(tariff?.windows)[0] ?? null;
   const peak: PeakInfo | null = peakWin
     ? { label: span(peakWin.start_local, peakWin.end_local), coverage: peakCoverage(dayFronts?.battery, tariff, nowMs) }
     : null;
@@ -154,14 +154,14 @@ export function DayCard({ now, fronts, holiday }: {
   const segs = tariffSegments(tariff, axis);
   const water = waterSegments(dayFronts?.tank, axis);
   const heatCells = wins
-    .map(({ w, a, b }) => ({ a, b, cell: heatingCell(w, dayFronts?.heating, holiday.climate) }))
+    .map(({ w, a, b }) => ({ a, b, cell: heatingCell(w, dayFronts?.heating, holiday.climate, tariff?.structure) }))
     .filter((x) => x.cell != null);
 
   // ---- bands: one selectable column per tariff window, full text as real text below
   const bands = wins.map(({ w, a, b }) => {
     const mid = (Date.parse(w.start_utc) + Date.parse(w.end_utc)) / 2;
     const ws = water.find((s) => mid >= s.startMs && mid < s.endMs);
-    const heat = heatingCell(w, dayFronts?.heating, holiday.climate);
+    const heat = heatingCell(w, dayFronts?.heating, holiday.climate, tariff?.structure);
     const isCur = nowMs >= Date.parse(w.start_utc) && nowMs < Date.parse(w.end_utc);
     const info = {
       startLocal: w.start_local, endLocal: w.end_local, tier: tierOf(w),
