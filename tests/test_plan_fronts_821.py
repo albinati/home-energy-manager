@@ -460,3 +460,23 @@ def test_battery_by_band_null_realised_when_no_telemetry():
     cheap = _win("band_cheap", "cheap", 4, 7, 12.49)
     r = pf.battery_by_band([cheap], {}, {}, [], set(), 10.0, NOW, LON)
     assert r[0]["realised_import_kwh"] is None and r[0]["planned_import_kwh"] is None
+
+
+def test_invalidate_during_inflight_build_does_not_cache_stale_result(monkeypatch):
+    """#909 R1: a build that started before invalidate_cache() must not store
+    its (pre-invalidate) result."""
+    from src.analytics import plan_fronts as pf
+
+    pf.clear_cache()
+
+    def _slow_tariff(*a, **k):
+        pf.invalidate_cache()          # an apply lands mid-build
+        return {}
+
+    monkeypatch.setattr(pf, "tariff_section", _slow_tariff)
+    pf._plan_fronts_build(use_cache=True)
+    assert pf._cache == {}
+    monkeypatch.undo()
+    pf._plan_fronts_build(use_cache=True)   # no concurrent invalidate: caches
+    assert len(pf._cache) == 1
+    pf.clear_cache()

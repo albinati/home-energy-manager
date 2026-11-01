@@ -11,7 +11,7 @@ import type { CockpitNow, PlanFrontsResponse, SimulateBatchResponse } from "../.
 import { casaTile, currentWindow, fmt, holidayFlags, isAway, num, tierOf } from "../simple/logic.ts";
 import {
   CEILING_KEY, SETPOINT_KEY, VERDICTS, comfortWord, errorMessage, feedbackMessage, peakRow, previewText,
-  pumpLine, roomChips, runApply, setpointBounds, stepSetpoint, stepperHidden, targetsLine, type Verdict,
+  draftSettled, pumpLine, roomChips, runApply, setpointBounds, stepSetpoint, stepperHidden, targetsLine, type Verdict,
 } from "./heatingLogic";
 import "../../../styles/home-v3-heating.css";
 
@@ -99,6 +99,16 @@ function AdminControls({ setpoint, planCeiling, hidden, onChanged }: {
   const [sim, setSim] = useState<SimulateBatchResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [settling, setSettling] = useState(false);
+
+  // After a verified apply, hold the applied draft until the polled setpoint
+  // matches (or 15 s pass) so the stepper never flashes the old value.
+  useEffect(() => {
+    if (!settling) return;
+    if (draftSettled(draft, setpoint)) { setDraft(null); setSettling(false); return; }
+    const id = setTimeout(() => { setDraft(null); setSettling(false); }, 15000);
+    return () => clearTimeout(id);
+  }, [settling, draft, setpoint]);
 
   // Allowed range + live ceiling from the settings metadata (admin-only endpoint;
   // falls back to schema defaults and the plan's ceiling when unreachable).
@@ -128,7 +138,7 @@ function AdminControls({ setpoint, planCeiling, hidden, onChanged }: {
 
   const bounds = setpointBounds(range.min, range.max, range.ceiling, planCeiling);
   const shown = draft ?? setpoint;
-  const dirty = draft != null && setpoint != null && Math.abs(draft - setpoint) > 1e-6;
+  const dirty = !settling && draft != null && setpoint != null && Math.abs(draft - setpoint) > 1e-6;
 
   const step = (dir: 1 | -1) => {
     if (shown == null || busy) return;
@@ -168,7 +178,8 @@ function AdminControls({ setpoint, planCeiling, hidden, onChanged }: {
         fetchSetpoint: async () => (await getPlanFronts()).heating?.setpoint_c ?? null,
       }, want);
       void onChanged();
-      setDraft(null); setSim(null);
+      setSim(null);
+      if (out.verified === "yes") setSettling(true); else setDraft(null);
       if (out.replanError) {
         setNotice(`Meta salva, mas o plano não foi refeito: ${msg(out.replanError)} Use Replanejar agora.`);
       } else if (out.verified === "no") {

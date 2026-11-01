@@ -2434,6 +2434,7 @@ async def settings_delete(key: str):
     cron_status = None
     if rts.SCHEMA[key].cron_reload:
         cron_status = reregister_cron_jobs(reason=f"settings_delete:{key}")
+    _invalidate_plan_fronts()
     return {"key": key, "removed": removed, "cron_status": cron_status}
 
 
@@ -2758,6 +2759,7 @@ async def dhw_boost_apply(x_simulation_id: str | None = Header(None, alias="X-Si
     try:
         out = await asyncio.to_thread(dhw_boost.apply)
         safeguards.record_action_time("dhw.boost")
+        _invalidate_plan_fronts()
         return out
     except dhw_boost.BoostBlocked as exc:
         raise _boost_http(exc)
@@ -2782,6 +2784,7 @@ async def dhw_boost_undo(x_simulation_id: str | None = Header(None, alias="X-Sim
     try:
         out = await asyncio.to_thread(dhw_boost.undo)
         safeguards.record_action_time("dhw.boost_undo")
+        _invalidate_plan_fronts()
         return out
     except dhw_boost.BoostBlocked as exc:
         raise _boost_http(exc)

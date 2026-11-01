@@ -186,6 +186,13 @@ export async function runApply(deps: ApplyDeps, want: number): Promise<ApplyOutc
   return { replanError, verified };
 }
 
+/** After a verified apply the stepper keeps showing the applied draft until the
+ *  polled setpoint catches up (no flash of the old value). True = release it. */
+export function draftSettled(draft: number | null, setpoint: number | null | undefined): boolean {
+  if (draft == null) return true;
+  return setpoint != null && Math.abs(setpoint - draft) < 1e-6;
+}
+
 // ------------------------------------------------------------------ feedback
 export type Verdict = "cold" | "ok" | "hot";
 export const VERDICTS: Array<{ v: Verdict; label: string }> = [

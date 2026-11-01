@@ -15,3 +15,6 @@
 .hv3-batt-rows dd.hv3-tone-warn { color: var(--warn); }
 .hv3-batt-note { margin: 0; font-size: var(--font-2xs); color: var(--text-mute); }
 .hv3-batt-state--warn { color: var(--warn); }
+@media (max-width: 720px) {
+  .hv3-batt { padding: var(--space-4); }   /* same as .hs-tile on phones */
+}

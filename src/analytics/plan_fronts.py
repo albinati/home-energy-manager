@@ -1021,9 +1021,16 @@ _inflight_guard = threading.Lock()
 _inflight: dict[tuple[str, str], threading.Lock] = {}
 
 
+_cache_generation = 0
+_gen_lock = threading.Lock()
+
+
 def invalidate_cache() -> None:
     """Drop the 60 s response cache so the next read reflects a just-applied
     setting or replan (the slow period/compare caches are left alone)."""
+    global _cache_generation
+    with _gen_lock:
+        _cache_generation += 1
     _cache.clear()
 
 
@@ -1056,6 +1063,7 @@ def _plan_fronts_build(day: date | None = None, *, now_utc: datetime | None = No
     use_cache = use_cache and not explicit_now
     ckey = (str(config.DB_PATH), day.isoformat())
     mono = time.monotonic()
+    gen_at_start = _cache_generation
     if use_cache:
         hit = _cache.get(ckey)
         if hit is not None and mono - hit[0] < _CACHE_TTL_S:
@@ -1088,7 +1096,7 @@ def _plan_fronts_build(day: date | None = None, *, now_utc: datetime | None = No
         "compare": _guard(compare_section, day),
         "billing": _guard(billing_section, day),
     }
-    if use_cache:
+    if use_cache and _cache_generation == gen_at_start:
         if len(_cache) > 32:
             _cache.clear()
         _cache[ckey] = (mono, result)

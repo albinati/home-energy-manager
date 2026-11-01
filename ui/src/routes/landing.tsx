@@ -19,6 +19,7 @@ import { buildSha } from "../lib/api";
 import { role } from "../lib/auth";
 import { plannerTz } from "../lib/plannerTz";
 import "../styles/home-simple.css";
+import "../styles/home-v3.css";
 
 // Dev-only fixture switch (`?mock=1`); eliminated from the production bundle.
 const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "1";
