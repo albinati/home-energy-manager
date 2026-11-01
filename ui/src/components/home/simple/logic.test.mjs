@@ -4,8 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   fmt, pp, mergeRuns, dayAxis, frac, hourTicks, waterSegments, tariffSegments, heatingCell,
-  batteryRunway, buildStatus, tierOf, billingVerdict, cycleLabel, nextHeating, aguaTile, casaTile, 
-  peakCoverage, powerSource, spendVerdict, spendLine, nextCharge, vacationHelp, holidayFlags,
+  batteryRunway, buildStatus, tierOf, billingVerdict, cycleLabel, nextHeating, aguaTile, casaTile,
+  peakCoverage, powerSource, spendVerdict, spendLine, vacationHelp, holidayFlags,
   isAwayPreset, localHHMM, sgbp, hourWord, agoraStale,
 } from "./logic.ts";
 
@@ -284,14 +284,6 @@ test("água tile: judged per shower on the predicted tank", () => {
   assert.equal(aguaTile(cockpit({ state: { tank_c: 43.2 } }), t([sh("20:00", "22:00", 45, null)], 43.2)).meaning, "Pode faltar para o banho das 20:00 (agora 43,2 °C, mínimo 45)");
   assert.equal(aguaTile(cockpit(), t([])).meaning, "Sem banho previsto hoje");
   assert.equal(aguaTile(cockpit(), { tank: { error: "x" } }).meaning, "Água quente");
-});
-
-test("next charge: kWh INTO the battery, away wording from the plan", () => {
-  const b = { reserve_pct: 10, windows: [
-    { kind: "grid_charge", start_utc: utc("22:00"), end_utc: utc("24:00"), start_local: "22:00", end_local: "24:00", grid_kwh: 3.0, charge_kwh: 2.4 },
-  ], by_band: [] };
-  assert.equal(nextCharge(b, tariff, NOWMS, false), "Próximo: 22–24 carrega da rede (2,4 kWh a 12,5p)");
-  assert.equal(nextCharge({ reserve_pct: 10, windows: [], by_band: [] }, tariff, NOWMS, true), "Próximo: carrega com o sol");
 });
 
 test("vacation help: plan-derived only while vacation is active; neutral in Normal", () => {

@@ -367,8 +367,6 @@ export function buildStatus({ now, fronts }: StatusCtx): string {
 // ------------------------------------------------------------------ tiles
 export interface TileText {
   value: string | null; unit: string; meaning: string; next: string; tone: "ok" | "warn" | "bad" | "dim";
-  /** Live flow line (Bateria tile only), shown between the headline and `meaning`. */
-  flow?: string; flowTone?: "charge" | "discharge" | "idle";
 }
 
 export function casaTile(now: CockpitNow, fronts: PlanFrontsResponse | null): TileText {
@@ -540,32 +538,6 @@ export function agoraStale(now: CockpitNow): string {
   if (age == null || !(age > FOX_STALE_S)) return stale && age != null ? ` (há ${Math.max(1, Math.floor(age / 60))} min)` : "";
   const min = Math.floor(age / 60);
   return min >= 60 ? ` (há ${Math.floor(min / 60)} h)` : ` (há ${min} min)`;
-}
-
-export function nextCharge(
-  b: PlanFrontsBattery | null | undefined,
-  tariff: PlanFrontsTariff | null | undefined,
-  nowMs: number,
-  away: boolean,
-): string {
-  if (!b) return "";
-  const ws = [...(b.windows ?? [])].sort((a, b2) => Date.parse(a.start_utc) - Date.parse(b2.start_utc));
-  const g = ws.find((w) => w.kind === "grid_charge" && Date.parse(w.end_utc) > nowMs);
-  if (g) {
-    const win = tariff?.windows?.find((w) => Date.parse(w.start_utc) <= Date.parse(g.start_utc) && Date.parse(w.end_utc) > Date.parse(g.start_utc));
-    const kwh = g.charge_kwh ?? g.grid_kwh;   // energy INTO the battery
-    const price = win?.price_p != null ? ` a ${pp(win.price_p)}` : "";
-    const q = kwh != null ? ` (${fmt(kwh)} kWh${price})` : "";
-    const ongoing = Date.parse(g.start_utc) <= nowMs;
-    return ongoing
-      ? `Próximo: carregando da rede até ${g.end_local}${q}`
-      : `Próximo: ${span(g.start_local, g.end_local)} carrega da rede${q}`;
-  }
-  if (away) return "Próximo: carrega com o sol";
-  const cheap = [...(tariff?.windows ?? [])].filter((w) => tierOf(w) === "cheap")
-    .sort((a, b2) => Date.parse(a.start_utc) - Date.parse(b2.start_utc));
-  const nc = cheap.find((w) => Date.parse(w.start_utc) > nowMs) ?? cheap[0];
-  return nc ? `Próximo: faixa barata ${span(nc.start_local, nc.end_local)}${nc.price_p != null ? ` (${pp(nc.price_p)})` : ""}` : "";
 }
 
 /** Help line under the mode switch. In Normal mode the current plan says nothing

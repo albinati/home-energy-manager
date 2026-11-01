@@ -132,18 +132,6 @@
 }
 .hs-tick:first-child { transform: none; }
 
-/* "now": one vertical line across the four lanes; --f = day fraction (0..1). */
-.hs-now {
-  position: absolute;
-  top: calc(-1 * var(--space-1)); bottom: calc(-1 * var(--space-1));
-  left: calc(var(--lw) + (100% - var(--lw)) * var(--f));
-  width: 2px;
-  margin-left: -1px;
-  background: var(--text);
-  opacity: 0.5;   /* translucent: never hides a segment's text */
-  border-radius: 1px;
-  pointer-events: none;
-}
 .hs-caption { margin: var(--space-3) 0 0; font-size: var(--font-xs); color: var(--text-mute); line-height: 1.5; }
 
 @media (max-width: 720px) {

@@ -97,7 +97,7 @@
 .dc-band--peak::before { background: var(--peak); }
 .dc-band[aria-pressed="true"] { background: var(--bg-card-3); color: var(--text); font-weight: 600; }
 .dc-band-detail { margin: 0; font-size: var(--font-sm); color: var(--text); font-variant-numeric: tabular-nums; }
-/* .dc-legend is deliberately NOT hidden on phones (the old .hs-caption-legend is). */
+/* .dc-legend is deliberately NOT hidden on phones (the retired v2 legend was). */
 
 @media (max-width: 720px) {
   .dc-plot { --lw: 4rem; }
