@@ -6,7 +6,7 @@ import type {
 } from "../../../lib/types";
 import {
   FAIXA_WORD, batteryRunway, chargeBasis, currentWindow, inNightWindow, isAway, localHHMM, minutesOf, num, peakCoverage, span, tierOf,
-  upcomingPeakSpan,
+  peakSpans, upcomingPeakSpan,
 } from "../simple/logic.ts";
 
 export type CardTone = "ok" | "warn" | "dim";
@@ -92,21 +92,33 @@ export function peakRow(b: PlanFrontsBattery | null, tariff: PlanFrontsResponse[
   return { key: "pico", label, text: "Já comprou da rede neste pico", tone: "warn" };
 }
 
+/** Does a local band [start, end) overlap the (midnight-wrapping) night window? */
+function overlapsNight(startLocal: string, endLocal: string, startHour: number, endHour: number): boolean {
+  const a = minutesOf(startLocal);
+  let b = minutesOf(endLocal);
+  if (b <= a) b += 1440;   // "00:00" / "24:00" ends
+  const ns = startHour * 60;
+  return inNightWindow(a, startHour, endHour) || inNightWindow((b - 1) % 1440, startHour, endHour) || (ns >= a && ns < b);
+}
+
 /** Expected charge on entering the first cheap band that follows the peak (the
- *  span containing or next after now) and falls in the night window, so a midday
- *  dip is never "Noite". Hidden once that band has started. */
+ *  latest span that has started, else the next one) and overlaps the night
+ *  window, so a midday dip is never "Noite". Hidden once that band has started. */
 export function nightRow(
   b: PlanFrontsBattery | null, tariff: PlanFrontsResponse["tariff"], nowMs: number, away: boolean,
   nightStartHour = 22, nightEndHour = 7,
 ): BatteryRow | null {
   if (!b) return null;
-  const peak = upcomingPeakSpan(tariff, nowMs);
+  // Anchor on the most recent peak that has started (it stays the anchor after
+  // it ends, until the cheap band starts), else on the upcoming one.
+  const spans = peakSpans(tariff?.windows);
+  const peak = [...spans].reverse().find((p) => Date.parse(p.start_utc) <= nowMs) ?? spans[0];
   if (!peak) return null;
   const peakEnd = Date.parse(peak.end_utc);
   const tw = [...(tariff?.windows ?? [])]
     .sort((x, y) => Date.parse(x.start_utc) - Date.parse(y.start_utc))
     .find((w) => Date.parse(w.start_utc) >= peakEnd && tierOf(w) === "cheap"
-      && inNightWindow(minutesOf(w.start_local), nightStartHour, nightEndHour));
+      && overlapsNight(w.start_local, w.end_local, nightStartHour, nightEndHour));
   if (!tw) return null;
   const n = (b.by_band ?? []).find((r) => r.start_local === tw.start_local && r.end_local === tw.end_local);
   if (!n || n.soc_entry_pct == null) return null;

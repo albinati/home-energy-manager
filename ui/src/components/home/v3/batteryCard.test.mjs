@@ -184,8 +184,14 @@ test("Agile peak run: one 'Pico 16–20' row that sees the severe_peak core; Noi
   const m = batteryCardModel(now({ now_utc: utc("12:00") }), mkFronts({ by_band }, tariff));
   assert.equal(row(m, "pico").label, "Pico 16–20");
   assert.equal(row(m, "pico").text, "Precisa comprar da rede");
-  // cheap-tier "19:00" dip is not in the night window: Noite is the 22:00 band
+  // a cheap 20:00-22:00 dip does not overlap the night window: Noite is the 22:00 band
   const dip = { ...tariff, windows: tariff.windows.map((w) => w.start_local === "20:00" ? { ...w, key: "very_cheap", label: "very cheap" } : w) };
   const m2 = batteryCardModel(now({ now_utc: utc("12:00") }), mkFronts({ by_band }, dip));
   assert.equal(row(m2, "noite").text.startsWith("Chega a ~30% às 22:00"), true);
+});
+
+test("Cosy Noite row survives the evening after the peak and hides once the cheap band starts", () => {
+  assert.equal(row(batteryCardModel(now({ now_utc: utc("20:00") }), mkFronts()), "noite").text, "Chega a ~31% às 22:00 e volta a carregar");
+  assert.equal(row(batteryCardModel(now({ now_utc: utc("17:30") }), mkFronts()), "noite").text.startsWith("Chega a ~31% às 22:00"), true);
+  assert.equal(row(batteryCardModel(now({ now_utc: utc("22:30") }), mkFronts()), "noite"), undefined);
 });

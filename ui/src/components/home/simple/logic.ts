@@ -173,7 +173,7 @@ export function heatingCell(
   w: PlanFrontsTariffWindow,
   heating: PlanFrontsHeating | null | undefined,
   off: boolean,
-  structure?: string | null,
+  structure: string | null | undefined,
 ): HeatCell | null {
   if (off) return { mode: "off", text: "desligado" };
   if (!heating || heating.error) return null;

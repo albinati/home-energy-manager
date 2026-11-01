@@ -4,7 +4,7 @@ import type { CockpitNow, PlanFrontsResponse } from "../../../lib/types";
 import { usePoll } from "../../../lib/poll";
 import { getPlanFronts, getPvToday, getExecutionToday, getSchedulerTimeline } from "../../../lib/endpoints";
 import {
-  frac, tariffSegments, heatingCell, waterSegments, hourTicks, hourWord, tierOf, peakSpans, span, peakCoverage, pp,
+  frac, tariffSegments, heatingCell, waterSegments, hourTicks, hourWord, tierOf, peakSpans, upcomingPeakSpan, span, peakCoverage, pp,
   FAIXA_WORD, type HolidayFlags, type Axis,
 } from "../simple/logic.ts";
 import {
@@ -100,7 +100,7 @@ export function DayCard({ now, fronts, holiday }: {
 
   const tariff = dayFronts?.tariff && !dayFronts.tariff.error ? dayFronts.tariff : null;
   const axis: Axis = { startMs: bounds.startMs, endMs: bounds.endMs };
-  const peakWin = peakSpans(tariff?.windows)[0] ?? null;
+  const peakWin = upcomingPeakSpan(tariff, nowMs) ?? peakSpans(tariff?.windows)[0] ?? null;
   const peak: PeakInfo | null = peakWin
     ? { label: span(peakWin.start_local, peakWin.end_local), coverage: peakCoverage(dayFronts?.battery, tariff, nowMs) }
     : null;
