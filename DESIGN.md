@@ -171,7 +171,6 @@ rationale + the rules. When they disagree, fix the drift, don't fork the values.
 | 2026-10-28 | UI epic #879: Home/Insights/Settings v2, band strip instead of price curves, `--on-cheap/--on-standard/--on-peak` tokens, `--peak-export` removed, Journal out of the nav, Agile-era copy and ~60 dead UI files/wrappers deleted | Cosy is a 3-band tariff; the old charts were percentile-based and confusing |
 | 2026-10-29 | Home: battery kW shown in the Bateria tile AND in the "Ao vivo:" balance row (accepted exception to "every number once") | Tile = battery detail (SoC, flow in words, source); row = house balance (sol / casa / bateria / rede). Owner feedback: needed to know if the battery is charging |
 | 2026-11-01 | Home v3 (epic #897, owner-approved): Home may carry ONE hand-rolled SVG chart ("O dia": Hoje/Amanhã, sol, bateria %, consumo) with the BandStrip table turned into Tarifa / Aquecer / Água lanes under it; "Agora" becomes flow pills (entra / vai para); MoneyCard keeps only the money | Owner wants the day readable at a glance. Chart stays lib-free so the ~0.2 s budget holds |
-| 2026-11-01 | Home may carry per-device admin controls (Bateria / Aquecimento / Água cards), always simulate -> confirm; viewers stay read-only (epic #897) | Common actions without opening Settings; no write without a visible simulation and an explicit confirm |
 
 ## Gap status (2026-07-02 re-audit — was "Open Gaps", 2026-06-16)
 All gaps re-verified against source on 2026-07-02 (4-sweep conformity audit):

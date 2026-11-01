@@ -699,7 +699,6 @@ export function spendLine(spend: PlanFrontsSpend | null | undefined): string {
     const avg = spend.realised_avg_import_p != null ? ` a ${pp(spend.realised_avg_import_p)}` : "";
     parts.push(`${fmt(spend.realised_import_kwh)} kWh da rede${avg}`);
   }
-  if (spend.pv_kwh != null) parts.push(`${fmt(spend.pv_kwh)} kWh de sol`);
   return parts.join(" · ");
 }
 export function todayNet(spend: PlanFrontsSpend | null | undefined): number | null {

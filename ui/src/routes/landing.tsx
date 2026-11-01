@@ -23,8 +23,9 @@ import "../styles/home-simple.css";
 // Dev-only fixture switch (`?mock=1`); eliminated from the production bundle.
 const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "1";
 
-// Home (#879): ridiculously simple. Reads ONLY /cockpit/now (10 s),
-// /plan/fronts (60 s) and /status/alerts (60 s); /whoami is fetched by the app
+// Home (#879, v3 #897): reads /cockpit/now (10 s),
+// /plan/fronts (60 s), /status/alerts (60 s) and, inside the O dia card, /pv/today, /execution/today,
+// /scheduler/timeline (120 s) and /plan/fronts?date=tomorrow; /whoami is fetched by the app
 // shell. No chart library is imported on this route.
 export default function Landing() {
   const now = usePoll(async () => {

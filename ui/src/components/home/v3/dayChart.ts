@@ -20,6 +20,7 @@ export interface TimelineResp {
 
 // ------------------------------------------------------------------- format (shared pt-BR formatter)
 import { fmt } from "../simple/logic.ts";
+import type { PeakCoverage } from "../simple/logic.ts";
 export { fmt };
 
 // -------------------------------------------------------------- local days
@@ -80,6 +81,7 @@ export interface DaySeries {
   loadFc: Pt[];        // kW, planned
   pvSoFarKwh: number | null;     // measured generation so far
   pvForecastKwh: number | null;  // whole-day forecast / plan
+  pvForecastMissing: boolean;    // provider failed (backend fills 0.0): never shown as "0 sun"
   pvCmp: { actual: number; expected: number } | null;   // elapsed slots with both values
 }
 export interface SeriesInput {
@@ -92,6 +94,7 @@ export interface SeriesInput {
   capacityKwh: number | null;
   socNowPct: number | null;
 }
+const MIN_DAY_FORECAST_KWH = 0.05;
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
 export function buildDaySeries(inp: SeriesInput): DaySeries {
@@ -99,7 +102,7 @@ export function buildDaySeries(inp: SeriesInput): DaySeries {
   const inDay = (t: number) => t >= bounds.startMs && t < bounds.endMs;
   const out: DaySeries = {
     pvFc: [], pvAct: [], socAct: [], socPlan: [], loadAct: [], loadFc: [],
-    pvSoFarKwh: null, pvForecastKwh: null, pvCmp: null,
+    pvSoFarKwh: null, pvForecastKwh: null, pvForecastMissing: false, pvCmp: null,
   };
 
   const seen = new Set<number>();
@@ -112,8 +115,9 @@ export function buildDaySeries(inp: SeriesInput): DaySeries {
   for (const { s, t } of pvSlots) {
     const elapsed = t + SLOT_MS <= nowMs;
     const mid = t + SLOT_MS / 2;
-    // The live forecast is forward-only (0 for elapsed slots): elapsed slots use the committed plan.
-    const fc = elapsed ? s.pv_planned_kwh : (s.pv_forecast_kwh ?? s.pv_planned_kwh);
+    // The committed plan wins when present. The live forecast is forward-only (0 for elapsed
+    // slots) and the backend fills 0.0 when the provider fails, so it is only the fallback.
+    const fc = s.pv_planned_kwh ?? (elapsed ? null : s.pv_forecast_kwh);
     if (isNum(fc)) { out.pvFc.push({ t: mid, v: fc * 2 }); fcSum += fc; fcN++; }
     if (elapsed && isNum(s.pv_actual_kwh)) {
       out.pvAct.push({ t: mid, v: s.pv_actual_kwh * 2 });
@@ -121,9 +125,12 @@ export function buildDaySeries(inp: SeriesInput): DaySeries {
       if (isNum(s.pv_planned_kwh)) { cmpA += s.pv_actual_kwh; cmpE += s.pv_planned_kwh; cmpN++; }
     }
     const lf = s.load_forecast_kwh;
-    if (isNum(lf) && (!isToday || !elapsed)) out.loadFc.push({ t: mid, v: lf * 2 });
+    if (isNum(lf) && (!isToday || mid > nowMs)) out.loadFc.push({ t: mid, v: lf * 2 });
   }
-  if (fcN > 0) out.pvForecastKwh = fcSum;
+  if (fcN > 0 && fcSum < MIN_DAY_FORECAST_KWH) {
+    out.pvFc = [];                       // an all-zero day forecast is a failed provider, not a dark day
+    out.pvForecastMissing = true;
+  } else if (fcN > 0) out.pvForecastKwh = fcSum;
   if (isToday && actN > 0) out.pvSoFarKwh = actSum;
   if (cmpN > 0) out.pvCmp = { actual: cmpA, expected: cmpE };
 
@@ -197,11 +204,19 @@ export function valueAt(pts: Pt[], t: number): number | null {
 }
 
 // ------------------------------------------------------------------ summary
-export interface PeakInfo { startMs: number; endMs: number; label: string; plannedImportKwh: number | null }
+export interface PeakInfo { label: string; coverage: PeakCoverage | null }
 const FULL_PCT = 98;
+const COVER_SLACK_MS = 60 * 60000;
 
-/** One plain-language sentence group from real numbers. Missing facts are skipped. */
-export function daySummary(i: { isToday: boolean; series: DaySeries; peak: PeakInfo | null; tz?: string }): string {
+/** Does the plan trajectory reach (about) the end of the day? */
+export function planCoversDay(plan: Pt[], endMs: number): boolean {
+  return plan.length > 0 && plan[plan.length - 1].t >= endMs - COVER_SLACK_MS;
+}
+
+/** One plain-language sentence group from real data. Missing facts are skipped.
+ *  The peak clause uses `peakCoverage()` from logic.ts (same source as the status line),
+ *  carries no kWh (the status line owns it) and never states the plan as fact for the past. */
+export function daySummary(i: { isToday: boolean; series: DaySeries; peak: PeakInfo | null; endMs: number; tz?: string }): string {
   const out: string[] = [];
   const s = i.series;
   if (i.isToday && s.pvCmp && s.pvCmp.expected >= 0.5) {
@@ -210,24 +225,58 @@ export function daySummary(i: { isToday: boolean; series: DaySeries; peak: PeakI
   }
   const plan = s.socPlan;
   if (plan.length > 0) {
-        const full = plan.find((p) => p.v >= FULL_PCT);
+    const full = plan.find((p) => p.v >= FULL_PCT);
     if (i.isToday && plan[0].v >= FULL_PCT) {
       out.push("A bateria já está cheia.");
     } else if (full) {
       out.push(`A bateria ${i.isToday ? "completa" : "deve completar"} às ${hhmm(full.t, i.tz)}.`);
-    } else {
+    } else if (planCoversDay(plan, i.endMs)) {
       const top = plan.reduce((a, b) => (b.v > a.v ? b : a));
       out.push(`A bateria ${i.isToday ? "chega" : "deve chegar"} a ${Math.round(top.v)} % às ${hhmm(top.t, i.tz)}.`);
+    } else {
+      out.push(`O plano da bateria vai até ${hhmm(plan[plan.length - 1].t, i.tz)}.`);
     }
   }
-  if (i.peak) {
-    const a = valueAt(plan, i.peak.startMs), b = valueAt(plan, i.peak.endMs);
-    const buys = i.peak.plannedImportKwh;
-    const grid = buys == null ? "" : buys <= 0.05 ? " sem comprar da rede" : ` comprando ~${fmt(buys)} kWh da rede`;
-    if (a != null && b != null) out.push(`No pico (${i.peak.label}) a bateria vai de ${Math.round(a)} % a ${Math.round(b)} %${grid}.`);
-    else if (grid) out.push(`No pico (${i.peak.label}) a casa roda${grid}.`);
+  const c = i.peak?.coverage;
+  if (i.peak && c) {
+    const lead = `No pico (${i.peak.label})`;
+    if (c.kind === "bought") out.push(`${lead} a casa já comprou da rede.`);
+    else if (c.kind === "buys") out.push(`${lead} o plano compra da rede.`);
+    else out.push(`${lead} ${i.isToday ? "a bateria segura" : "a bateria deve segurar"} a casa sem comprar da rede.`);
   }
   return out.join(" ");
+}
+
+// ------------------------------------------------------- bands (tap to read)
+export interface BandInfo {
+  startLocal: string; endLocal: string; tier: "cheap" | "standard" | "peak"; price: string | null;
+  heat: { mode: "boost" | "hold" | "off"; text: string } | null; water: string | null;
+}
+const TIER_WORD = { cheap: "barata", standard: "dia", peak: "pico" } as const;
+const hourWord2 = (h: string) => (h.endsWith(":00") ? h.slice(0, 2) : h);
+export function bandRange(b: { startLocal: string; endLocal: string }): string {
+  return `${hourWord2(b.startLocal)}–${hourWord2(b.endLocal)}`;
+}
+/** "16–19 · pico 38,2p · aquecimento desligado · água 37 °C (economia)". Real text for
+ *  screen readers and touch (a segment's `title` does neither). */
+export function bandDetail(b: BandInfo): string {
+  const out = [bandRange(b), `${TIER_WORD[b.tier]}${b.price ? ` ${b.price}` : ""}`];
+  if (b.heat) {
+    const t = b.heat.text;
+    out.push(b.heat.mode === "off" ? "aquecimento desligado"
+      : b.heat.mode === "boost" ? `aquecimento ${t.replace(/^aquece\s*/, "") || "ligado"}`
+      : `aquecimento ${t}`);
+  }
+  if (b.water) out.push(b.water === "desligado" ? "água desligada" : `água ${b.water}`);
+  return out.join(" · ");
+}
+
+/** Past UTC days never change: fetch once, keep for the session. The current UTC day always refetches. */
+export async function cachedPast<T>(cache: Map<string, T>, key: string, isPast: boolean, fetcher: () => Promise<T>): Promise<T> {
+  if (isPast && cache.has(key)) return cache.get(key) as T;
+  const r = await fetcher();
+  if (isPast) cache.set(key, r);
+  return r;
 }
 
 /** First plan point at/over the "full" mark, for the Amanhã header. */
