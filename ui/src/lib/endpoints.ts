@@ -261,3 +261,12 @@ export const getRecommendations = (range?: { start: string; end: string }, fresh
   if (fresh) q.push("fresh=1");
   return getJson<RecommendationsResponse>(`/insights/recommendations${q.length ? `?${q.join("&")}` : ""}`);
 };
+
+// Home v3 "O dia" (#898): per-slot PV (UTC day), measured SoC/load (UTC day) and the plan's
+// SoC trajectory. All viewer-readable GETs; the response types live next to the pure logic.
+import type { PvTodayResp, ExecTodayResp, TimelineResp } from "../components/home/v3/dayChart";
+export const getPvToday = (utcDate: string) =>
+  getJson<PvTodayResp>(`/pv/today?date=${encodeURIComponent(utcDate)}`);
+export const getExecutionToday = (utcDate: string) =>
+  getJson<ExecTodayResp>(`/execution/today?date=${encodeURIComponent(utcDate)}`);
+export const getSchedulerTimeline = () => getJson<TimelineResp>("/scheduler/timeline");

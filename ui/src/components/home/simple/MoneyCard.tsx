@@ -1,11 +1,9 @@
 import { Link } from "wouter-preact";
 import type { PlanFrontsBilling, PlanFrontsResponse } from "../../../lib/types";
-import { sgbp, fmt, spendVerdict, spendLine, todayNet, cycleLabel, billingVerdict, type HolidayFlags } from "./logic";
-import { BandStrip } from "./BandStrip";
+import { sgbp, fmt, spendVerdict, spendLine, todayNet, cycleLabel, billingVerdict } from "./logic";
 
-export function MoneyCard({ fronts, nowMs, holiday, tz }: {
-  fronts: PlanFrontsResponse | null; nowMs: number; holiday: HolidayFlags; tz?: string;
-}) {
+// Money only (#898): the day strip moved to the "O dia" card (components/home/v3/DayCard).
+export function MoneyCard({ fronts }: { fronts: PlanFrontsResponse | null }) {
   const spend = fronts?.spend && !fronts.spend.error ? fronts.spend : null;
   const billing = fronts?.billing && !fronts.billing.error ? fronts.billing : null;
   const v = spendVerdict(spend);
@@ -39,7 +37,6 @@ export function MoneyCard({ fronts, nowMs, holiday, tz }: {
           )}
         </div>
       </div>
-      {fronts && <BandStrip fronts={fronts} nowMs={nowMs} holiday={holiday} tz={tz} />}
     </section>
   );
 }

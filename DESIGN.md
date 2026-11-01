@@ -144,6 +144,11 @@ rationale + the rules. When they disagree, fix the drift, don't fork the values.
 6. **System fonts** — deliberate; see Typography.
 7. **Performance budget (~0.2s above-fold)** trumps visual flourish. Home and
    Settings load no ECharts; charts live behind Insights "ver mais".
+   Owner exception (2026-11-01, epic #897): Home may carry ONE chart, the "O dia"
+   card: hand-rolled inline SVG (viewBox + `preserveAspectRatio="none"` +
+   `vector-effect="non-scaling-stroke"`), no chart library, still inside the
+   ~0.2 s budget. The Tarifa / Aquecer / Água lanes sit under that chart on the
+   same x axis (they replace the old BandStrip table).
 8. **Every number once.** A figure (grid import today, indoor temperature, vs
    fixed tariff, tau/UA/C) appears in exactly one place per screen; the other
    surfaces link to it. One number per card, with the word that explains it and
@@ -165,6 +170,8 @@ rationale + the rules. When they disagree, fix the drift, don't fork the values.
 | 2026-07-02 | Motion sub-scale `--dur-fast/med/slow`; `--space-0 2px`; breakpoint scale documented (#595) | Converge the 52 ad-hoc durations + chip micro-spacing on tokens |
 | 2026-10-28 | UI epic #879: Home/Insights/Settings v2, band strip instead of price curves, `--on-cheap/--on-standard/--on-peak` tokens, `--peak-export` removed, Journal out of the nav, Agile-era copy and ~60 dead UI files/wrappers deleted | Cosy is a 3-band tariff; the old charts were percentile-based and confusing |
 | 2026-10-29 | Home: battery kW shown in the Bateria tile AND in the "Ao vivo:" balance row (accepted exception to "every number once") | Tile = battery detail (SoC, flow in words, source); row = house balance (sol / casa / bateria / rede). Owner feedback: needed to know if the battery is charging |
+| 2026-11-01 | Home v3 (epic #897, owner-approved): Home may carry ONE hand-rolled SVG chart ("O dia": Hoje/Amanhã, sol, bateria %, consumo) with the BandStrip table turned into Tarifa / Aquecer / Água lanes under it; "Agora" becomes flow pills (entra / vai para); MoneyCard keeps only the money | Owner wants the day readable at a glance. Chart stays lib-free so the ~0.2 s budget holds |
+| 2026-11-01 | Home may carry per-device admin controls (Bateria / Aquecimento / Água cards), always simulate -> confirm; viewers stay read-only (epic #897) | Common actions without opening Settings; no write without a visible simulation and an explicit confirm |
 
 ## Gap status (2026-07-02 re-audit — was "Open Gaps", 2026-06-16)
 All gaps re-verified against source on 2026-07-02 (4-sweep conformity audit):

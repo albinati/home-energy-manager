@@ -1,0 +1,88 @@
+/* Home v3 (#898): "Agora" flow pills + "O dia" chart. Tokens only. */
+
+/* ── Agora ───────────────────────────────────────────────────────────────── */
+.dc-flow { display: flex; flex-direction: column; gap: var(--space-3); }
+.dc-flow .hs-eyebrow { margin: 0; }
+.dc-flow-row { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
+.dc-flow-group { display: flex; flex-wrap: wrap; gap: var(--space-3); flex: 1 1 18rem; }
+.dc-flow-arrow { color: var(--text-mute); display: inline-flex; }
+.dc-pill {
+  flex: 1 1 8.5rem;
+  display: flex; align-items: center; gap: var(--space-3);
+  min-height: 2.75rem; box-sizing: border-box;
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-card-2); border-radius: var(--radius);
+  font-size: var(--font-sm);
+}
+.dc-pill-kw { margin-left: auto; font-variant-numeric: tabular-nums; }
+.dc-flow-cap { margin: 0; font-size: var(--font-xs); color: var(--text-mute); }
+.dc-dot { width: 0.625rem; height: 0.625rem; border-radius: 50%; display: inline-block; flex: none; }
+.dc-dot--sol { background: var(--pv); }
+.dc-dot--rede { background: var(--grid); }
+.dc-dot--casa { background: var(--house); }
+.dc-dot--bateria { background: var(--batt); }
+@media (max-width: 720px) { .dc-flow-arrow { display: none; } }
+
+/* ── O dia ───────────────────────────────────────────────────────────────── */
+.dc-day { display: flex; flex-direction: column; gap: var(--space-4); }
+.dc-head { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; justify-content: space-between; }
+.dc-head .hs-eyebrow { margin: 0; }
+.dc-seg { display: inline-flex; background: var(--bg-card-2); border-radius: var(--radius); padding: var(--space-0); gap: var(--space-0); }
+.dc-seg button {
+  font: inherit; font-size: var(--font-sm); min-height: 2.25rem; padding: 0 var(--space-4);
+  border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-dim); cursor: pointer;
+}
+.dc-seg button[aria-pressed="true"] { background: var(--bg-card-3); color: var(--text); font-weight: 600; }
+
+.dc-metrics { display: flex; flex-wrap: wrap; gap: var(--space-5); align-items: baseline; }
+.dc-metric { display: flex; flex-direction: column; gap: var(--space-0); }
+.dc-metric-label { font-size: var(--font-xs); color: var(--text-mute); }
+.dc-metric-value { font-size: var(--font-xl); font-weight: 700; font-variant-numeric: tabular-nums; }
+.dc-metric-unit { font-size: var(--font-md); font-weight: 500; color: var(--text-mute); }
+
+.dc-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.dc-chip {
+  font: inherit; font-size: var(--font-sm); min-height: 2.25rem; padding: 0 var(--space-3);
+  border: 0; border-radius: var(--radius-pill); background: var(--bg-card-2); color: var(--text-dim); cursor: pointer;
+  display: inline-flex; align-items: center; gap: var(--space-2);
+}
+.dc-chip[aria-pressed="true"] { background: var(--bg-card-3); color: var(--text); }
+
+/* One x axis: every row shares the label column --lw. */
+.dc-plot { --lw: 6rem; --lane-h: 2.25rem; display: flex; flex-direction: column; gap: var(--space-2); }
+.dc-main { position: relative; display: flex; flex-direction: column; gap: var(--space-2); }
+.dc-chart-row { display: flex; align-items: stretch; }
+.dc-axis {
+  flex: none; width: var(--lw);
+  display: flex; flex-direction: column; justify-content: space-between;
+  padding: 0 var(--space-2) 0 0; box-sizing: border-box;
+  font-size: var(--font-2xs); color: var(--text-mute); font-variant-numeric: tabular-nums;
+}
+.dc-svg { flex: 1; min-width: 0; height: 12.5rem; display: block; }
+.dc-ruler-row { display: flex; min-height: var(--space-4); }
+.dc-ruler { height: var(--space-4); }
+
+.dc-grid { stroke: var(--bg-card-3); stroke-width: 1; }
+.dc-pv-area { fill: color-mix(in srgb, var(--pv) 22%, transparent); }
+.dc-pv-fc { fill: none; stroke: var(--pv); stroke-width: 1.5; stroke-dasharray: 4 4; opacity: 0.8; }
+.dc-pv-act { fill: none; stroke: var(--pv); stroke-width: 2.5; }
+.dc-soc-act { fill: none; stroke: var(--batt); stroke-width: 2.5; }
+.dc-soc-plan { fill: none; stroke: var(--batt); stroke-width: 2; stroke-dasharray: 6 5; }
+.dc-load-act { fill: none; stroke: var(--house); stroke-width: 2; }
+.dc-load-fc { fill: none; stroke: var(--house); stroke-width: 1.5; stroke-dasharray: 4 4; }
+
+/* "now": one vertical line over lanes + chart (not the ruler); --f = day fraction (0..1). */
+.dc-now {
+  position: absolute; top: 0; bottom: 0;
+  left: calc(var(--lw) + (100% - var(--lw)) * var(--f));
+  width: 2px; margin-left: -1px;
+  background: var(--text); opacity: 0.5; border-radius: 1px; pointer-events: none;
+}
+.dc-summary { margin: 0; font-size: var(--font-md); line-height: 1.5; color: var(--text-dim); }
+.dc-day .hs-caption { margin: 0; }
+
+@media (max-width: 720px) {
+  .dc-plot { --lw: 4rem; }
+  .dc-svg { height: 10rem; }
+  .dc-metric-value { font-size: var(--font-lg); }
+}
