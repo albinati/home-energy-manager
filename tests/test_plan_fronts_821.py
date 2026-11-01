@@ -460,3 +460,60 @@ def test_battery_by_band_null_realised_when_no_telemetry():
     cheap = _win("band_cheap", "cheap", 4, 7, 12.49)
     r = pf.battery_by_band([cheap], {}, {}, [], set(), 10.0, NOW, LON)
     assert r[0]["realised_import_kwh"] is None and r[0]["planned_import_kwh"] is None
+
+
+def test_invalidate_during_inflight_build_does_not_cache_stale_result(monkeypatch):
+    """#909 R1: a build that started before invalidate_cache() must not store
+    its (pre-invalidate) result."""
+    from src.analytics import plan_fronts as pf
+
+    pf.clear_cache()
+
+    def _slow_tariff(*a, **k):
+        pf.invalidate_cache()          # an apply lands mid-build
+        return {}
+
+    monkeypatch.setattr(pf, "tariff_section", _slow_tariff)
+    pf._plan_fronts_build(use_cache=True)
+    assert pf._cache == {}
+    monkeypatch.undo()
+    pf._plan_fronts_build(use_cache=True)   # no concurrent invalidate: caches
+    assert len(pf._cache) == 1
+    pf.clear_cache()
+
+
+def test_store_is_atomic_with_generation_check():
+    """#909: check -> invalidate -> store interleaving must not cache stale data."""
+    from src.analytics import plan_fronts as pf
+
+    pf.clear_cache()
+    gen = pf._cache_generation
+    pf.invalidate_cache()                                  # lands between check and store
+    assert pf._store_if_current(("d", "x"), 1.0, {"stale": 1}, gen) is False
+    assert pf._cache == {}
+    assert pf._store_if_current(("d", "x"), 1.0, {"ok": 1}, pf._cache_generation) is True
+    assert ("d", "x") in pf._cache
+    pf.clear_cache()
+
+
+def test_invalidate_blocks_while_store_holds_the_lock():
+    import threading
+
+    from src.analytics import plan_fronts as pf
+
+    pf.clear_cache()
+    done = threading.Event()
+    with pf._gen_lock:                                     # a store in its critical section
+        t = threading.Thread(target=lambda: (pf.invalidate_cache(), done.set()))
+        t.start()
+        assert not done.wait(0.2)                          # invalidate waits for the store
+    t.join(2)
+    assert done.is_set()
+
+
+def test_clear_cache_bumps_generation():
+    from src.analytics import plan_fronts as pf
+
+    g = pf._cache_generation
+    pf.clear_cache()
+    assert pf._cache_generation == g + 1

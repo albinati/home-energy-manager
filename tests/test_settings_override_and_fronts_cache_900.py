@@ -70,3 +70,39 @@ def test_invalidate_cache_is_idempotent():
     pf.invalidate_cache()
     pf.invalidate_cache()
     assert pf._cache == {}
+
+
+def test_delete_drops_fronts_cache(client):
+    """#909 R4."""
+    client.put("/api/v1/settings/INDOOR_SETPOINT_C", json={"value": 21.5})
+    pf._cache[("x", "d")] = (1e18, {})
+    r = client.delete("/api/v1/settings/INDOOR_SETPOINT_C")
+    assert r.status_code == 200, r.text
+    assert pf._cache == {}
+
+
+@pytest.mark.parametrize("path,attr", [("/api/v1/dhw/boost", "apply"), ("/api/v1/dhw/boost/undo", "undo")])
+def test_dhw_boost_and_undo_drop_fronts_cache(client, monkeypatch, path, attr):
+    from src import dhw_boost
+    from src.api import main as m
+
+    monkeypatch.setattr(dhw_boost, attr, lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(m, "_boost_rate_limit", lambda *a, **k: None)
+    pf._cache[("x", "d")] = (1e18, {})
+    r = client.post(path)
+    assert r.status_code == 200, r.text
+    assert pf._cache == {}
+
+
+def test_dhw_boost_failure_keeps_fronts_cache(client, monkeypatch):
+    from src import dhw_boost
+    from src.api import main as m
+
+    def _boom(*a, **k):
+        raise ValueError("bad")
+
+    monkeypatch.setattr(dhw_boost, "apply", _boom)
+    monkeypatch.setattr(m, "_boost_rate_limit", lambda *a, **k: None)
+    pf._cache[("x", "d")] = (1e18, {})
+    assert client.post("/api/v1/dhw/boost").status_code == 422
+    assert pf._cache != {}

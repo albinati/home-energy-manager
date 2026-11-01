@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   comfortWord, roomChips, lwtWord, pumpLine, stepperHidden, peakRow, targetsLine,
-  setpointBounds, stepSetpoint, previewText, feedbackMessage, errorMessage, runApply,
+  setpointBounds, stepSetpoint, previewText, feedbackMessage, errorMessage, runApply, draftSettled,
 } from "./heatingLogic.ts";
 
 const utc = (hhmm) => { const [h, m] = hhmm.split(":").map(Number); return new Date(Date.UTC(2026, 9, 7, h - 1, m)).toISOString(); };
@@ -144,4 +144,11 @@ test("runApply: verification only counts on a fresh successful read", async () =
   assert.equal((await runApply(deps({ fetchSetpoint: async () => { throw new Error("net"); } }), 21.5)).verified, "unknown");
   assert.equal((await runApply(deps({ fetchSetpoint: async () => null }), 21.5)).verified, "unknown");
   assert.equal((await runApply(deps({ fetchSetpoint: async () => 21 }), 21.5)).verified, "no");
+});
+
+test("draftSettled: releases only when the polled setpoint equals the draft", () => {
+  assert.equal(draftSettled(null, 21), true);
+  assert.equal(draftSettled(21.5, 21), false);
+  assert.equal(draftSettled(21.5, null), false);
+  assert.equal(draftSettled(21.5, 21.5), true);
 });

@@ -1,0 +1,10 @@
+/* Home v3 shared layout (#909). Tokens only. */
+
+/* Device cards (Bateria, Aquecimento, Água quente): own auto-fit grid.
+   min(300px, 100%) lets a card shrink below 300px instead of overflowing narrow phones. */
+.hv3-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+  gap: var(--space-3);
+  align-items: start;
+}
