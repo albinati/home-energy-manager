@@ -270,3 +270,36 @@ export const getPvToday = (utcDate: string) =>
 export const getExecutionToday = (utcDate: string) =>
   getJson<ExecTodayResp>(`/execution/today?date=${encodeURIComponent(utcDate)}`);
 export const getSchedulerTimeline = () => getJson<TimelineResp>("/scheduler/timeline");
+
+/* ----- "Banho extra hoje" (#901) — GET is viewer-readable, POSTs are admin
+   and carry the simulate -> confirm -> apply X-Simulation-Id flow. ----- */
+
+export interface DhwBoostStatus {
+  active: boolean;
+  row_id: number | null;
+  started_utc: string | null;
+  until_utc: string | null;
+  boost_target_c: number | null;
+  /** True when the button may be offered right now. */
+  available: boolean;
+  /** Why not (distinct backend codes: PassiveModeLocked, HolidayMode, ...). */
+  blocked: { error: string; message: string } | null;
+  target_c: number;
+  hold_hours: number;
+  /** Inside the firmware reheat deadband the boost also turns Powerful on. */
+  uses_powerful: boolean;
+  /** Calibrated reheat differential (C). */
+  reheat_differential_c: number;
+  /** Next weekly firmware stand-off window; null when not configured. */
+  legionella: { start_utc: string; end_utc: string } | null;
+}
+export interface DhwBoostApplied { success: boolean; row_id: number; target_c: number; until_utc: string; powerful?: boolean }
+export interface DhwBoostUndone { success: boolean; restored: boolean; skipped: string | null; pending: boolean }
+
+export const getDhwBoost = () => getJson<DhwBoostStatus>("/dhw/boost");
+export const simulateDhwBoost = () => postJson<ActionDiffResponse>("/dhw/boost/simulate", {});
+export const applyDhwBoost = (simulationId: string) =>
+  postWithSimId<DhwBoostApplied>("/dhw/boost", simulationId);
+export const simulateDhwBoostUndo = () => postJson<ActionDiffResponse>("/dhw/boost/undo/simulate", {});
+export const applyDhwBoostUndo = (simulationId: string) =>
+  postWithSimId<DhwBoostUndone>("/dhw/boost/undo", simulationId);

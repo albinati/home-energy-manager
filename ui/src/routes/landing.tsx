@@ -11,8 +11,9 @@ import { Tile } from "../components/home/simple/Tile";
 import { BatteryCard } from "../components/home/v3/BatteryCard";
 import { MoneyCard } from "../components/home/simple/MoneyCard";
 import { ModeBox } from "../components/home/simple/ModeBox";
+import { WaterCard } from "../components/home/v3/WaterCard";
 import {
-  buildStatus, casaTile, aguaTile, holidayFlags, footerLine,
+  buildStatus, casaTile, holidayFlags, footerLine,
 } from "../components/home/simple/logic";
 import { publishFreshness, publishCockpitConn } from "../lib/freshness";
 import { buildSha } from "../lib/api";
@@ -76,7 +77,8 @@ export default function Landing() {
 
       <div class="hs-tiles">
         <Tile icon={<Icon name="house" size={14} />} title="Casa" t={casaTile(data, f)} />
-        <Tile icon={<Icon name="droplet" size={14} />} title="Água quente" t={aguaTile(data, f)} />
+        <WaterCard now={data} fronts={f} nowMs={nowMs} tz={data.planner_tz}
+                   onChanged={() => { void now.refresh(); void fronts.refresh(); }} />
         <BatteryCard now={data} fronts={f} health={{ in_sync: alerts.data?.fox_drift?.in_sync, actuation_stale: alerts.data?.actuation?.fox?.stale }} />
       </div>
 

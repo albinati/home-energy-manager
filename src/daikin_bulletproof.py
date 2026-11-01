@@ -6,12 +6,20 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import threading
+
 from . import db
 from .config import config
 from .daikin.client import DaikinClient, DaikinError
 from .daikin.models import DaikinDevice
 
 logger = logging.getLogger(__name__)
+
+
+#: One writer at a time on the DHW tank: the heartbeat reconciler and the
+#: "Banho extra hoje" apply/undo (src/dhw_boost.py) both take it, so a planned
+#: row can never interleave its PATCHes with a boost's (#901). Re-entrant.
+TANK_WRITE_LOCK = threading.RLock()
 
 
 def _fclose(a: float | None, b: float, *, eps: float = 0.35) -> bool:

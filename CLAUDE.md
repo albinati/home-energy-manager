@@ -210,6 +210,7 @@ Full annotated block (history, incidents, rationale): [docs/ENV_NOTES.md](docs/E
 | `TARGET_DHW_TEMP_MIN_GUESTS_C` | 48 | Guest-mode LP floor |
 | `DHW_TEMP_COMFORT_C` | 48 | Tank floor whenever LP plans DHW heat |
 | `DHW_TEMP_MAX_C` | 60 | Hard tank ceiling |
+| `DHW_USER_BOOST_TARGET_C` | 50 | "Banho extra hoje" target (#901), clamped to the HP cliff `t_hp_max_c` (50); Powerful when inside the reheat deadband; plan held `USER_OVERRIDE_RESPECT_HOURS` |
 | `DHW_TEMP_PV_ABUNDANCE_TARGET_C` | 60 | Storage ceiling for free PV (not a comfort target) |
 | `FORECAST_NIGHT_TEMP_BIAS_C` (+ `_START/_END_HOUR_UTC` 21/6) | 0 | Static night bias; keep 0, learned offset corrects |
 | `PV_FORECAST_SLOT_CENTRE_SAMPLING` | true | Sample PV drivers at slot centre; false = rollback |
