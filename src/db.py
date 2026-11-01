@@ -2097,17 +2097,53 @@ def insert_user_boost_row(
 
 
 def expire_user_boost(action_id: int, *, end_time_iso: str, note: str) -> None:
-    """The hold is over but the tank has NOT been handed back yet: cut the window
-    to ``end_time_iso`` and CLEAR the override flag (the plan is no longer held),
-    yet keep the row ``active`` so the heartbeat retries the restore."""
+    """The hold is over but the tank has NOT been handed back yet: CLEAR the
+    override flag (the plan is no longer held) yet keep the row ``active`` so the
+    heartbeat retries the restore. The window end and ``released_at`` are stamped
+    on the FIRST release only (flag still set), so retries never move the
+    give-up clock."""
     with _lock:
         conn = get_connection()
         try:
-            conn.execute(
-                "UPDATE action_schedule SET end_time = ?, overridden_by_user_at = NULL, "
-                "error_msg = ? WHERE id = ? AND status = 'active'",
-                (end_time_iso, note, action_id),
-            )
+            row = conn.execute(
+                "SELECT params, overridden_by_user_at FROM action_schedule WHERE id = ? AND status = 'active'",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                return
+            if row["overridden_by_user_at"]:  # first release
+                try:
+                    p = json.loads(row["params"] or "{}")
+                except json.JSONDecodeError:
+                    p = {}
+                p["released_at"] = end_time_iso
+                conn.execute(
+                    "UPDATE action_schedule SET end_time = ?, params = ?, overridden_by_user_at = NULL, "
+                    "error_msg = ? WHERE id = ?",
+                    (end_time_iso, json.dumps(p), note, action_id),
+                )
+            else:
+                conn.execute("UPDATE action_schedule SET error_msg = ? WHERE id = ?", (note, action_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def update_user_boost_meta(action_id: int, **fields: Any) -> None:
+    """Merge bookkeeping keys (restore attempts, notified flag) into the boost
+    row's params."""
+    with _lock:
+        conn = get_connection()
+        try:
+            row = conn.execute("SELECT params FROM action_schedule WHERE id = ?", (action_id,)).fetchone()
+            if row is None:
+                return
+            try:
+                p = json.loads(row["params"] or "{}")
+            except json.JSONDecodeError:
+                p = {}
+            p.update(fields)
+            conn.execute("UPDATE action_schedule SET params = ? WHERE id = ?", (json.dumps(p), action_id))
             conn.commit()
         finally:
             conn.close()

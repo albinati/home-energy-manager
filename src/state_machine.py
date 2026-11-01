@@ -209,12 +209,16 @@ def _boost_in_effect(row: dict[str, Any], dev: Any) -> bool:
         at = _parse_utc(str(row.get("overridden_by_user_at"))).timestamp()
     except (ValueError, TypeError):
         return True
+    tol = float(config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C)
+    margin = max(_BOOST_READ_MARGIN_S, float(config.DAIKIN_OVERRIDE_GRACE_SECONDS))
     if (
-        read is not None and read > at + _BOOST_READ_MARGIN_S
+        read is not None and read > at + margin
         and live is not None and tgt is not None
-        and abs(float(live) - float(tgt)) > float(config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C)
+        and float(live) < float(tgt) - tol
     ):
-        return False  # a post-write read shows someone moved it: not ours to hold
+        # A read well AFTER the write shows the target BELOW the boost's: someone
+        # lowered it. (At/above it - e.g. raised further by hand - we keep holding.)
+        return False
     return True
 
 
@@ -245,6 +249,19 @@ def _iso_z(dt: datetime) -> str:
 #: abandoned (the plan's own rows have long since taken the tank over).
 _BOOST_RESTORE_GIVE_UP_HOURS = 12.0
 
+#: Minutes after the release at which restore attempt N (0-based) may run: the
+#: first is immediate, then growing gaps. Six attempts at most, then give up.
+_BOOST_RESTORE_BACKOFF_MIN = (0, 2, 7, 22, 52, 112)
+
+
+def _quota_blocked() -> bool:
+    try:
+        from .api_quota import should_block
+
+        return bool(should_block("daikin"))
+    except Exception:  # noqa: BLE001
+        return False
+
 
 def end_user_boost(
     row: dict[str, Any],
@@ -273,6 +290,10 @@ def end_user_boost(
     """
     aid = int(row["id"])
     db.expire_user_boost(aid, end_time_iso=_iso_z(now_utc), note=f"boost {reason}: restore pending")
+    attempts = int(_boost_params(row).get("restore_attempts", 0)) + 1
+    db.update_user_boost_meta(aid, restore_attempts=attempts, last_attempt_at=_iso_z(now_utc))
+    # Did HEM itself switch Powerful on? Only then is there a Powerful to clear.
+    hem_powerful = bool(_boost_params(row).get("powerful"))
     _BOOST_HOLD_LOGGED.clear()
     out: dict[str, Any] = {
         "restored": False, "target_c": None, "skipped": None, "error": None, "pending": False,
@@ -284,24 +305,37 @@ def end_user_boost(
         out["skipped"] = "passive"
     elif in_legionella_standoff(now_utc):
         out["skipped"] = "legionella_standoff"
+    elif _quota_blocked():
+        out["skipped"] = "quota"
     else:
         planned, source, _row = _scheduled_tank_state(now_utc)
         if source == "user_override":
-            # A user hand-set the tank after the hold: theirs to keep, nothing to restore.
-            out["restored"] = True
+            # A user hand-set the tank after the hold: the TARGET is theirs to keep,
+            # but a Powerful that HEM switched on is still ours to clear.
             out["skipped"] = "user_override"
-            planned = None
+            planned = {"tank_powerful": False} if hem_powerful else None
+            if planned is None:
+                out["restored"] = True
         elif planned is None:
             planned = {
                 "tank_powerful": False,
                 "tank_temp": float(config.DHW_TEMP_NORMAL_C),
                 "tank_power": True,
             }
+        if (
+            planned is not None
+            and not hem_powerful
+            and not planned.get("tank_powerful")
+            and "tank_temp" in planned
+        ):
+            # We never turned Powerful on: do not PATCH a same-value OFF (a wasted
+            # quota call, and READ_ONLY_CHARACTERISTIC territory - bug E).
+            planned = {k: v for k, v in planned.items() if k != "tank_powerful"}
         if planned is not None and holiday_blocks_params(dev, planned):
             out["skipped"] = "holiday"
             planned = None
     if planned is not None:
-        out["target_c"] = float(planned.get("tank_temp", config.DHW_TEMP_NORMAL_C))
+        out["target_c"] = float(planned["tank_temp"]) if "tank_temp" in planned else None
         try:
             if daikin_device_matches_params(dev, planned):
                 out["restored"] = True  # the device already holds the plan's state
@@ -345,23 +379,45 @@ def _check_user_boost_expiry(
             continue
         if not row.get("overridden_by_user_at"):
             # Already released, restore still pending. Done when a plan row that
-            # started after the hold now owns the tank (it fired / matched), or
-            # after the give-up horizon.
+            # started after the hold now owns the tank (it fired / matched);
+            # otherwise retry on a bounded backoff, then give up LOUDLY.
+            p = _boost_params(row)
+            try:
+                released = _parse_utc(str(p.get("released_at") or row["end_time"]))
+            except (ValueError, TypeError):
+                released = end
             _p, _src, owner = _scheduled_tank_state(now_utc)
             superseded = False
             try:
                 superseded = (
                     owner is not None
                     and (owner.get("status") or "") in ("active", "completed")
-                    and _parse_utc(owner["start_time"]) >= end
+                    and _parse_utc(owner["start_time"]) >= released
                 )
             except (ValueError, KeyError, TypeError):
                 pass
-            if superseded or now_utc - end > timedelta(hours=_BOOST_RESTORE_GIVE_UP_HOURS):
-                db.finish_user_boost(
-                    int(row["id"]), end_time_iso=_iso_z(end),
-                    note="boost restore superseded by plan" if superseded else "boost restore abandoned",
-                )
+            attempts = int(p.get("restore_attempts", 0))
+            expired_horizon = now_utc - released > timedelta(hours=_BOOST_RESTORE_GIVE_UP_HOURS)
+            if superseded:
+                db.finish_user_boost(int(row["id"]), end_time_iso=_iso_z(released),
+                                     note="boost restore superseded by plan")
+                continue
+            if expired_horizon or attempts >= len(_BOOST_RESTORE_BACKOFF_MIN):
+                db.finish_user_boost(int(row["id"]), end_time_iso=_iso_z(released),
+                                     note="boost restore abandoned")
+                db.log_action(device="daikin", action="dhw_user_boost_end",
+                              params={"row_id": int(row["id"]), "attempts": attempts},
+                              result="failure", trigger=trigger, error_msg="restore abandoned")
+                try:
+                    notify_risk(
+                        "O banho extra terminou mas não consegui devolver o tanque ao plano "
+                        "(Daikin indisponível ou em modo restrito). O tanque pode continuar na "
+                        "meta do banho extra; confira no app do Daikin."
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("boost give-up notify failed (non-fatal): %s", exc)
+                continue
+            if now_utc < released + timedelta(minutes=_BOOST_RESTORE_BACKOFF_MIN[attempts]):
                 continue
         end_user_boost(row, dev, client, now_utc, reason="expired", trigger=f"{trigger}:boost_expiry")
 
@@ -863,29 +919,30 @@ def apply_safe_defaults(
         # skip_if_matches=True so a device already in plan state costs zero
         # Daikin writes; the no-covering-row fallback keeps the original
         # forced NORMAL_C (true fault recovery, unknown plan state).
-        tank_params, source, _kind = _scheduled_tank_state(datetime.now(UTC))
-        if source == "user_override":
-            db.log_action(
-                device="daikin",
-                action="apply_safe_defaults",
-                params={"skipped": "tank"},
-                result="skipped",
+        with TANK_WRITE_LOCK:
+            tank_params, source, _kind = _scheduled_tank_state(datetime.now(UTC))
+            if source == "user_override":
+                db.log_action(
+                    device="daikin",
+                    action="apply_safe_defaults",
+                    params={"skipped": "tank"},
+                    result="skipped",
+                    trigger=trigger,
+                    error_msg="covering tank row is user-overridden",
+                )
+                return
+            apply_scheduled_daikin_params(
+                dev,
+                daikin,
+                tank_params
+                or {
+                    "tank_powerful": False,
+                    "tank_temp": float(config.DHW_TEMP_NORMAL_C),
+                    "tank_power": True,
+                },
                 trigger=trigger,
-                error_msg="covering tank row is user-overridden",
+                skip_if_matches=tank_params is not None,
             )
-            return
-        apply_scheduled_daikin_params(
-            dev,
-            daikin,
-            tank_params
-            or {
-                "tank_powerful": False,
-                "tank_temp": float(config.DHW_TEMP_NORMAL_C),
-                "tank_power": True,
-            },
-            trigger=trigger,
-            skip_if_matches=tank_params is not None,
-        )
     except (DaikinError, ValueError, IndexError) as e:
         db.log_action(
             device="daikin",
@@ -2075,6 +2132,13 @@ def _check_tank_target_divergence(
 
     if not config.TANK_TARGET_DIVERGENCE_CHECK_ENABLED:
         return
+    # "Banho extra hoje": while a boost row is live (holding, or released with its
+    # restore still pending) the tank is deliberately off-plan.
+    try:
+        if db.get_active_user_boost_rows():
+            return
+    except Exception:  # noqa: BLE001
+        pass
     if (config.DAIKIN_CONTROL_MODE or "").strip().lower() == "passive":
         return  # HEM is only observing; the firmware owns the setpoint
     if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
@@ -2869,14 +2933,15 @@ def recover_on_boot(
         except Exception:
             pass
         daikin_actions = db.get_actions_for_plan_date(plan_date, device="daikin")
-        _reconcile_daikin_actions(
-            daikin_actions,
-            daikin,
-            dev,
-            now_utc,
-            trigger="boot_recovery",
-            outdoor_c=outdoor,
-        )
+        with TANK_WRITE_LOCK:
+            _reconcile_daikin_actions(
+                daikin_actions,
+                daikin,
+                dev,
+                now_utc,
+                trigger="boot_recovery",
+                outdoor_c=outdoor,
+            )
         _recover_missed_restores(plan_date, daikin, dev, now_utc)
 
     ofs = db.get_octopus_fetch_state()

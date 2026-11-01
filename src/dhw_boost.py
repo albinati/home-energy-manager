@@ -88,11 +88,12 @@ def reheat_differential_c() -> float:
 
 
 def needs_powerful(dev: Any | None) -> bool:
-    """True when the target-tank gap is inside the firmware's reheat deadband
-    (or the tank temperature is unknown): only Powerful forces a reheat there."""
+    """True when the target-tank gap is inside the firmware's reheat deadband:
+    only Powerful forces a reheat there. Unknown tank temperature is False; the
+    gates refuse the boost (``TankTempUnknown``) rather than guess."""
     tank = getattr(dev, "tank_temperature", None)
     if tank is None:
-        return True
+        return False  # never guess a resistance heater on: check_gates blocks instead
     return (target_c() - float(tank)) <= reheat_differential_c() + 0.5
 
 
@@ -153,9 +154,16 @@ def check_gates(dev: Any | None, now: datetime) -> None:
         raise BoostBlocked(422, "TankOff", "O tanque está desligado.")
     if active_boost(now) is not None:
         raise BoostBlocked(409, "AlreadyBoosted", "Já há um banho extra em andamento.")
+    if db.get_active_user_boost_rows():
+        raise BoostBlocked(
+            409, "RestorePending",
+            "O tanque ainda está voltando ao plano depois do último banho extra.",
+        )
     tgt = target_c()
     tank_c = getattr(dev, "tank_temperature", None)
-    if tank_c is not None and float(tank_c) >= tgt:
+    if tank_c is None:
+        raise BoostBlocked(409, "TankTempUnknown", "Sem leitura da temperatura do tanque.")
+    if float(tank_c) >= tgt:
         raise BoostBlocked(422, "TankAlreadyHot", f"O tanque já está a {float(tank_c):.0f} °C.")
     cur = getattr(dev, "tank_target", None)
     # A target already at the boost's only matters when Powerful would add

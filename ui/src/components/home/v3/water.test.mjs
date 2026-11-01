@@ -79,6 +79,10 @@ test("boostView: quota and legionella say why instead of vanishing", () => {
   assert.match(boostView({ ...base, available: false, blocked: { error: "QuotaExhausted" } }, 44).hint, /cota/);
   assert.match(boostView({ ...base, available: false, blocked: { error: "LegionellaStandoff" } }, 44).hint, /legionela/);
 });
+test("boostView: a pending restore says why; an unknown tank temperature hides", () => {
+  assert.match(boostView({ ...base, available: false, blocked: { error: "RestorePending" } }, 44).hint, /voltando ao plano/);
+  assert.deepEqual(boostView({ ...base, available: false, blocked: { error: "TankTempUnknown" } }, 44), { kind: "hidden" });
+});
 test("boostView: active shows the real end time; unknown status hides", () => {
   assert.deepEqual(boostView({ ...base, active: true, until_utc: "2026-10-07T17:30:00Z" }, 44, "Europe/London"), { kind: "active", until: "18:30" });
   assert.deepEqual(boostView(null, 44), { kind: "hidden" });

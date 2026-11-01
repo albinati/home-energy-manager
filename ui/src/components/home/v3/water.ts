@@ -103,6 +103,7 @@ export type BoostView =
 const HINTS: Record<string, string> = {
   QuotaExhausted: "Banho extra indisponível: cota do Daikin esgotada hoje.",
   LegionellaStandoff: "Banho extra indisponível durante o ciclo de legionela.",
+  RestorePending: "O tanque ainda está voltando ao plano; o banho extra volta a ficar disponível em instantes.",
 };
 
 export function boostView(

@@ -305,7 +305,7 @@ def test_restore_waits_for_the_gate_and_retries_until_it_can_write(env, monkeypa
     logs = [a for a in db.get_action_logs(device="daikin", limit=50) if a["action"] == "dhw_user_boost_end"]
     assert logs and all(entry["result"] != "success" for entry in logs)
     monkeypatch.setattr("src.config.config.DAIKIN_CONTROL_MODE", "active")
-    _reconcile(t + timedelta(minutes=4), env["dev"])
+    _reconcile(t + timedelta(minutes=8), env["dev"])
     assert any(p.get("tank_temp") == 37 for p in env["applied"])
     assert db.get_action_by_id(out["row_id"])["status"] == "completed"
 
@@ -392,6 +392,7 @@ def test_boost_and_reconcile_share_one_tank_lock(env):
     ("target_high", "TargetAlreadyHigh", 422),
     ("tank_off", "TankOff", 422),
     ("quota", "QuotaExhausted", 409),
+    ("temp_unknown", "TankTempUnknown", 409),
 ])
 def test_gates_block_the_write(env, monkeypatch, gate, code, status):
     if gate == "read_only":
@@ -411,6 +412,8 @@ def test_gates_block_the_write(env, monkeypatch, gate, code, status):
         env["dev"].tank_on = False
     elif gate == "quota":
         monkeypatch.setattr("src.api_quota.should_block", lambda vendor: True)
+    elif gate == "temp_unknown":
+        env["dev"].tank_temperature = None
     with pytest.raises(dhw_boost.BoostBlocked) as ei:
         dhw_boost.apply(_now())
     assert ei.value.code == code and ei.value.status == status

@@ -69,7 +69,7 @@ export function WaterCard({ now, fronts, nowMs, tz, onChanged }: {
 
   const ask = () => void run(async () => {
     if (import.meta.env.DEV && MOCK) {
-      setConfirm({ simulation_id: "mock" } as ActionDiffResponse);
+      setConfirm({ simulation_id: "mock", after: { powerful: true } } as unknown as ActionDiffResponse);
       return;
     }
     setConfirm(await simulateDhwBoost());
@@ -142,7 +142,7 @@ export function WaterCard({ now, fronts, nowMs, tz, onChanged }: {
           )}
           {view.kind === "idle" && confirm && st && (
             <div class="hw-confirm">
-              <span>{confirmCopy(st, hhmm(new Date(nowMs + st.hold_hours * 3_600_000).toISOString(), tz), now.current_slot?.kind)}</span>
+              <span>{confirmCopy({ ...st, uses_powerful: confirm.after?.powerful === true }, hhmm(new Date(nowMs + st.hold_hours * 3_600_000).toISOString(), tz), now.current_slot?.kind)}</span>
               <div class="hw-actions">
                 <button type="button" class="btn btn--sm btn--primary" disabled={busy} onClick={apply}>{busy ? "Aplicando…" : "Confirmar"}</button>
                 <button type="button" class="btn btn--sm" disabled={busy} onClick={() => setConfirm(null)}>Cancelar</button>
