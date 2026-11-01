@@ -6,10 +6,11 @@ import { Spinner } from "../components/common/Spinner";
 import { computeChips, type Chip } from "../components/shell/AlertStrip";
 import { StatusLine, AgoraLine } from "../components/home/simple/StatusLine";
 import { Tile } from "../components/home/simple/Tile";
+import { BatteryCard } from "../components/home/v3/BatteryCard";
 import { MoneyCard } from "../components/home/simple/MoneyCard";
 import { ModeBox } from "../components/home/simple/ModeBox";
 import {
-  buildStatus, casaTile, aguaTile, bateriaTile, agoraParts, agoraStale, holidayFlags, footerLine,
+  buildStatus, casaTile, aguaTile, agoraParts, agoraStale, holidayFlags, footerLine,
 } from "../components/home/simple/logic";
 import { publishFreshness, publishCockpitConn } from "../lib/freshness";
 import { buildSha } from "../lib/api";
@@ -72,7 +73,7 @@ export default function Landing() {
       <div class="hs-tiles">
         <Tile icon={<Icon name="house" size={14} />} title="Casa" t={casaTile(data, f)} />
         <Tile icon={<Icon name="droplet" size={14} />} title="Água quente" t={aguaTile(data, f)} />
-        <Tile icon={<Icon name="battery" size={14} />} title="Bateria" t={bateriaTile(data, f)} />
+        <BatteryCard now={data} fronts={f} drift={alerts.data?.fox_drift} />
       </div>
 
       <MoneyCard fronts={f} nowMs={nowMs} holiday={holiday} tz={data.planner_tz} />
