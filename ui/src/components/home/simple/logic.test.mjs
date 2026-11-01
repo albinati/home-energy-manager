@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import {
   fmt, pp, mergeRuns, dayAxis, frac, hourTicks, waterSegments, tariffSegments, heatingCell,
   batteryRunway, buildStatus, tierOf, billingVerdict, cycleLabel, nextHeating, aguaTile, casaTile,
-  peakCoverage, powerSource, spendVerdict, spendLine, vacationHelp, holidayFlags,
+  peakCoverage, peakSpans, powerSource, spendVerdict, spendLine, vacationHelp, holidayFlags,
   isAwayPreset, localHHMM, sgbp, hourWord, agoraStale,
 } from "./logic.ts";
 
@@ -45,6 +45,66 @@ test("tier classification, cosy and dynamic tiers", () => {
   assert.equal(tierOf({ key: "band_peak", label: "peak" }), "peak");
   assert.equal(tierOf({ key: "negative", label: "negative" }), "cheap");
   assert.equal(tierOf({ key: "band_day", label: "day" }), "standard");
+});
+
+test("tierOf: real Agile keys from google_calendar/tiers.py", () => {
+  assert.equal(tierOf({ key: "expensive", label: "Expensive" }), "peak");
+  assert.equal(tierOf({ key: "severe_peak", label: "Severe peak" }), "peak");
+  assert.equal(tierOf({ key: "very_cheap", label: "Very cheap" }), "cheap");
+  assert.equal(tierOf({ key: "band_cheap", label: "cheap" }), "cheap");
+  for (const [key, label] of [["green_light", "Green light"], ["moderate", "Moderate"], ["above_avg", "Above average"]]) {
+    assert.equal(tierOf({ key, label }), "standard");
+  }
+  assert.equal(tierOf({ key: "expensive" }), "peak");
+  // negatives: a look-alike word is not peak, and "Expensive" never trips the "neg" (cheap) rule
+  assert.equal(tierOf({ key: "x", label: "inexpensive" }), "standard");
+  assert.equal(tierOf({ key: "expensive", label: "Expensive" }), "peak");
+  assert.notEqual(tierOf({ key: "expensive", label: "Expensive" }), "cheap");
+});
+
+// Agile day: expensive shoulder (16-17), severe_peak core (17-19), expensive shoulder (19-20).
+const agile = {
+  display_name: "Agile", structure: "dynamic",
+  windows: [
+    win("13:00", "16:00", "cheap", 12), win("16:00", "17:00", "expensive", 30),
+    win("17:00", "19:00", "severe_peak", 45), win("19:00", "20:00", "expensive", 31), win("20:00", "24:00", "day", 20),
+  ].map((w, i) => ({ ...w, key: ["very_cheap", "expensive", "severe_peak", "expensive", "moderate"][i] })),
+};
+const agileBand = (s, e, planned, soc, real = null) => ({ start_local: s, end_local: e, planned_import_kwh: planned, realised_import_kwh: real, soc_entry_pct: soc });
+test("peakSpans merges an expensive / severe_peak / expensive run into one span", () => {
+  const sp = peakSpans(agile.windows);
+  assert.equal(sp.length, 1);
+  assert.equal(sp[0].start_local, "16:00");
+  assert.equal(sp[0].end_local, "20:00");
+  assert.equal(sp[0].windows.length, 3);
+  // Cosy: the single band stays one span
+  assert.deepEqual(peakSpans(tariff.windows).map((x) => [x.start_local, x.end_local]), [["16:00", "19:00"]]);
+  // non-contiguous peaks stay separate
+  const gap = [win("07:00", "08:00", "peak", 30), win("16:00", "19:00", "peak", 38)];
+  assert.equal(peakSpans(gap).length, 2);
+});
+
+test("peakCoverage over a merged Agile peak sums the whole span", () => {
+  const rows = (core) => [agileBand("13:00", "16:00", 0, 80), agileBand("16:00", "17:00", 0, 90), agileBand("17:00", "19:00", core, 70),
+    agileBand("19:00", "20:00", 0, 40), agileBand("20:00", "24:00", 0, 30)];
+  const bat = (core, extra = {}) => ({ reserve_pct: 10, by_band: rows(core), ...extra });
+  const t = Date.parse(utc("12:00"));
+  // the severe_peak core buys: must NOT be reported as covered by the shoulder alone
+  assert.deepEqual(peakCoverage(bat(1.5), agile, t), { kind: "buys", until: "20:00", kwh: 1.5 });
+  assert.deepEqual(peakCoverage(bat(0), agile, t), { kind: "covered", until: "20:00", kwh: 0 });
+  // exit SoC is the band AFTER the span (20:00), entry the first band (16:00)
+  const low = bat(0); low.by_band[3] = agileBand("19:00", "20:00", 0, 5);   // inside the span: irrelevant
+  assert.equal(peakCoverage(low, agile, t).kind, "covered");
+  const lowAfter = bat(0); lowAfter.by_band[4] = agileBand("20:00", "24:00", 0, 8);
+  assert.equal(peakCoverage(lowAfter, agile, t), null);
+  // realised import summed across the span while inside it
+  const inside = Date.parse(utc("18:00"));
+  const bought = peakCoverage({ reserve_pct: 10, by_band: [agileBand("16:00", "17:00", 0, 90, 0.3), agileBand("17:00", "19:00", 0, 70, 0.4),
+    agileBand("19:00", "20:00", 0, 40, null), agileBand("20:00", "24:00", 0, 30)] }, agile, inside);
+  assert.equal(bought.kind, "bought");
+  assert.ok(Math.abs(bought.kwh - 0.7) < 1e-9);
+  // a missing band row inside the span -> no claim
+  assert.equal(peakCoverage({ reserve_pct: 10, by_band: [agileBand("16:00", "17:00", 0, 90)] }, agile, t), null);
 });
 
 test("day axis spans the tariff and tariff segments tile it", () => {
@@ -104,7 +164,8 @@ test("heating lane: pre-heat >= 30 min counts, coast, hold from the plan, holida
   assert.deepEqual(heatingCell(w[5], heating, false), { mode: "hold", text: "mantém ~21" });   // predicted, not config
   assert.deepEqual(heatingCell(w[2], heating, false), { mode: "hold", text: "mantém ≥ 21" });    // no prediction -> the floor that applies
   assert.equal(heatingCell(w[0], heating, false).text, "mantém ≥ 20");                           // night band -> night floor
-  assert.equal(heatingCell(w[4], { ...heating, windows: [], peak_coast_delta_c: 1 }, false).text, "mantém ≥ 20");  // peak -> setpoint - delta
+  assert.equal(heatingCell(w[4], { ...heating, windows: [], peak_coast_delta_c: 1 }, false, "banded").text, "mantém ≥ 20");  // peak -> setpoint - delta
+  assert.equal(heatingCell(w[4], { ...heating, windows: [], peak_coast_delta_c: 1 }, false, "dynamic").text, "mantém ≥ 21");  // no coast floor off banded
   assert.deepEqual(heatingCell(w[3], heating, true), { mode: "off", text: "desligado" });
   assert.equal(heatingCell(w[3], { error: "x" }, false), null);
 });
@@ -261,6 +322,8 @@ test("casa tile: peak coast is not 'Frio'; night window comes from the plan", ()
   const heating = { indoor_now_c: 20.2, setpoint_c: 21, night_floor_c: 20, peak_coast_delta_c: 1, windows: [], night_start_hour: 22, night_end_hour: 7 };
   const inPeak = cockpit({ now_utc: utc("17:00"), state: { indoor_c: 20.2 } });
   assert.match(casaTile(inPeak, { tariff, heating }).meaning, /^Confortável/);
+  // off banded tariffs the LP has no peak coast floor, so 20.2 in the peak is cold
+  assert.match(casaTile(inPeak, { tariff: { ...tariff, structure: "dynamic" }, heating }).meaning, /^Frio/);
   const midday = cockpit({ now_utc: utc("11:00"), state: { indoor_c: 20.2 } });
   assert.match(casaTile(midday, { tariff, heating }).meaning, /^Frio · abaixo de 21/);
   // a custom night window (23-06): 22:30 is NOT night

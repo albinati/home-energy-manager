@@ -4,13 +4,11 @@
 import type {
   HeatingPlanWindow, HeatingPredictedIndoor, PlanFrontsTariff,
 } from "../../../lib/types";
-import { num, tierOf } from "../simple/logic.ts";
+import { num, upcomingPeakSpan } from "../simple/logic.ts";
 
 export const SETPOINT_KEY = "INDOOR_SETPOINT_C";
 export const CEILING_KEY = "LP_W3_CEILING_C";
 export const SETPOINT_STEP = 0.5;
-
-const isPeak = (w: { key?: string | null; label?: string | null }): boolean => tierOf(w) === "peak";
 
 // ------------------------------------------------------------------ headline
 export type Tone = "ok" | "warn" | "bad" | "dim";
@@ -99,8 +97,7 @@ export function peakRow(
   predicted: HeatingPredictedIndoor | null | undefined,
   nowMs: number,
 ): PeakRow | null {
-  const pk = (tariff?.windows ?? []).filter(isPeak).sort((a, b) => Date.parse(a.start_utc) - Date.parse(b.start_utc))
-    .find((w) => Date.parse(w.end_utc) > nowMs);
+  const pk = upcomingPeakSpan(tariff, nowMs);
   if (!pk) return null;
   const s = Date.parse(pk.start_utc), e = Date.parse(pk.end_utc);
   const over = (windows ?? []).filter((w) => Date.parse(w.start_utc) < e && Date.parse(w.end_utc) > s);

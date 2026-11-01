@@ -5,7 +5,8 @@ import type {
   BatteryPlanWindow, CockpitNow, PlanFrontsBattery, PlanFrontsResponse, PlanFrontsTariffWindow,
 } from "../../../lib/types";
 import {
-  FAIXA_WORD, batteryRunway, chargeBasis, currentWindow, isAway, localHHMM, num, peakCoverage, span, tierOf,
+  FAIXA_WORD, batteryRunway, chargeBasis, currentWindow, inNightWindow, isAway, localHHMM, minutesOf, num, peakCoverage, span, tierOf,
+  peakSpans, upcomingPeakSpan,
 } from "../simple/logic.ts";
 
 export type CardTone = "ok" | "warn" | "dim";
@@ -81,15 +82,8 @@ export function nextTarget(
   return best ? { pct: Math.round(best.soc_end_pct as number), at: best.end_local || localHHMM(best.end_utc, tz) } : null;
 }
 
-/** First peak band that has not ended yet (Cosy or Agile tier keys alike). */
-function upcomingPeak(tariff: PlanFrontsResponse["tariff"], nowMs: number): PlanFrontsTariffWindow | null {
-  return [...(tariff?.windows ?? [])]
-    .sort((a, b) => Date.parse(a.start_utc) - Date.parse(b.start_utc))
-    .find((w) => tierOf(w) === "peak" && Date.parse(w.end_utc) > nowMs) ?? null;
-}
-
 export function peakRow(b: PlanFrontsBattery | null, tariff: PlanFrontsResponse["tariff"], nowMs: number): BatteryRow | null {
-  const peak = upcomingPeak(tariff, nowMs);
+  const peak = upcomingPeakSpan(tariff, nowMs);
   const cov = peakCoverage(b, tariff, nowMs);
   if (!peak || !cov) return null;
   const label = `Pico ${span(peak.start_local, peak.end_local)}`;
@@ -98,19 +92,36 @@ export function peakRow(b: PlanFrontsBattery | null, tariff: PlanFrontsResponse[
   return { key: "pico", label, text: "Já comprou da rede neste pico", tone: "warn" };
 }
 
-/** Expected charge on entering the next cheap band after the peak. Hidden once
- *  that band has started. */
+/** Does a local band [start, end) overlap the (midnight-wrapping) night window? */
+function overlapsNight(startLocal: string, endLocal: string, startHour: number, endHour: number): boolean {
+  const a = minutesOf(startLocal);
+  let b = minutesOf(endLocal);
+  if (b <= a) b += 1440;   // "00:00" / "24:00" ends
+  const ns = startHour * 60;
+  return inNightWindow(a, startHour, endHour) || inNightWindow((b - 1) % 1440, startHour, endHour) || (ns >= a && ns < b);
+}
+
+/** Expected charge on entering the first cheap band that follows the peak (the
+ *  latest span that has started, else the next one) and overlaps the night
+ *  window, so a midday dip is never "Noite". Hidden once that band has started. */
 export function nightRow(
   b: PlanFrontsBattery | null, tariff: PlanFrontsResponse["tariff"], nowMs: number, away: boolean,
+  nightStartHour = 22, nightEndHour = 7,
 ): BatteryRow | null {
   if (!b) return null;
-  const rows = b.by_band ?? [];
-  const pi = rows.findIndex((r) => tierOf(r) === "peak");
-  if (pi < 0) return null;
-  const n = rows.slice(pi + 1).find((r) => tierOf(r) === "cheap");
-  if (!n || n.soc_entry_pct == null) return null;
-  const tw = (tariff?.windows ?? []).find((w) => w.start_local === n.start_local && w.end_local === n.end_local);
+  // Anchor on the most recent peak that has started (it stays the anchor after
+  // it ends, until the cheap band starts), else on the upcoming one.
+  const spans = peakSpans(tariff?.windows);
+  const peak = [...spans].reverse().find((p) => Date.parse(p.start_utc) <= nowMs) ?? spans[0];
+  if (!peak) return null;
+  const peakEnd = Date.parse(peak.end_utc);
+  const tw = [...(tariff?.windows ?? [])]
+    .sort((x, y) => Date.parse(x.start_utc) - Date.parse(y.start_utc))
+    .find((w) => Date.parse(w.start_utc) >= peakEnd && tierOf(w) === "cheap"
+      && overlapsNight(w.start_local, w.end_local, nightStartHour, nightEndHour));
   if (!tw) return null;
+  const n = (b.by_band ?? []).find((r) => r.start_local === tw.start_local && r.end_local === tw.end_local);
+  if (!n || n.soc_entry_pct == null) return null;
   const startMs = Date.parse(tw.start_utc);
   if (nowMs >= startMs) return null;
   let tail = "";
@@ -175,7 +186,7 @@ export function batteryCardModel(
   const reserve = b?.reserve_pct ?? null;
   const sw = stateWord(now.state?.battery_kw, soc, reserve);
   const rows = [
-    agoraRow(now, tariff, nowMs), peakRow(b, tariff, nowMs), nightRow(b, tariff, nowMs, isAway(now)),
+    agoraRow(now, tariff, nowMs), peakRow(b, tariff, nowMs), nightRow(b, tariff, nowMs, isAway(now), fronts?.heating?.night_start_hour ?? 22, fronts?.heating?.night_end_hour ?? 7),
     runwayRow(b, tariff, nowMs, tz), inversorRow(now, health),
   ].filter((r): r is BatteryRow => r != null);
   return { socPct: soc, stateWord: sw.word, stateTone: sw.tone, reservePct: reserve, target: nextTarget(b, tariff, nowMs, tz), rows };
