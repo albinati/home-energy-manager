@@ -142,11 +142,12 @@ function AdminControls({ setpoint, planCeiling, hidden, onChanged }: {
 
   const step = (dir: 1 | -1) => {
     if (shown == null || busy) return;
+    setSettling(false);   // a new edit cancels the post-apply hold (and its timer)
     setSim(null);
     setNotice(null);
     setDraft(stepSetpoint(shown, dir, bounds.min, bounds.max));
   };
-  const cancel = () => { setDraft(null); setSim(null); };
+  const cancel = () => { setSettling(false); setDraft(null); setSim(null); };
 
   // Explicit "Revisar" (not on every click) so a burst of +/- does not spam simulate.
   const preview = async () => {

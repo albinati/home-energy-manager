@@ -1031,7 +1031,20 @@ def invalidate_cache() -> None:
     global _cache_generation
     with _gen_lock:
         _cache_generation += 1
-    _cache.clear()
+        _cache.clear()
+
+
+def _store_if_current(ckey: tuple[str, str], mono: float, result: dict[str, Any],
+                      gen_at_start: int) -> bool:
+    """Generation check + size cap + store as ONE critical section, so an
+    invalidate can never slip between the check and the store (#909 R1)."""
+    with _gen_lock:
+        if _cache_generation != gen_at_start:
+            return False
+        if len(_cache) > 32:
+            _cache.clear()
+        _cache[ckey] = (mono, result)
+        return True
 
 
 def plan_fronts(day: date | None = None, *, now_utc: datetime | None = None,
@@ -1063,7 +1076,8 @@ def _plan_fronts_build(day: date | None = None, *, now_utc: datetime | None = No
     use_cache = use_cache and not explicit_now
     ckey = (str(config.DB_PATH), day.isoformat())
     mono = time.monotonic()
-    gen_at_start = _cache_generation
+    with _gen_lock:
+        gen_at_start = _cache_generation
     if use_cache:
         hit = _cache.get(ckey)
         if hit is not None and mono - hit[0] < _CACHE_TTL_S:
@@ -1096,12 +1110,13 @@ def _plan_fronts_build(day: date | None = None, *, now_utc: datetime | None = No
         "compare": _guard(compare_section, day),
         "billing": _guard(billing_section, day),
     }
-    if use_cache and _cache_generation == gen_at_start:
-        if len(_cache) > 32:
-            _cache.clear()
-        _cache[ckey] = (mono, result)
+    if use_cache:
+        _store_if_current(ckey, mono, result, gen_at_start)
     return result
 
 
 def clear_cache() -> None:
-    _cache.clear()
+    global _cache_generation
+    with _gen_lock:
+        _cache_generation += 1
+        _cache.clear()

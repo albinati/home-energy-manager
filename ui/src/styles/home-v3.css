@@ -1,6 +1,6 @@
 /* Home v3 shared layout (#909). Tokens only. */
 
-/* Device cards (Bateria, Aquecimento, Água quente): own grid, not the 3-column .hs-tiles.
+/* Device cards (Bateria, Aquecimento, Água quente): own auto-fit grid.
    min(300px, 100%) lets a card shrink below 300px instead of overflowing narrow phones. */
 .hv3-cards {
   display: grid;

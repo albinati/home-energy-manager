@@ -2398,6 +2398,7 @@ async def settings_put(key: str, payload: dict, x_simulation_id: str | None = He
         canonical = _vac.persist_setting(key, payload["value"], actor="api")
     except rts.SettingValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    _invalidate_plan_fronts()   # right after the write: a later hook failure can't leave it stale
 
     cron_status = None
     if rts.SCHEMA[key].cron_reload:
@@ -2427,6 +2428,7 @@ async def settings_delete(key: str):
         )
     prev_preset = _vac.current_preset()
     removed = rts.delete_setting(key, actor="api")
+    _invalidate_plan_fronts()   # right after the write: a later hook failure can't leave it stale
     if key in ("OPTIMIZATION_PRESET", "VACATION_RETURN_AT"):
         # The env default re-asserts (normal): a stored trip must end like a cancel.
         config.clear_override(key)
