@@ -9,7 +9,7 @@ import {
 } from "../simple/logic.ts";
 import {
   localYmd, addDaysYmd, localDayBounds, utcDatesOf, hhmm, buildDaySeries, linePath, areaPath, kwCeil,
-  daySummary, fullAt, fmt, bandDetail, bandRange, cachedPast,
+  daySummary, fullAt, fmt, bandDetail, bandRange, cachedPast, isPastUtcDate,
   type Frame, type PeakInfo, type Pt, type PvTodayResp, type ExecTodayResp,
 } from "./dayChart";
 import "../../../styles/home-v3-day.css";
@@ -46,7 +46,6 @@ export function DayCard({ now, fronts, holiday }: {
   const bounds = useMemo(() => localDayBounds(ymd, tz), [ymd, tz]);
   const dates = utcDatesOf(bounds);
   const dkey = dates.join(",");
-  const utcToday = new Date(nowMs).toISOString().slice(0, 10);
 
   // Every response is stored under the key it was requested for and read back by the CURRENT key,
   // so a late reply for the other day can never render (and never blanks the right one).
@@ -57,7 +56,7 @@ export function DayCard({ now, fronts, holiday }: {
   const pv = usePoll(async () => {
     const r = await (import.meta.env.DEV && MOCK
       ? (await import("../../../lib/mock/day")).mockPvToday(dates)
-      : Promise.all(dates.map((d) => cachedPast(pvPast, d, d < utcToday, () => getPvToday(d)))));
+      : Promise.all(dates.map((d) => cachedPast(pvPast, d, isPastUtcDate(d, nowMs), () => getPvToday(d)))));
     pvStore.current.set(dkey, r);
     return null;
   }, 120_000, [dkey]);
@@ -65,7 +64,7 @@ export function DayCard({ now, fronts, holiday }: {
     if (!isToday) return null;
     const r = await (import.meta.env.DEV && MOCK
       ? (await import("../../../lib/mock/day")).mockExecToday(dates)
-      : Promise.all(dates.map((d) => cachedPast(execPast, d, d < utcToday, () => getExecutionToday(d)))));
+      : Promise.all(dates.map((d) => cachedPast(execPast, d, isPastUtcDate(d, nowMs), () => getExecutionToday(d)))));
     execStore.current.set(dkey, r);
     return null;
   }, 120_000, [dkey, isToday]);
@@ -163,12 +162,13 @@ export function DayCard({ now, fronts, holiday }: {
     const mid = (Date.parse(w.start_utc) + Date.parse(w.end_utc)) / 2;
     const ws = water.find((s) => mid >= s.startMs && mid < s.endMs);
     const heat = heatingCell(w, dayFronts?.heating, holiday.climate);
+    const isCur = nowMs >= Date.parse(w.start_utc) && nowMs < Date.parse(w.end_utc);
     const info = {
       startLocal: w.start_local, endLocal: w.end_local, tier: tierOf(w),
       price: w.price_p != null ? pp(w.price_p) : null,
       heat, water: holiday.tank ? "desligado" : (ws ? ws.text : null),
     };
-    return { key: w.start_utc, a, b, w, text: bandDetail(info), range: bandRange(info), tier: info.tier };
+    return { key: w.start_utc, a, b, w, text: bandDetail(info, isToday && isCur), range: bandRange(info), tier: info.tier };
   });
   const curIdx = bands.findIndex((x) => nowMs >= Date.parse(x.w.start_utc) && nowMs < Date.parse(x.w.end_utc));
   const defaultKey = bands.length ? bands[isToday && curIdx >= 0 ? curIdx : 0].key : null;

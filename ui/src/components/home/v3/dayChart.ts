@@ -223,6 +223,8 @@ export function daySummary(i: { isToday: boolean; series: DaySeries; peak: PeakI
     const r = s.pvCmp.actual / s.pvCmp.expected;
     out.push(r >= 1.1 ? "O sol rendeu mais que o previsto." : r >= 0.9 ? "O sol rendeu quase o previsto." : "O sol rendeu menos que o previsto.");
   }
+  // Hoje: BatteryCard and the status line own the battery and peak story; only Amanhã needs them here.
+  if (i.isToday) return out.join(" ");
   const plan = s.socPlan;
   if (plan.length > 0) {
     const full = plan.find((p) => p.v >= FULL_PCT);
@@ -259,8 +261,8 @@ export function bandRange(b: { startLocal: string; endLocal: string }): string {
 }
 /** "16–19 · pico 38,2p · aquecimento desligado · água 37 °C (economia)". Real text for
  *  screen readers and touch (a segment's `title` does neither). */
-export function bandDetail(b: BandInfo): string {
-  const out = [bandRange(b), `${TIER_WORD[b.tier]}${b.price ? ` ${b.price}` : ""}`];
+export function bandDetail(b: BandInfo, omitPrice = false): string {
+  const out = [bandRange(b), `${TIER_WORD[b.tier]}${b.price && !omitPrice ? ` ${b.price}` : ""}`];
   if (b.heat) {
     const t = b.heat.text;
     out.push(b.heat.mode === "off" ? "aquecimento desligado"
@@ -269,6 +271,11 @@ export function bandDetail(b: BandInfo): string {
   }
   if (b.water) out.push(b.water === "desligado" ? "água desligada" : `água ${b.water}`);
   return out.join(" · ");
+}
+
+/** A UTC date is cacheable for the session only 3 h after it ends (late telemetry / backfill). */
+export function isPastUtcDate(date: string, nowMs: number): boolean {
+  return nowMs > Date.parse(`${date}T00:00:00Z`) + 27 * 3600000;
 }
 
 /** Past UTC days never change: fetch once, keep for the session. The current UTC day always refetches. */

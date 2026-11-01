@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   localYmd, addDaysYmd, localDayBounds, utcDatesOf, hhmm, buildDaySeries, linePath, areaPath, kwCeil,
-  valueAt, daySummary, fullAt, flowModel, flowCaption, planCoversDay, bandDetail, bandRange, cachedPast,
+  valueAt, daySummary, fullAt, flowModel, flowCaption, planCoversDay, bandDetail, bandRange, cachedPast, isPastUtcDate,
 } from "./dayChart.ts";
 import { tierOf, agoraStale, span } from "../simple/logic.ts";
 
@@ -121,11 +121,11 @@ test("summary: only real facts, today vs tomorrow wording, no peak kWh", () => {
   const peak = { label: "16–19", coverage: { kind: "covered", until: "19:00", kwh: 0 } };
   const today = daySummary({ isToday: true, series: { ...baseSeries, socPlan: plan, pvCmp: { actual: 6, expected: 6.2 } }, peak, endMs: DAY, tz: "UTC" });
   assert.match(today, /O sol rendeu quase o previsto\./);
-  assert.match(today, /A bateria completa às 10:00\./);
-  assert.match(today, /No pico \(16–19\) a bateria segura a casa sem comprar da rede\./);
-  assert.doesNotMatch(today, /kWh/);
-  const tomorrow = daySummary({ isToday: false, series: { ...baseSeries, socPlan: plan }, peak: null, endMs: DAY, tz: "UTC" });
-  assert.equal(tomorrow, "A bateria deve completar às 10:00.");
+  // N1: on Hoje the battery + peak clauses belong to BatteryCard / the status line.
+  assert.equal(today, "O sol rendeu quase o previsto.");
+  const tomorrow = daySummary({ isToday: false, series: { ...baseSeries, socPlan: plan }, peak, endMs: DAY, tz: "UTC" });
+  assert.equal(tomorrow, "A bateria deve completar às 10:00. No pico (16–19) a bateria deve segurar a casa sem comprar da rede.");
+  assert.doesNotMatch(tomorrow, /kWh/);
   assert.equal(daySummary({ isToday: false, series: { ...baseSeries, socPlan: [] }, peak: null, endMs: DAY }), "");
   const low = daySummary({ isToday: true, series: { ...baseSeries, socPlan: [], pvCmp: { actual: 2, expected: 6 } }, peak: null, endMs: DAY });
   assert.match(low, /menos que o previsto/);
@@ -133,19 +133,20 @@ test("summary: only real facts, today vs tomorrow wording, no peak kWh", () => {
 });
 
 test("summary (#5): peak clause follows peakCoverage and is past tense, never a plan-as-fact", () => {
-  const mk = (coverage, isToday = true) => daySummary({ isToday, series: baseSeries, peak: { label: "16–19", coverage }, endMs: DAY });
+  const mk = (coverage, isToday = false) => daySummary({ isToday, series: baseSeries, peak: { label: "16–19", coverage }, endMs: DAY });
   assert.equal(mk({ kind: "bought", until: "19:00", kwh: 0.8 }), "No pico (16–19) a casa já comprou da rede.");
   assert.equal(mk({ kind: "buys", until: "19:00", kwh: 1.2 }), "No pico (16–19) o plano compra da rede.");
-  assert.equal(mk({ kind: "covered", until: "19:00", kwh: 0 }, false), "No pico (16–19) a bateria deve segurar a casa sem comprar da rede.");
-  assert.equal(mk(null), "");   // peak over (peakCoverage returns null) or no basis: clause dropped
+  assert.equal(mk({ kind: "covered", until: "19:00", kwh: 0 }), "No pico (16–19) a bateria deve segurar a casa sem comprar da rede.");
+  assert.equal(mk(null), "");
+  assert.equal(mk({ kind: "bought", until: "19:00", kwh: 0.8 }, true), "");   // Hoje: dropped (N1)   // peak over (peakCoverage returns null) or no basis: clause dropped
 });
 
 test("summary (#13): max-% claim only when the plan covers the whole day", () => {
   const short = [{ t: 0, v: 50 }, { t: 10 * H, v: 90 }];
-  const s = daySummary({ isToday: true, series: { ...baseSeries, socPlan: short }, peak: null, endMs: DAY, tz: "UTC" });
+  const s = daySummary({ isToday: false, series: { ...baseSeries, socPlan: short }, peak: null, endMs: DAY, tz: "UTC" });
   assert.equal(s, "O plano da bateria vai até 10:00.");
   const whole = [{ t: 0, v: 50 }, { t: 12 * H, v: 90 }, { t: 23.5 * H, v: 60 }];
-  assert.equal(daySummary({ isToday: true, series: { ...baseSeries, socPlan: whole }, peak: null, endMs: DAY, tz: "UTC" }), "A bateria chega a 90 % às 12:00.");
+  assert.equal(daySummary({ isToday: false, series: { ...baseSeries, socPlan: whole }, peak: null, endMs: DAY, tz: "UTC" }), "A bateria deve chegar a 90 % às 12:00.");
   assert.equal(planCoversDay(short, DAY), false);
   assert.equal(planCoversDay(whole, DAY), true);
 });
@@ -185,6 +186,18 @@ test("bands (#1): detail line is real text with the whole band", () => {
   const last = bandDetail({ startLocal: "22:00", endLocal: "00:00", tier: "standard", price: null, heat: { mode: "hold", text: "mantém ≥ 20" }, water: "desligado" });
   assert.equal(last, "22–00 · dia · aquecimento mantém ≥ 20 · água desligada");
   assert.equal(bandRange({ startLocal: "04:30", endLocal: "07:00" }), "04:30–07");
+});
+
+test("bands (N3): price omitted for the current band on Hoje only", () => {
+  const b = { startLocal: "13:00", endLocal: "16:00", tier: "cheap", price: "12,5p", heat: null, water: null };
+  assert.equal(bandDetail(b, true), "13–16 · barata");
+  assert.equal(bandDetail(b), "13–16 · barata 12,5p");
+});
+
+test("cache (N2): a UTC date is past only 3 h after it ends", () => {
+  assert.equal(isPastUtcDate("2026-10-06", Date.parse("2026-10-07T02:59:00Z")), false);
+  assert.equal(isPastUtcDate("2026-10-06", Date.parse("2026-10-07T03:01:00Z")), true);
+  assert.equal(isPastUtcDate("2026-10-07", Date.parse("2026-10-07T13:00:00Z")), false);
 });
 
 test("cache (#12): past UTC days fetch once, the current day always refetches", async () => {
