@@ -1,0 +1,42 @@
+/* Home v3 — Aquecimento · Daikin card (#900). Tokens only; borderless. */
+.hv3-heat { display: flex; flex-direction: column; gap: var(--space-3); }
+.hv3-heat .hs-eyebrow { margin: 0; }
+.hv3-word { margin-left: var(--space-3); font-size: var(--font-md); font-weight: 600; color: var(--text-dim); }
+.hv3-word--ok { color: var(--ok); }
+.hv3-word--warn { color: var(--warn); }
+.hv3-word--bad { color: var(--bad); }
+
+.hv3-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.hv3-chip {
+  display: inline-flex; align-items: baseline; gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  background: var(--bg-card-2); border-radius: var(--radius-sm);
+  font-size: var(--font-sm); font-variant-numeric: tabular-nums;
+}
+.hv3-chip-l { color: var(--text-dim); }
+
+.hv3-rows {
+  margin: 0; display: grid; grid-template-columns: auto 1fr;
+  gap: var(--space-2) var(--space-4); font-size: var(--font-sm); line-height: 1.45;
+}
+.hv3-rows dt { color: var(--text-dim); white-space: nowrap; }
+.hv3-rows dd { margin: 0; color: var(--text); }
+
+.hv3-admin { display: flex; flex-direction: column; gap: var(--space-3); }
+.hv3-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.hv3-lab { font-size: var(--font-sm); color: var(--text-dim); }
+.hv3-val { min-width: 4.5rem; text-align: center; font-variant-numeric: tabular-nums; }
+.hv3-on { background: var(--bg-card-3); color: var(--text); }
+.hv3-ok { margin: 0; font-size: var(--font-sm); color: var(--ok); line-height: 1.45; }
+.hv3-note { margin: 0; font-size: var(--font-xs); color: var(--text-mute); line-height: 1.5; }
+.hv3-warn { color: var(--warn); }
+.hv3-confirm {
+  display: flex; flex-direction: column; gap: var(--space-2);
+  padding: var(--space-3); background: var(--bg-card-2); border-radius: var(--radius);
+  font-size: var(--font-sm); line-height: 1.45;
+}
+
+@media (max-width: 720px) {
+  .hv3-rows { grid-template-columns: 1fr; gap: 0; }
+  .hv3-rows dd { margin-bottom: var(--space-2); }
+}

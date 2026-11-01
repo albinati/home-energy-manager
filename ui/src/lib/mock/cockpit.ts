@@ -12,5 +12,6 @@ export const MOCK_COCKPIT: CockpitNow = {
   },
   current_slot: { price_import_p: 12.49, price_export_p: 15, fox_mode: "ForceCharge", kind: "cheap" },
   next_transition: null,
+  modes: { daikin_control_mode: "active", optimization_preset: "normal" },
   freshness: { fox: { age_s: 20, fetched_at_utc: "2026-10-07T13:29:40Z", stale: false } },
 };
