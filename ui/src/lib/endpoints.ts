@@ -303,3 +303,8 @@ export const applyDhwBoost = (simulationId: string) =>
 export const simulateDhwBoostUndo = () => postJson<ActionDiffResponse>("/dhw/boost/undo/simulate", {});
 export const applyDhwBoostUndo = (simulationId: string) =>
   postWithSimId<DhwBoostUndone>("/dhw/boost/undo", simulationId);
+
+// Home v3 heating card (#900): POST /api/v1/comfort/feedback (admin). The backend
+// only stores the verdict with the house context; the weekly review reads it.
+export const postComfortFeedback = (verdict: "cold" | "ok" | "hot") =>
+  postJson<{ ok?: boolean }>("/comfort/feedback?source=ui", { verdict });

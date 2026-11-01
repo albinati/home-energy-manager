@@ -1021,6 +1021,12 @@ _inflight_guard = threading.Lock()
 _inflight: dict[tuple[str, str], threading.Lock] = {}
 
 
+def invalidate_cache() -> None:
+    """Drop the 60 s response cache so the next read reflects a just-applied
+    setting or replan (the slow period/compare caches are left alone)."""
+    _cache.clear()
+
+
 def plan_fronts(day: date | None = None, *, now_utc: datetime | None = None,
                 use_cache: bool = True) -> dict[str, Any]:
     """Cached (60 s) and SINGLE-FLIGHT per (db, day): concurrent cold requests
