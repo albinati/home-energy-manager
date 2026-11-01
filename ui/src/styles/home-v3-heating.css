@@ -1,4 +1,12 @@
 /* Home v3 — Aquecimento · Daikin card (#900). Tokens only; borderless. */
+
+/* Device cards (Bateria, Aquecimento, Água quente): own grid, not the 3-column .hs-tiles. */
+.hv3-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--space-3);
+  align-items: start;
+}
 .hv3-heat { display: flex; flex-direction: column; gap: var(--space-3); }
 .hv3-heat .hs-eyebrow { margin: 0; }
 .hv3-word { margin-left: var(--space-3); font-size: var(--font-md); font-weight: 600; color: var(--text-dim); }
