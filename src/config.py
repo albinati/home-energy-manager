@@ -712,6 +712,10 @@ class Config:
     # app's "powerful"/immersion button can momentarily push higher, but we
     # never command that. Was 65 → now 60 to match the hardware.
     DHW_TEMP_MAX_C: float = float(os.getenv("DHW_TEMP_MAX_C", "60"))
+    # "Banho extra hoje" (#901): tank target the owner's one-tap boost commands,
+    # clamped to DHW_TEMP_MAX_C. The plan then leaves the tank alone for
+    # USER_OVERRIDE_RESPECT_HOURS (src/dhw_boost.py).
+    DHW_USER_BOOST_TARGET_C: float = float(os.getenv("DHW_USER_BOOST_TARGET_C", "50"))
     # NOTE: DHW_LEGIONELLA_* env vars removed in v10. The Daikin Onecta firmware
     # runs the weekly thermal-shock cycle autonomously (Sunday ~11:00 local) and
     # the LP/dispatch never enforced these bounds. Stale .env entries are silently

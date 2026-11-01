@@ -2019,6 +2019,47 @@ def mark_action_user_overridden(
             conn.close()
 
 
+#: ``action_schedule.action_type`` of the row the "Banho extra hoje" control
+#: writes (``src/dhw_boost.py``). It is born ``active`` + user-overridden so the
+#: pre-fire reconciler treats it as the SOURCE of a user gesture; its lifecycle
+#: (expiry / undo) is owned by ``state_machine.end_user_boost``.
+USER_BOOST_ACTION_TYPE = "tank_user_boost"
+
+
+def get_active_user_boost_rows() -> list[dict[str, Any]]:
+    """Every boost row still ``active`` (any plan date, so a hold that crosses
+    local midnight is still found), newest first."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM action_schedule WHERE device = 'daikin' "
+                "AND action_type = ? AND status = 'active' ORDER BY start_time DESC, id DESC",
+                (USER_BOOST_ACTION_TYPE,),
+            )
+            return [_row_action(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def finish_user_boost(action_id: int, *, end_time_iso: str, note: str) -> None:
+    """Close a boost row: ``completed``, window cut to ``end_time_iso`` and the
+    override flag CLEARED. Clearing matters: ``find_recent_user_override`` also
+    matches on ``overridden_by_user_at`` alone for a few hours, and a finished
+    boost must stop suppressing the plan the moment it ends."""
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "UPDATE action_schedule SET status = 'completed', end_time = ?, "
+                "overridden_by_user_at = NULL, error_msg = ?, executed_at = ? WHERE id = ?",
+                (end_time_iso, note, datetime.now(UTC).isoformat(), action_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def find_recent_user_override(
     device: str,
     *,

@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
-from .. import db
+from .. import db, dhw_boost
 from ..config import config
 from ..daikin import service as daikin_service
 from ..daikin.client import DaikinClient, DaikinError
@@ -2720,6 +2720,58 @@ async def daikin_tank_power(req: TankPowerRequest, x_simulation_id: str | None =
     except DaikinError as e:
         safeguards.audit_log(action_type, {"on": req.on}, "api", False, str(e))
         raise HTTPException(status_code=502, detail=str(e))
+
+
+# --- "Banho extra hoje" (#901) ----------------------------------------------
+# The plan RESPECTS this boost for USER_OVERRIDE_RESPECT_HOURS (see
+# src/dhw_boost.py for why the plain tank-temperature route is not enough).
+# Reads are viewer-open; every POST is admin-gated by ApiV1RoleAuth.
+
+def _boost_http(exc: dhw_boost.BoostBlocked) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.detail())
+
+
+@app.get("/api/v1/dhw/boost")
+async def dhw_boost_status():
+    return await asyncio.to_thread(dhw_boost.status)
+
+
+@app.post("/api/v1/dhw/boost/simulate")
+async def dhw_boost_simulate():
+    try:
+        return _register_diff(dhw_boost.simulate()["diff"])
+    except dhw_boost.BoostBlocked as exc:
+        raise _boost_http(exc)
+
+
+@app.post("/api/v1/dhw/boost")
+async def dhw_boost_apply(x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
+    _enforce_simulation_id("dhw.boost", x_simulation_id)
+    try:
+        return await asyncio.to_thread(dhw_boost.apply)
+    except dhw_boost.BoostBlocked as exc:
+        raise _boost_http(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": "InvalidTarget", "message": str(exc)})
+    except DaikinError as exc:
+        raise HTTPException(status_code=502, detail={"error": "DaikinError", "message": str(exc)})
+
+
+@app.post("/api/v1/dhw/boost/undo/simulate")
+async def dhw_boost_undo_simulate():
+    try:
+        return _register_diff(dhw_boost.simulate_undo()["diff"])
+    except dhw_boost.BoostBlocked as exc:
+        raise _boost_http(exc)
+
+
+@app.post("/api/v1/dhw/boost/undo")
+async def dhw_boost_undo(x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
+    _enforce_simulation_id("dhw.boost_undo", x_simulation_id)
+    try:
+        return await asyncio.to_thread(dhw_boost.undo)
+    except dhw_boost.BoostBlocked as exc:
+        raise _boost_http(exc)
 
 
 @app.get("/api/v1/foxess/status", response_model=FoxESSStatusResponse)
