@@ -4,13 +4,15 @@ import { getCockpitNow, getPlanFronts, getStatusAlerts } from "../lib/endpoints"
 import { Icon } from "../components/common/Icon";
 import { Spinner } from "../components/common/Spinner";
 import { computeChips, type Chip } from "../components/shell/AlertStrip";
-import { StatusLine, AgoraLine } from "../components/home/simple/StatusLine";
+import { StatusLine } from "../components/home/simple/StatusLine";
+import { AgoraFlow } from "../components/home/v3/AgoraFlow";
+import { DayCard } from "../components/home/v3/DayCard";
 import { Tile } from "../components/home/simple/Tile";
 import { BatteryCard } from "../components/home/v3/BatteryCard";
 import { MoneyCard } from "../components/home/simple/MoneyCard";
 import { ModeBox } from "../components/home/simple/ModeBox";
 import {
-  buildStatus, casaTile, aguaTile, agoraParts, agoraStale, holidayFlags, footerLine,
+  buildStatus, casaTile, aguaTile, holidayFlags, footerLine,
 } from "../components/home/simple/logic";
 import { publishFreshness, publishCockpitConn } from "../lib/freshness";
 import { buildSha } from "../lib/api";
@@ -21,8 +23,9 @@ import "../styles/home-simple.css";
 // Dev-only fixture switch (`?mock=1`); eliminated from the production bundle.
 const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "1";
 
-// Home (#879): ridiculously simple. Reads ONLY /cockpit/now (10 s),
-// /plan/fronts (60 s) and /status/alerts (60 s); /whoami is fetched by the app
+// Home (#879, v3 #897): reads /cockpit/now (10 s),
+// /plan/fronts (60 s), /status/alerts (60 s) and, inside the O dia card, /pv/today, /execution/today,
+// /scheduler/timeline (120 s) and /plan/fronts?date=tomorrow; /whoami is fetched by the app
 // shell. No chart library is imported on this route.
 export default function Landing() {
   const now = usePoll(async () => {
@@ -68,7 +71,8 @@ export default function Landing() {
     <div class="hs">
       <h1 class="sr-only">Casa</h1>
       <StatusLine chips={chips} text={buildStatus({ now: data, fronts: f })} />
-      <AgoraLine parts={agoraParts(data)} stale={agoraStale(data)} />
+      <AgoraFlow now={data} />
+      <DayCard now={data} fronts={f} holiday={holiday} />
 
       <div class="hs-tiles">
         <Tile icon={<Icon name="house" size={14} />} title="Casa" t={casaTile(data, f)} />
@@ -76,7 +80,7 @@ export default function Landing() {
         <BatteryCard now={data} fronts={f} health={{ in_sync: alerts.data?.fox_drift?.in_sync, actuation_stale: alerts.data?.actuation?.fox?.stale }} />
       </div>
 
-      <MoneyCard fronts={f} nowMs={nowMs} holiday={holiday} tz={data.planner_tz} />
+      <MoneyCard fronts={f} />
 
       {role.value === "admin" && (
         <ModeBox vacation={data.vacation} preset={data.modes?.optimization_preset}

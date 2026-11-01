@@ -255,7 +255,7 @@ test("spend verdict words describe the price test; line is net and has no peak f
   assert.deepEqual(spendVerdict({ score: "below" }), { word: "preço médio ok", tone: "neutral" });
   assert.deepEqual(spendVerdict({ score: "above" }), { word: "preço médio alto", tone: "warn" });
   const line = spendLine({ realised_import_kwh: 6.1, realised_avg_import_p: 14.2, pv_kwh: 4.2, peak_import_kwh: 0 });
-  assert.equal(line, "líquido (com taxa fixa, menos exportação) · 6,1 kWh da rede a 14,2p · 4,2 kWh de sol");
+  assert.equal(line, "líquido (com taxa fixa, menos exportação) · 6,1 kWh da rede a 14,2p");   // sun kWh lives in the O dia card
 });
 
 test("casa next: earliest event first, then the coast / return detail", () => {

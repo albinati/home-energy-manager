@@ -351,8 +351,9 @@ ui/                        # SPA container (nginx serving a Vite build)
   Dockerfile               # node build stage → nginx:alpine + envsubst for runtime config
   conf/nginx.conf.template # reverse-proxies /api → hem; SPA fallback `try_files $uri /index.html`
   index.html               # single Vite entry — wouter resolves all routes client-side
-  src/routes/              # Preact + TypeScript route components (#879 v2): landing.tsx (`/` Home:
-                           #   status + 3 tiles + bill + one band strip + mode), insights.tsx (`/insights`:
+  src/routes/              # Preact + TypeScript route components (#879 v2): landing.tsx (`/` Home v3, #897:
+                           #   status + Agora flow pills + "O dia" SVG chart with tariff/heating/water lanes
+                           #   (components/home/v3/) + 3 tiles + money row + mode), insights.tsx (`/insights`:
                            #   recommendations, week, house; detail cards lazy behind "ver mais"),
                            #   settings.tsx (`/settings`: Conforto / Água quente / Conta + Avançado),
                            #   report.tsx (`/report` Journal, admin, not in the nav) — no per-route HTML page
