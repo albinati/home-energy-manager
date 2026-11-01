@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { Link } from "wouter-preact";
 import type { CockpitNow, PlanFrontsResponse } from "../../../lib/types";
 import { usePoll } from "../../../lib/poll";
+import type { DhwBoostStatus } from "../../../lib/endpoints";
 import { getPlanFronts, getPvToday, getExecutionToday, getSchedulerTimeline } from "../../../lib/endpoints";
 import {
-  frac, tariffSegments, heatingCell, waterSegments, hourTicks, hourWord, tierOf, peakSpans, upcomingPeakSpan, span, peakCoverage, pp,
+  frac, tariffSegments, heatingCell, waterSegments, waterBoostOf, hourTicks, hourWord, tierOf, peakSpans, upcomingPeakSpan, span, peakCoverage, pp,
   FAIXA_WORD, type HolidayFlags, type Axis,
 } from "../simple/logic.ts";
 import {
@@ -32,8 +33,10 @@ const execPast = new Map<string, ExecTodayResp>();
 // "O dia" (#898): the day as one hand-rolled SVG chart (sol, bateria %, consumo) with
 // the Cosy tariff / heating / hot-water lanes under it, on one shared x axis.
 // Hoje = measured + plan; Amanhã = what the planner already knows (nothing is guessed).
-export function DayCard({ now, fronts, holiday }: {
+export function DayCard({ now, fronts, holiday, boost }: {
   now: CockpitNow; fronts: PlanFrontsResponse | null; holiday: HolidayFlags;
+  /** GET /dhw/boost status, polled once by the Home route (shared with WaterCard). */
+  boost?: DhwBoostStatus | null;
 }) {
   const tz = now.planner_tz;
   const nowMs = Date.parse(now.now_utc);
@@ -152,7 +155,7 @@ export function DayCard({ now, fronts, holiday }: {
         .map((w) => ({ w, a: frac(axis, Date.parse(w.start_utc)), b: frac(axis, Date.parse(w.end_utc)) }))
     : [];
   const segs = tariffSegments(tariff, axis);
-  const water = waterSegments(dayFronts?.tank, axis);
+  const water = waterSegments(dayFronts?.tank, axis, waterBoostOf(boost));
   const heatCells = wins
     .map(({ w, a, b }) => ({ a, b, cell: heatingCell(w, dayFronts?.heating, holiday.climate, tariff?.structure) }))
     .filter((x) => x.cell != null);

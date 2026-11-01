@@ -31,11 +31,17 @@ def test_restore_gives_up_after_12h_closes_the_row_and_notifies_once(env, monkey
     _reconcile(now + timedelta(hours=17), env["dev"])
     assert db.get_action_by_id(out["row_id"])["status"] == "completed"
     _reconcile(now + timedelta(hours=18), env["dev"])
-    assert len(sent) == 1 and "banho extra" in sent[0] and "tanque" in sent[0]
+    assert len(sent) == 1 and "shower boost" in sent[0] and "tank" in sent[0]
 
 
 def test_restore_attempts_are_bounded_with_backoff(env, monkeypatch):
     now, out = _released_boost(env, monkeypatch)
+    monkeypatch.setattr("src.config.config.DAIKIN_CONTROL_MODE", "active")
+
+    def _boom(*a, **k):
+        raise sm.DaikinError("write failed")
+
+    monkeypatch.setattr("src.state_machine.apply_scheduled_daikin_params", _boom)
     sent: list[str] = []
     monkeypatch.setattr("src.state_machine.notify_risk", lambda m, extra=None: sent.append(m))
     t0 = now + timedelta(hours=4, minutes=1)
@@ -129,3 +135,31 @@ def test_target_divergence_alert_is_skipped_while_a_boost_row_is_pending(env, mo
 def test_boot_paths_take_the_tank_lock():
     assert "TANK_WRITE_LOCK" in inspect.getsource(sm.recover_on_boot)
     assert "TANK_WRITE_LOCK" in inspect.getsource(sm.apply_safe_defaults)
+
+
+def test_gated_ticks_do_not_consume_restore_attempts(env, monkeypatch):
+    """Hold expires inside a 3 h legionella stand-off: every skipped tick is free,
+    the restore happens right after the stand-off and nothing is abandoned."""
+    now = _now()
+    _add(atype="tank_setback", start=now - timedelta(minutes=1), end=now + timedelta(hours=20),
+         params={"tank_power": True, "tank_temp": 37}, status="completed")
+    out = dhw_boost.apply(now)
+    sent: list[str] = []
+    monkeypatch.setattr("src.state_machine.notify_risk", lambda m, extra=None: sent.append(m))
+    s0 = now + timedelta(hours=3, minutes=30)
+    monkeypatch.setattr(
+        "src.state_machine.in_legionella_standoff",
+        lambda t: s0 <= t < s0 + timedelta(hours=3),
+    )
+    t0 = now + timedelta(hours=4, minutes=1)
+    for minute in range(0, 145):  # ticks all inside the stand-off (ends at +6h30)
+        _reconcile(t0 + timedelta(minutes=minute), env["dev"])
+    row = db.get_action_by_id(out["row_id"])
+    assert row["status"] == "active", row.get("error_msg")
+    assert int(row["params"].get("restore_attempts", 0)) == 0
+    assert env["applied"] == []
+    _reconcile(s0 + timedelta(hours=3, minutes=1), env["dev"])
+    row = db.get_action_by_id(out["row_id"])
+    assert row["status"] == "completed"
+    assert env["applied"], "restore must be written once the stand-off ends"
+    assert sent == []

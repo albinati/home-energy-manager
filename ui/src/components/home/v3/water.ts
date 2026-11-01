@@ -149,3 +149,15 @@ export function confirmCopy(
   const band = bandText(bandKind);
   return `${heat} O plano não mexe no tanque por ${hold}${until ? ` (até ${until})` : ""} e depois volta ao normal.${band ? ` ${band}` : ""}`;
 }
+
+/** Confirm copy for the simulate -> confirm step. Whether Powerful is switched on comes from
+ *  the SIMULATE diff's `after.powerful` (what the backend will really do now), never from the
+ *  60 s status poll's `uses_powerful`, which may be a minute stale. */
+export function confirmCopyFromDiff(
+  st: { target_c: number; hold_hours: number; uses_powerful?: boolean },
+  diff: { after?: { powerful?: boolean } | null } | null | undefined,
+  until: string | null,
+  bandKind: string | undefined,
+): string {
+  return confirmCopy({ ...st, uses_powerful: diff?.after?.powerful === true }, until, bandKind);
+}

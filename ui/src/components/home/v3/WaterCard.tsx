@@ -1,15 +1,16 @@
 import { useState } from "preact/hooks";
-import { usePoll } from "../../../lib/poll";
+import type { PollState } from "../../../lib/poll";
 import {
-  getDhwBoost, simulateDhwBoost, applyDhwBoost, simulateDhwBoostUndo, applyDhwBoostUndo,
+  simulateDhwBoost, applyDhwBoost, simulateDhwBoostUndo, applyDhwBoostUndo,
 } from "../../../lib/endpoints";
+import type { DhwBoostStatus } from "../../../lib/endpoints";
 import { HemApiError } from "../../../lib/api";
 import { toast } from "../../../lib/toast";
 import { role } from "../../../lib/auth";
 import type { ActionDiffResponse, CockpitNow, PlanFrontsResponse } from "../../../lib/types";
 import { Icon } from "../../common/Icon";
 import { aguaTile, holidayFlags } from "../simple/logic.ts";
-import { barPct, waterHead, afterRow, legionellaRow, boostView, confirmCopy, hhmm } from "./water.ts";
+import { barPct, waterHead, afterRow, legionellaRow, boostView, confirmCopyFromDiff, hhmm } from "./water.ts";
 import "../../../styles/home-v3-water.css";
 
 const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "1";
@@ -22,17 +23,15 @@ const isSimIdError = (e: unknown): boolean =>
 // rows (next shower, next step, next legionella) and, for the admin, "Banho
 // extra hoje" (simulate -> confirm -> apply, with undo). Every value is read
 // from /cockpit/now, /plan/fronts or /dhw/boost; a row without data is dropped.
-export function WaterCard({ now, fronts, nowMs, tz, onChanged }: {
+export function WaterCard({ now, fronts, nowMs, tz, boost, onChanged }: {
   now: CockpitNow;
   fronts: PlanFrontsResponse | null;
   nowMs: number;
   tz?: string;
+  /** GET /dhw/boost poll, owned by the Home route and shared with DayCard. */
+  boost: PollState<DhwBoostStatus>;
   onChanged: () => void;
 }) {
-  const boost = usePoll(async () => {
-    if (import.meta.env.DEV && MOCK) return (await import("../../../lib/mock/dhwBoost")).mockDhwBoost();
-    return getDhwBoost();
-  }, 60_000);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<ActionDiffResponse | null>(null);
   const [confirmUndo, setConfirmUndo] = useState(false);
@@ -142,7 +141,7 @@ export function WaterCard({ now, fronts, nowMs, tz, onChanged }: {
           )}
           {view.kind === "idle" && confirm && st && (
             <div class="hw-confirm">
-              <span>{confirmCopy({ ...st, uses_powerful: confirm.after?.powerful === true }, hhmm(new Date(nowMs + st.hold_hours * 3_600_000).toISOString(), tz), now.current_slot?.kind)}</span>
+              <span>{confirmCopyFromDiff(st, confirm, hhmm(new Date(nowMs + st.hold_hours * 3_600_000).toISOString(), tz), now.current_slot?.kind)}</span>
               <div class="hw-actions">
                 <button type="button" class="btn btn--sm btn--primary" disabled={busy} onClick={apply}>{busy ? "Aplicando…" : "Confirmar"}</button>
                 <button type="button" class="btn btn--sm" disabled={busy} onClick={() => setConfirm(null)}>Cancelar</button>

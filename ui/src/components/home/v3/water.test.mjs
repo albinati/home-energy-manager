@@ -1,7 +1,7 @@
 // Unit tests for the Home v3 "Água quente" pure helpers. Run: `npm test`.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { barPct, waterHead, afterRow, legionellaRow, boostView, confirmCopy, bandText, hhmm } from "./water.ts";
+import { barPct, waterHead, afterRow, legionellaRow, boostView, confirmCopy, confirmCopyFromDiff, bandText, hhmm } from "./water.ts";
 
 const NOW = Date.parse("2026-10-07T13:30:00Z"); // 14:30 BST
 const win = (kind, s, e, t) => ({ kind, start_utc: s, end_utc: e, start_local: "", end_local: "", tank_target_c: t });
@@ -111,4 +111,12 @@ test("bandText maps every cockpit kind explicitly; unknown says nothing", () => 
 
 test("hhmm renders in the planner timezone", () => {
   assert.equal(hhmm("2026-10-07T13:30:00Z", "Europe/London"), "14:30");
+});
+
+test("confirmCopyFromDiff: Powerful wording follows the simulate diff, not the status poll", () => {
+  const stale = { target_c: 50, hold_hours: 4, uses_powerful: true };
+  assert.doesNotMatch(confirmCopyFromDiff(stale, { after: { powerful: false } }, "18:30", "cheap"), /Powerful/);
+  assert.doesNotMatch(confirmCopyFromDiff(stale, { after: {} }, null, undefined), /Powerful/);
+  const fresh = { target_c: 50, hold_hours: 4, uses_powerful: false };
+  assert.match(confirmCopyFromDiff(fresh, { after: { powerful: true } }, "18:30", "cheap"), /Liga o modo Powerful/);
 });

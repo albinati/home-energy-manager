@@ -263,6 +263,11 @@ def _quota_blocked() -> bool:
         return False
 
 
+def _count_restore_attempt(row: dict[str, Any], now_utc: datetime) -> None:
+    attempts = int(_boost_params(row).get("restore_attempts", 0)) + 1
+    db.update_user_boost_meta(int(row["id"]), restore_attempts=attempts, last_attempt_at=_iso_z(now_utc))
+
+
 def end_user_boost(
     row: dict[str, Any],
     dev: Any,
@@ -290,8 +295,6 @@ def end_user_boost(
     """
     aid = int(row["id"])
     db.expire_user_boost(aid, end_time_iso=_iso_z(now_utc), note=f"boost {reason}: restore pending")
-    attempts = int(_boost_params(row).get("restore_attempts", 0)) + 1
-    db.update_user_boost_meta(aid, restore_attempts=attempts, last_attempt_at=_iso_z(now_utc))
     # Did HEM itself switch Powerful on? Only then is there a Powerful to clear.
     hem_powerful = bool(_boost_params(row).get("powerful"))
     _BOOST_HOLD_LOGGED.clear()
@@ -340,6 +343,9 @@ def end_user_boost(
             if daikin_device_matches_params(dev, planned):
                 out["restored"] = True  # the device already holds the plan's state
             else:
+                # Only a REAL write attempt consumes one of the capped retries; a tick
+                # skipped by a gate (stand-off, holiday, quota...) never gets here.
+                _count_restore_attempt(row, now_utc)
                 apply_scheduled_daikin_params(dev, client, planned, trigger=trigger)
                 out["restored"] = True
         except (DaikinError, ValueError) as exc:
@@ -410,9 +416,9 @@ def _check_user_boost_expiry(
                               result="failure", trigger=trigger, error_msg="restore abandoned")
                 try:
                     notify_risk(
-                        "O banho extra terminou mas não consegui devolver o tanque ao plano "
-                        "(Daikin indisponível ou em modo restrito). O tanque pode continuar na "
-                        "meta do banho extra; confira no app do Daikin."
+                        "Extra shower boost ended but the tank could not be handed back to the "
+                        "plan (Daikin unavailable or restricted). The tank may still be at the "
+                        "boost target; check the Daikin app."
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("boost give-up notify failed (non-fatal): %s", exc)
