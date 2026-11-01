@@ -120,3 +120,11 @@ test("confirmCopyFromDiff: Powerful wording follows the simulate diff, not the s
   const fresh = { target_c: 50, hold_hours: 4, uses_powerful: false };
   assert.match(confirmCopyFromDiff(fresh, { after: { powerful: true } }, "18:30", "cheap"), /Liga o modo Powerful/);
 });
+
+test("confirmCopyFromDiff: the backend hold_until_utc wins over the client estimate", () => {
+  const st = { target_c: 50, hold_hours: 4 };
+  const c = confirmCopyFromDiff(st, { after: { powerful: false, hold_until_utc: "2026-10-07T17:45:00Z" } }, "99:99", undefined, "Europe/London");
+  assert.match(c, /até 18:45\)/);
+  assert.doesNotMatch(c, /99:99/);
+  assert.match(confirmCopyFromDiff(st, { after: {} }, "18:30", undefined), /até 18:30\)/);
+});

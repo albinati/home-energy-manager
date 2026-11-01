@@ -34,23 +34,71 @@ def test_restore_gives_up_after_12h_closes_the_row_and_notifies_once(env, monkey
     assert len(sent) == 1 and "shower boost" in sent[0] and "tank" in sent[0]
 
 
+def _failing_writes(monkeypatch, times: list, clock: dict) -> None:
+    def _boom(*a, **k):
+        times.append(clock["t"])
+        raise OSError("network down")  # URLError is an OSError: must not escape
+
+    monkeypatch.setattr("src.state_machine.apply_scheduled_daikin_params", _boom)
+
+
+def _assert_spaced(times: list) -> None:
+    assert len(times) == 6
+    want = [2, 5, 15, 30, 60]  # backoff diffs between consecutive real attempts, minutes
+    for (t0, t1), w in zip(zip(times, times[1:]), want):
+        assert t1 - t0 >= timedelta(minutes=w), (t0, t1, w)
+
+
 def test_restore_attempts_are_bounded_with_backoff(env, monkeypatch):
     now, out = _released_boost(env, monkeypatch)
     monkeypatch.setattr("src.config.config.DAIKIN_CONTROL_MODE", "active")
-
-    def _boom(*a, **k):
-        raise sm.DaikinError("write failed")
-
-    monkeypatch.setattr("src.state_machine.apply_scheduled_daikin_params", _boom)
     sent: list[str] = []
     monkeypatch.setattr("src.state_machine.notify_risk", lambda m, extra=None: sent.append(m))
+    times: list = []
+    clock = {"t": now}
+    _failing_writes(monkeypatch, times, clock)
     t0 = now + timedelta(hours=4, minutes=1)
-    for minute in range(1, 300):  # 5 h of 1-minute ticks, still passive
-        _reconcile(t0 + timedelta(minutes=minute), env["dev"])
+    for minute in range(1, 300):  # 5 h of 1-minute ticks, writes keep failing
+        clock["t"] = t0 + timedelta(minutes=minute)
+        _reconcile(clock["t"], env["dev"])
     row = db.get_action_by_id(out["row_id"])
     assert row["status"] == "completed"           # gave up after 6 attempts
     assert row["params"]["restore_attempts"] == 6
     assert len(sent) == 1
+    _assert_spaced(times)
+
+
+def test_attempts_stay_spaced_after_a_long_gate(env, monkeypatch):
+    """3 h legionella stand-off, then failing writes: the 6 attempts must still be spaced
+    from each other, not fired back to back because the release was hours ago."""
+    now = _now()
+    _add(atype="tank_setback", start=now - timedelta(minutes=1), end=now + timedelta(hours=20),
+         params={"tank_power": True, "tank_temp": 37}, status="completed")
+    out = dhw_boost.apply(now)
+    monkeypatch.setattr("src.state_machine.notify_risk", lambda m, extra=None: None)
+    s0 = now + timedelta(hours=3, minutes=30)
+    monkeypatch.setattr("src.state_machine.in_legionella_standoff",
+                        lambda t: s0 <= t < s0 + timedelta(hours=3))
+    times: list = []
+    clock = {"t": now}
+    _failing_writes(monkeypatch, times, clock)
+    t0 = now + timedelta(hours=4, minutes=1)
+    for minute in range(0, 400):
+        clock["t"] = t0 + timedelta(minutes=minute)
+        _reconcile(clock["t"], env["dev"])
+    assert db.get_action_by_id(out["row_id"])["params"]["restore_attempts"] == 6
+    assert times[0] >= s0 + timedelta(hours=3)
+    _assert_spaced(times)
+
+
+def test_gated_ticks_do_not_spam_the_action_log(env, monkeypatch):
+    now, out = _released_boost(env, monkeypatch)   # passive: every tick is gated
+    t0 = now + timedelta(hours=4, minutes=1)
+    for minute in range(1, 60):
+        _reconcile(t0 + timedelta(minutes=minute), env["dev"])
+    rows = [r for r in db.get_action_logs(device="daikin", action="dhw_user_boost_end", limit=500)
+            if r.get("result") == "skipped"]
+    assert len(rows) <= 2   # one per skip-reason change, not one per tick
 
 
 def test_no_restore_write_while_the_quota_blocks(env, monkeypatch):
@@ -60,7 +108,21 @@ def test_no_restore_write_while_the_quota_blocks(env, monkeypatch):
     for m in (3, 10, 30, 70):
         _reconcile(now + timedelta(hours=4, minutes=1 + m), env["dev"])
     assert env["applied"] == []
-    assert db.get_action_by_id(out["row_id"])["status"] in ("active", "completed")
+    row = db.get_action_by_id(out["row_id"])
+    assert row["status"] == "active"
+    assert int(row["params"].get("restore_attempts", 0)) == 0
+
+
+def test_no_restore_write_and_no_attempts_while_the_tank_is_in_holiday(env, monkeypatch):
+    now, out = _released_boost(env, monkeypatch)
+    monkeypatch.setattr("src.config.config.DAIKIN_CONTROL_MODE", "active")
+    env["dev"].tank_holiday_active = True
+    for m in (3, 10, 30, 70, 130):
+        _reconcile(now + timedelta(hours=4, minutes=1 + m), env["dev"])
+    assert env["applied"] == []
+    row = db.get_action_by_id(out["row_id"])
+    assert row["status"] == "active"
+    assert int(row["params"].get("restore_attempts", 0)) == 0
 
 
 def test_no_same_value_powerful_off_when_hem_never_turned_it_on(env):

@@ -141,7 +141,7 @@ export function WaterCard({ now, fronts, nowMs, tz, boost, onChanged }: {
           )}
           {view.kind === "idle" && confirm && st && (
             <div class="hw-confirm">
-              <span>{confirmCopyFromDiff(st, confirm, hhmm(new Date(nowMs + st.hold_hours * 3_600_000).toISOString(), tz), now.current_slot?.kind)}</span>
+              <span>{confirmCopyFromDiff(st, confirm, hhmm(new Date(nowMs + st.hold_hours * 3_600_000).toISOString(), tz), now.current_slot?.kind, tz)}</span>
               <div class="hw-actions">
                 <button type="button" class="btn btn--sm btn--primary" disabled={busy} onClick={apply}>{busy ? "Aplicando…" : "Confirmar"}</button>
                 <button type="button" class="btn btn--sm" disabled={busy} onClick={() => setConfirm(null)}>Cancelar</button>

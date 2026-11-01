@@ -25,7 +25,8 @@ import "../styles/home-v3.css";
 const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "1";
 
 // Home (#879, v3 #897): reads /cockpit/now (10 s),
-// /plan/fronts (60 s), /status/alerts (60 s) and, inside the O dia card, /pv/today, /execution/today,
+// /plan/fronts (60 s), /status/alerts (60 s), /dhw/boost (60 s, shared by the O dia Água lane and
+// the Água quente card) and, inside the O dia card, /pv/today, /execution/today,
 // /scheduler/timeline (120 s) and /plan/fronts?date=tomorrow; /whoami is fetched by the app
 // shell. No chart library is imported on this route.
 export default function Landing() {

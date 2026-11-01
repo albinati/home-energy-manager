@@ -155,9 +155,13 @@ export function confirmCopy(
  *  60 s status poll's `uses_powerful`, which may be a minute stale. */
 export function confirmCopyFromDiff(
   st: { target_c: number; hold_hours: number; uses_powerful?: boolean },
-  diff: { after?: { powerful?: boolean } | null } | null | undefined,
+  diff: { after?: { powerful?: boolean; hold_until_utc?: string } | null } | null | undefined,
   until: string | null,
   bandKind: string | undefined,
+  tz?: string,
 ): string {
-  return confirmCopy({ ...st, uses_powerful: diff?.after?.powerful === true }, until, bandKind);
+  // The backend's own hold end wins over the client-side now + hold_hours estimate.
+  const holdUntil = diff?.after?.hold_until_utc;
+  const untilText = holdUntil && Number.isFinite(Date.parse(holdUntil)) ? hhmm(holdUntil, tz) : until;
+  return confirmCopy({ ...st, uses_powerful: diff?.after?.powerful === true }, untilText, bandKind);
 }
