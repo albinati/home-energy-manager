@@ -354,11 +354,11 @@ ui/                        # SPA container (nginx serving a Vite build)
   index.html               # single Vite entry — wouter resolves all routes client-side
   src/routes/              # Preact + TypeScript route components (#879 v2): landing.tsx (`/` Home v3, #897:
                            #   status + Agora flow pills + "O dia" SVG chart with tariff/heating/water lanes
-                           #   (components/home/v3/) + 3 tiles + money row + mode), insights.tsx (`/insights`:
+                           #   (components/home/v3/) + Bateria / Aquecimento / Água quente cards + money row + mode), insights.tsx (`/insights`:
                            #   recommendations, week, house; detail cards lazy behind "ver mais"),
                            #   settings.tsx (`/settings`: Conforto / Água quente / Conta + Avançado),
                            #   report.tsx (`/report` Journal, admin, not in the nav) — no per-route HTML page
-  src/components/home/simple/      # Home v2 blocks (StatusLine, tiles, BandStrip, ModeBox) + pure logic.ts (tested)
+  src/components/home/simple/      # Home blocks kept from v2 (StatusLine, MoneyCard, ModeBox) + pure logic.ts shared with v3 (tested)
   src/components/insights/simple/  # Insights v2 (Tiles, recommendations, DetailCards lazy chunk) + logic.ts
   src/components/insights/*.tsx    # the detailed cards DetailCards mounts (LoadPattern, CosyScorecard, LwtLearning…)
   src/components/settings|shell|common|report/  # settings groups + batch bar, top nav/alerts/footer, primitives, journal

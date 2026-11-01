@@ -160,27 +160,6 @@ export function tariffSegments(tariff: PlanFrontsTariff | null | undefined, axis
     && Math.abs(a.price - b.price) < 0.5);
 }
 
-// ---------------------------------------------------------------- lane: rede
-export function gridLabel(
-  w: PlanFrontsTariffWindow,
-  battery: PlanFrontsBattery | null | undefined,
-): string | null {
-  if (!battery || battery.error) return null;
-  const row = battery.by_band?.find((r) => r.start_local === w.start_local && r.end_local === w.end_local);
-  if (!row) return null;
-  const planned = row.planned_import_kwh;
-  const real = row.realised_import_kwh;
-  const peak = tierOf(w) === "peak";
-  if (peak && (planned ?? 0) <= 0.05) {
-    return (real ?? 0) > 0.05 ? `${fmt(real!)} (meta 0)` : "0 (meta)";
-  }
-  if (w.status === "upcoming") {
-    return planned == null ? null : planned <= 0.05 ? "sem compra" : `plano ${fmt(planned)}`;
-  }
-  if (planned == null) return real == null ? null : `${fmt(real)} kWh`;
-  return `${fmt(real ?? 0)} de ${fmt(planned)} kWh`;
-}
-
 // --------------------------------------------------------- lane: aquecimento
 export type HeatMode = "boost" | "hold" | "off";
 export interface HeatCell { mode: HeatMode; text: string }
@@ -388,8 +367,6 @@ export function buildStatus({ now, fronts }: StatusCtx): string {
 // ------------------------------------------------------------------ tiles
 export interface TileText {
   value: string | null; unit: string; meaning: string; next: string; tone: "ok" | "warn" | "bad" | "dim";
-  /** Live flow line (Bateria tile only), shown between the headline and `meaning`. */
-  flow?: string; flowTone?: "charge" | "discharge" | "idle";
 }
 
 export function casaTile(now: CockpitNow, fronts: PlanFrontsResponse | null): TileText {
@@ -553,77 +530,6 @@ export function batteryRunway(
   return { kind: cands[0].kind, at: cands[0].at };
 }
 
-export function bateriaTile(now: CockpitNow, fronts: PlanFrontsResponse | null): TileText {
-  const b = fronts?.battery && !fronts.battery.error ? fronts.battery : null;
-  const tariff = fronts?.tariff && !fronts.tariff.error ? fronts.tariff : null;
-  const soc = now.state.soc_pct ?? b?.soc_now_pct ?? null;
-  const nowMs = Date.parse(now.now_utc);
-  const away = isAway(now);
-  let meaning = "Bateria";
-  let tone: TileText["tone"] = "dim";
-  if (away && b && chargeBasis(b, tariff, nowMs) === "sun") {
-    meaning = `Só com sol${b.reserve_pct != null ? ` · piso ${num(b.reserve_pct)} %` : ""}`;
-  } else if (b) {
-    const r = batteryRunway(b, tariff, nowMs, now.planner_tz);
-    if (r.now) { meaning = "No piso agora"; tone = "warn"; }
-    else if (r.kind === "empty") { meaning = `Chega até as ${r.at}`; tone = "warn"; }
-    else if (r.at) { meaning = `Chega até as ${r.at}`; tone = "ok"; }
-  }
-  const fl = batteryFlow(now.state);
-  const stale = agoraStale(now);   // no present tense on stale data
-  return {
-    value: soc != null ? fmt(soc, 0) : null, unit: "%", meaning, next: nextCharge(b, tariff, nowMs, away), tone,
-    ...(fl ? { flow: fl.text + stale, flowTone: fl.tone } : {}),
-  };
-}
-
-type FlowState = {
-  battery_kw?: number | null; grid_kw?: number | null; solar_kw?: number | null; load_kw?: number | null;
-} | null | undefined;
-const FLOW_DEAD_BAND_KW = 0.05;
-const SRC_MIN_KW = 0.1;
-
-/** Live battery flow in words (pt-BR), from the power balance. battery_kw > 0 =
- *  charging; grid_kw > 0 = import, < 0 = export. Sun available to the battery is
- *  the PV surplus after the house load. null when the reading is absent. */
-export function batteryFlow(s: FlowState): { text: string; tone: "charge" | "discharge" | "idle" } | null {
-  const b = s?.battery_kw;
-  if (b == null || !Number.isFinite(b)) return null;
-  if (Math.abs(b) < FLOW_DEAD_BAND_KW) return { text: "parada", tone: "idle" };
-  const kw = fmt(Math.abs(b), 1);
-  const grid = s?.grid_kw ?? 0;
-  const surplus = Math.max(0, (s?.solar_kw ?? 0) - (s?.load_kw ?? 0));
-  if (b > 0) {
-    const fromSun = Math.min(b, surplus);
-    const fromGrid = Math.max(0, Math.min(b - fromSun, grid));
-    const src = fromSun >= SRC_MIN_KW && fromGrid >= SRC_MIN_KW ? " do sol e da rede"
-      : fromGrid >= SRC_MIN_KW ? " da rede"
-      : fromSun > 0 ? " do sol" : "";
-    return { text: `carregando ${kw} kW${src}`, tone: "charge" };
-  }
-  const toGrid = Math.max(0, -grid - surplus);
-  return { text: `descarregando ${kw} kW para ${toGrid >= SRC_MIN_KW ? "a rede" : "a casa"}`, tone: "discharge" };
-}
-
-/** House power balance, one row of phrases. bateria / rede use WORDS instead of
- *  signs (carrega / descarrega, importa / exporta) so the legend is visible on a
- *  phone; a zero reads "bateria 0,0 kW". A null figure is hidden. The battery kW
- *  also appears in the Bateria tile flow line: the one accepted duplicate (the
- *  tile is the battery detail, this row is the house balance; DESIGN.md log). */
-export function agoraParts(now: CockpitNow): string[] {
-  const s = now.state;
-  const out: string[] = [];
-  const dir = (n: number, pos: string, neg: string) => {
-    const r = Math.round(Math.abs(n) * 10) / 10;
-    return r === 0 ? "0,0" : `${n > 0 ? pos : neg} ${fmt(r, 1)}`;
-  };
-  if (s.solar_kw != null) out.push(`sol ${fmt(Math.max(0, s.solar_kw), 1)} kW`);
-  if (s.load_kw != null) out.push(`casa ${fmt(Math.max(0, s.load_kw), 1)} kW`);
-  if (s.battery_kw != null) out.push(`bateria ${dir(s.battery_kw, "carrega", "descarrega")} kW`);
-  if (s.grid_kw != null) out.push(`rede ${dir(s.grid_kw, "importa", "exporta")} kW`);
-  return out;
-}
-export const AGORA_TITLE = "bateria: carrega / descarrega · rede: importa / exporta";
 const FOX_STALE_S = 300;
 /** " (há N min)" when the Fox reading is older than 5 min, else "". */
 export function agoraStale(now: CockpitNow): string {
@@ -632,32 +538,6 @@ export function agoraStale(now: CockpitNow): string {
   if (age == null || !(age > FOX_STALE_S)) return stale && age != null ? ` (há ${Math.max(1, Math.floor(age / 60))} min)` : "";
   const min = Math.floor(age / 60);
   return min >= 60 ? ` (há ${Math.floor(min / 60)} h)` : ` (há ${min} min)`;
-}
-
-export function nextCharge(
-  b: PlanFrontsBattery | null | undefined,
-  tariff: PlanFrontsTariff | null | undefined,
-  nowMs: number,
-  away: boolean,
-): string {
-  if (!b) return "";
-  const ws = [...(b.windows ?? [])].sort((a, b2) => Date.parse(a.start_utc) - Date.parse(b2.start_utc));
-  const g = ws.find((w) => w.kind === "grid_charge" && Date.parse(w.end_utc) > nowMs);
-  if (g) {
-    const win = tariff?.windows?.find((w) => Date.parse(w.start_utc) <= Date.parse(g.start_utc) && Date.parse(w.end_utc) > Date.parse(g.start_utc));
-    const kwh = g.charge_kwh ?? g.grid_kwh;   // energy INTO the battery
-    const price = win?.price_p != null ? ` a ${pp(win.price_p)}` : "";
-    const q = kwh != null ? ` (${fmt(kwh)} kWh${price})` : "";
-    const ongoing = Date.parse(g.start_utc) <= nowMs;
-    return ongoing
-      ? `Próximo: carregando da rede até ${g.end_local}${q}`
-      : `Próximo: ${span(g.start_local, g.end_local)} carrega da rede${q}`;
-  }
-  if (away) return "Próximo: carrega com o sol";
-  const cheap = [...(tariff?.windows ?? [])].filter((w) => tierOf(w) === "cheap")
-    .sort((a, b2) => Date.parse(a.start_utc) - Date.parse(b2.start_utc));
-  const nc = cheap.find((w) => Date.parse(w.start_utc) > nowMs) ?? cheap[0];
-  return nc ? `Próximo: faixa barata ${span(nc.start_local, nc.end_local)}${nc.price_p != null ? ` (${pp(nc.price_p)})` : ""}` : "";
 }
 
 /** Help line under the mode switch. In Normal mode the current plan says nothing
@@ -725,36 +605,6 @@ export function billingVerdict(b: PlanFrontsBilling): { lead: string; others: st
   const w = b.compare.find((c) => c.tariff === b.winner!.tariff);
   const save = w ? Math.abs(w.delta_gbp) : 0;
   return { lead: `${b.winner.label} custaria −${gbp(save)}`, others, good: false };
-}
-
-// ------------------------------------------------------- band list (phone)
-export interface BandRow {
-  startLocal: string; endLocal: string; tier: Tier; price: number | null; current: boolean;
-  grid: string | null; heat: HeatCell | null; water: string | null;
-}
-/** One row per tariff band for the narrow layout; each tank window is mapped to
- *  the band it overlaps most. */
-export function bandRows(fronts: PlanFrontsResponse, nowMs: number, holiday: HolidayFlags): BandRow[] {
-  const tariff = fronts.tariff && !fronts.tariff.error ? fronts.tariff : null;
-  if (!tariff) return [];
-  const wins = [...tariff.windows].sort((a, b) => Date.parse(a.start_utc) - Date.parse(b.start_utc));
-  // Every band names the tank window that covers most of it.
-  const tk = fronts.tank && !fronts.tank.error ? fronts.tank : null;
-  const water: Array<string | null> = wins.map((w) => {
-    let best: string | null = null, bestOv = 0;
-    for (const tw of tk?.windows ?? []) {
-      const ov = Math.min(Date.parse(tw.end_utc), Date.parse(w.end_utc)) - Math.max(Date.parse(tw.start_utc), Date.parse(w.start_utc));
-      if (ov > bestOv) { bestOv = ov; best = holiday.tank ? "desligado" : waterLabel(tw.kind, tw.tank_target_c); }
-    }
-    return best;
-  });
-  return wins.map((w, i) => ({
-    startLocal: w.start_local, endLocal: w.end_local, tier: tierOf(w), price: w.price_p,
-    current: nowMs >= Date.parse(w.start_utc) && nowMs < Date.parse(w.end_utc),
-    grid: gridLabel(w, fronts.battery),
-    heat: heatingCell(w, fronts.heating, holiday.climate),
-    water: water[i],
-  }));
 }
 
 // ----------------------------------------------------------------- footer
