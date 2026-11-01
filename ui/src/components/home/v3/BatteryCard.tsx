@@ -1,15 +1,15 @@
 import { Fragment } from "preact";
 import { Icon } from "../../common/Icon";
-import type { CockpitNow, PlanFrontsResponse, StatusFoxDriftBlock } from "../../../lib/types";
+import type { CockpitNow, PlanFrontsResponse } from "../../../lib/types";
 import { agoraStale } from "../simple/logic";
-import { batteryCardModel } from "./batteryCard";
+import { batteryCardModel, type FoxHealth } from "./batteryCard";
 import "../../../styles/home-v3-battery.css";
 
 // Read-only on purpose: the plan decides when to charge (no manual control).
-export function BatteryCard({ now, fronts, drift }: {
-  now: CockpitNow; fronts: PlanFrontsResponse | null; drift?: Pick<StatusFoxDriftBlock, "in_sync"> | null;
+export function BatteryCard({ now, fronts, health }: {
+  now: CockpitNow; fronts: PlanFrontsResponse | null; health?: FoxHealth | null;
 }) {
-  const m = batteryCardModel(now, fronts, drift);
+  const m = batteryCardModel(now, fronts, health);
   const pct = m.socPct != null ? Math.max(0, Math.min(100, m.socPct)) : 0;
   return (
     <section class="hv3-batt" aria-label="Bateria">

@@ -73,7 +73,7 @@ export default function Landing() {
       <div class="hs-tiles">
         <Tile icon={<Icon name="house" size={14} />} title="Casa" t={casaTile(data, f)} />
         <Tile icon={<Icon name="droplet" size={14} />} title="Água quente" t={aguaTile(data, f)} />
-        <BatteryCard now={data} fronts={f} drift={alerts.data?.fox_drift} />
+        <BatteryCard now={data} fronts={f} health={{ in_sync: alerts.data?.fox_drift?.in_sync, actuation_stale: alerts.data?.actuation?.fox?.stale }} />
       </div>
 
       <MoneyCard fronts={f} nowMs={nowMs} holiday={holiday} tz={data.planner_tz} />

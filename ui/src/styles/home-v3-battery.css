@@ -14,3 +14,4 @@
 .hv3-batt-rows dd.hv3-tone-ok { color: var(--ok); }
 .hv3-batt-rows dd.hv3-tone-warn { color: var(--warn); }
 .hv3-batt-note { margin: 0; font-size: var(--font-2xs); color: var(--text-mute); }
+.hv3-batt-state--warn { color: var(--warn); }
