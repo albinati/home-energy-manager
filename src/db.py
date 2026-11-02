@@ -4867,6 +4867,52 @@ def save_meteo_forecast_snapshot(
     return n
 
 
+def get_last_good_forecast_snapshot(
+    *,
+    max_age_hours: float,
+    source: str | None = None,
+    now_utc: datetime | None = None,
+) -> tuple[str, list[dict[str, Any]]] | None:
+    """#931: the most recent persisted forecast fetch younger than ``max_age_hours``.
+
+    ``source`` restricts to one provider label (``"quartz"`` / ``"open-meteo"``)
+    so a degraded Open-Meteo fallback snapshot is never mistaken for the
+    last-good Quartz one. Returns ``(forecast_fetch_at_utc, rows)`` (rows carry
+    ``slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw``) or ``None``.
+    """
+    now = now_utc or datetime.now(UTC)
+    cutoff = (now - timedelta(hours=float(max_age_hours))).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            sql = (
+                "SELECT forecast_fetch_at_utc FROM meteo_forecast_snapshot "
+                "WHERE forecast_fetch_at_utc >= ? AND forecast_fetch_at_utc <= ?"
+            )
+            args: list[Any] = [cutoff, now.isoformat()]
+            if source:
+                sql += " AND source = ?"
+                args.append(source)
+            sql += " ORDER BY forecast_fetch_at_utc DESC LIMIT 1"
+            r = conn.execute(sql, args).fetchone()
+            if not r or not r[0]:
+                return None
+            fetch_at = str(r[0])
+            cur = conn.execute(
+                """SELECT slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw
+                     FROM meteo_forecast_value
+                    WHERE forecast_fetch_at_utc = ?
+                    ORDER BY slot_time""",
+                (fetch_at,),
+            )
+            rows = [dict(x) for x in cur.fetchall()]
+            return (fetch_at, rows) if rows else None
+        except sqlite3.OperationalError:
+            return None
+        finally:
+            conn.close()
+
+
 def _get_latest_meteo_forecast_fetch_at(conn: sqlite3.Connection) -> str | None:
     cur = conn.execute(
         "SELECT forecast_fetch_at_utc FROM meteo_forecast_latest_state WHERE id = 1"

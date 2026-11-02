@@ -117,10 +117,27 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     try:
         from ... import weather
 
-        # Open-Meteo HTTP — offload so it doesn't block the event loop and
-        # serialize the other dashboard requests behind it. TTL-cached so the
-        # cockpit's /weather + /pv/today share one fetch.
-        fc = await asyncio.to_thread(weather.fetch_forecast_cached, hours=48)
+        # #931: the live fetch is FORWARD-ONLY (it drops every hour before
+        # "now"), so after sunset it holds only night rows and the whole day
+        # rendered 0; it is also empty during a provider outage / right after
+        # a restart (cold TTL cache). Build the day from the persisted
+        # canonical store instead -- the latest stored row per slot, which
+        # stitches elapsed slots from the fetches that covered them -- and only
+        # use the live fetch when the store has nothing for the day.
+        def _stored_day_forecast() -> list:
+            from ... import db as _db
+
+            rows: list[dict] = []
+            for dd in (d, d + timedelta(days=1)):
+                rows += _db.get_meteo_forecast_for_slot_date(dd.isoformat())
+            return weather._rows_to_hourly(rows)
+
+        fc = await asyncio.to_thread(_stored_day_forecast)
+        if not any(f.time_utc.date() == d for f in fc):
+            # Open-Meteo HTTP — offload so it doesn't block the event loop and
+            # serialize the other dashboard requests behind it. TTL-cached so the
+            # cockpit's /weather + /pv/today share one fetch.
+            fc = await asyncio.to_thread(weather.fetch_forecast_cached, hours=48)
         series = weather.forecast_to_lp_inputs(fc, slot_starts, pv_scale=1.0)
         pv = series.pv_kwh_per_slot
         for i in range(min(_SLOTS_PER_DAY, len(pv))):

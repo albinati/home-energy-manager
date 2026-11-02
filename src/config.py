@@ -2890,6 +2890,26 @@ class Config:
     def LP_PEAK_MARGIN_MAX_KWH(self, value: float) -> None:
         self._rt_set("LP_PEAK_MARGIN_MAX_KWH", float(value))
 
+    # -- #931 PV forecast degraded-source fallback (runtime settings) ----------
+    @property
+    def PV_FORECAST_LASTGOOD_ENABLED(self) -> bool:
+        return str(self._rt_get("PV_FORECAST_LASTGOOD_ENABLED")).strip().lower() in ("1", "true", "yes", "on")
+
+    @PV_FORECAST_LASTGOOD_ENABLED.setter
+    def PV_FORECAST_LASTGOOD_ENABLED(self, value: Any) -> None:
+        self._rt_set(
+            "PV_FORECAST_LASTGOOD_ENABLED",
+            "true" if (value is True or str(value).strip().lower() in ("1", "true", "yes", "on")) else "false",
+        )
+
+    @property
+    def PV_FORECAST_LASTGOOD_MAX_AGE_HOURS(self) -> float:
+        return float(self._rt_get("PV_FORECAST_LASTGOOD_MAX_AGE_HOURS"))
+
+    @PV_FORECAST_LASTGOOD_MAX_AGE_HOURS.setter
+    def PV_FORECAST_LASTGOOD_MAX_AGE_HOURS(self, value: float) -> None:
+        self._rt_set("PV_FORECAST_LASTGOOD_MAX_AGE_HOURS", float(value))
+
     @property
     def LP_SOC_FINAL_KWH(self) -> float:
         return float(self._rt_get("LP_SOC_FINAL_KWH"))

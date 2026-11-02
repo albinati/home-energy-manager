@@ -2168,9 +2168,17 @@ def _run_optimizer_lp(
     forecast_fetch = fetch_forecast_snapshot(hours=max(48, int(config.LP_HORIZON_HOURS) + 24))
     forecast = forecast_fetch.forecast
     forecast_fetch_at_utc = datetime.now(UTC).isoformat()
+    # #931: the PV source actually used (provider, or the degraded fallback and
+    # why) goes into exogenous_snapshot["pv_source"] below.
+    pv_source_info = forecast_fetch.pv_source_info()
+    if not forecast_fetch.persist and forecast_fetch.reused_fetch_at_utc:
+        # Reused last-good fetch: it is already persisted; reference IT (replay
+        # resolves the PV inputs through this timestamp) instead of faking a
+        # fresh fetch time or duplicating the rows.
+        forecast_fetch_at_utc = forecast_fetch.reused_fetch_at_utc
     # Persist the canonical forecast snapshot once so heartbeat + replay can
     # both reference the same fetch instead of duplicating latest/history rows.
-    if forecast:
+    if forecast and forecast_fetch.persist:
         forecast_rows = [
             {
                 "slot_time": f.time_utc.isoformat(),
@@ -2315,6 +2323,7 @@ def _run_optimizer_lp(
     # EXPORT_RATE_PENCE constant, preserving legacy behaviour.
     export_prices = _build_export_price_line(starts)
     exogenous_snapshot = {
+        "pv_source": pv_source_info,
         "base_load_components": {
             "residual_profile_kwh": [round(float(x), 4) for x in residual_base_load],
             "appliance_profile_kwh": [round(float(x), 4) for x in appliance_profile_kwh],

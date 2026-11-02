@@ -1755,6 +1755,12 @@ def bulletproof_forecast_refresh_job() -> None:
         if not new_fcst:
             logger.debug("forecast refresh: empty fetch, skipping")
             return
+        if not forecast_fetch.persist:
+            # #931: a reused last-good fetch is already stored; saving it again
+            # would fake a fresh fetch time and a zero forecast drift.
+            logger.debug("forecast refresh: provider degraded (%s), reusing last-good",
+                         forecast_fetch.fallback_reason)
+            return
         now_utc = datetime.now(UTC)
         new_rows = [
             {

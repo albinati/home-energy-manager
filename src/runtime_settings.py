@@ -826,6 +826,33 @@ SCHEMA: dict[str, SettingSpec] = {
             "never negative."
         ),
     ),
+    # --- #931 PV forecast degraded-source fallback ---------------------------
+    "PV_FORECAST_LASTGOOD_ENABLED": SettingSpec(
+        key="PV_FORECAST_LASTGOOD_ENABLED",
+        type_name="str",  # "true" / "false" -- kill switch
+        env_default=_str_env("PV_FORECAST_LASTGOOD_ENABLED", "true"),
+        enum=("true", "false"),
+        description=(
+            "Previsao solar degradada (#931). true = quando o Quartz volta vazio "
+            "(sidecar reiniciando, rede), o plano reutiliza a ultima previsao boa "
+            "gravada (se tiver menos de PV_FORECAST_LASTGOOD_MAX_AGE_HOURS) e, "
+            "sem ela, a fisica do Open-Meteo; avisa 1x por dia e grava "
+            "pv_source no exogenous_snapshot. false = comportamento antigo "
+            "(cai direto no Open-Meteo, sem aviso)."
+        ),
+    ),
+    "PV_FORECAST_LASTGOOD_MAX_AGE_HOURS": SettingSpec(
+        key="PV_FORECAST_LASTGOOD_MAX_AGE_HOURS",
+        type_name="float",
+        env_default=_float_env("PV_FORECAST_LASTGOOD_MAX_AGE_HOURS", "6"),
+        min_value=1.0,
+        max_value=24.0,
+        description=(
+            "Idade maxima (horas) da ultima previsao solar boa que pode ser "
+            "reutilizada quando a fonte falha (#931). Mais velha que isso = "
+            "Open-Meteo."
+        ),
+    ),
     # --- #876 closed-loop auto-tune (story 1: ledger + kill switch) ----------
     "AUTO_TUNE_ENABLED": SettingSpec(
         key="AUTO_TUNE_ENABLED",
