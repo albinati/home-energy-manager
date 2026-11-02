@@ -308,3 +308,15 @@ as exactly that offset. No gains term (the curve ignores sun).
 | `LP_W3_SPACE_FLOOR_TRIM_KW_PER_K` | 0 (0-0.2) | k. 0 = model calibration `get_kw_per_degc_lwt()`. Measured on Onecta-only 2h buckets: 0.043 kW/K (95% CI 0.020-0.070, n=46). |
 
 The DHW term is a linear time-share, so the floor is always satisfiable (legionella at full compressor included).
+
+## LP initial state rolled forward to slot 0 (#929)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `LP_INITIAL_SOC_ROLL_FORWARD_ENABLED` | true | Kill switch (runtime setting) for the SoC roll. false = SoC seeded with the value read at run time. |
+| `LP_INITIAL_TANK_ROLL_FORWARD_ENABLED` | true | Kill switch (runtime setting) for the tank reheat roll. false = tank seeded with the temperature read at run time. |
+
+Slot 0 is the next half-hour boundary, so the readings are up to ~29 min (+ cache age) stale. Oct 2026 audit over 782 runs: SoC |err| mean 0.43 kWh, p95 1.86, max 3.32; tank |err| mean 0.61 C, p95 4.0, max 15.3.
+- SoC: measured Fox battery power (`batChargePower - batDischargePower`) held reading -> slot 0, clamped to the inverter limit and [reserve, capacity]. No roll when the power reading is older than 5 min or absent (age is paired with the exact snapshot). The measured roll is bounded by the fdSoc of the Force* group in force at the reading. A Force* group of the latest uploaded schedule that STARTS strictly between the reading and slot 0 contributes its `fdPwr` from its start (its fdSoc bounds only that part; a ForceDischarge never raises SoC).
+- Tank: only a `live` seed whose reading is <= 40 min old. When the last two live samples (>= 10 min apart) rise >= 0.4 C the rate is extrapolated, capped at the SETPOINT and at +5 C. Reading >= setpoint = end of a reheat = no roll. `DHW_TEMP_MAX_C` is the cap only when a boost is positively known (Powerful on in the cached device, a Powerful action row in force, or reading >= setpoint + 3). Standing loss is applied only when > 0.5 C (the sensor is quantised to 1 C; the raw ODE made the audit worse).
+- `lp_inputs_snapshot.soc_initial_kwh` / `tank_initial_c` are the SEEDS (rolled); the raw readings are in `soc_measured_kwh` / `tank_measured_c`. The roll audit is `exogenous_snapshot.initial_roll_forward`. When W3 is enabled but there is no fresh indoor reading, a warning is logged (rate-limited to 1 / 15 min on the display path) and `exogenous_snapshot.w3_disabled_reason` = `no_fresh_indoor_reading`.

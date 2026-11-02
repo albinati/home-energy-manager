@@ -156,7 +156,10 @@ def run_lp_simulation(
     pv_scale = compute_pv_calibration_factor()
 
     weather = forecast_to_lp_inputs(forecast, starts, pv_scale=pv_scale)
-    initial = read_lp_initial_state(daikin, allow_daikin_refresh=allow_daikin_refresh)
+    initial = read_lp_initial_state(
+        daikin, allow_daikin_refresh=allow_daikin_refresh,
+        slot0_utc=starts[0] if starts else None,
+    )
 
     plan = solve_lp(
         slot_starts_utc=starts,

@@ -1490,6 +1490,11 @@ def _persist_lp_snapshots(
         _em["h0_kwh"] = float(plan.w3_emitter_h0_kwh)
         _em["tau_min"] = float(plan.w3_emitter_tau_min)
     exogenous_snapshot["emitter"] = _em
+    # #929: how the SoC / tank seed was moved to slot 0, and why W3 had no indoor seed.
+    if getattr(initial, "roll_forward", None):
+        exogenous_snapshot["initial_roll_forward"] = initial.roll_forward
+    if getattr(initial, "w3_disabled_reason", None):
+        exogenous_snapshot["w3_disabled_reason"] = initial.w3_disabled_reason
 
     inputs_row = {
         "run_at_utc": run_at_iso,
@@ -1497,6 +1502,13 @@ def _persist_lp_snapshots(
         "horizon_hours": int(config.LP_HORIZON_HOURS),
         "soc_initial_kwh": float(initial.soc_kwh),
         "tank_initial_c": float(initial.tank_temp_c),
+        # #929: the RAW readings (initial.* may be rolled forward to slot 0).
+        "soc_measured_kwh": float(
+            initial.soc_measured_kwh if getattr(initial, "soc_measured_kwh", None) is not None
+            else initial.soc_kwh),
+        "tank_measured_c": float(
+            initial.tank_measured_c if getattr(initial, "tank_measured_c", None) is not None
+            else initial.tank_temp_c),
         # Phase B dropped the LP indoor-temp STATE variable (no room sensor here).
         # #540 W1: now that room sensors push into room_temperature_history, record
         # the freshest reading on the snapshot (source="sensor") so it's captured
@@ -2292,7 +2304,7 @@ def _run_optimizer_lp(
         return float(today_factor)
 
     weather = forecast_to_lp_inputs(forecast, starts, pv_scale=_pv_scale_callable)
-    initial = read_lp_initial_state(daikin)
+    initial = read_lp_initial_state(daikin, slot0_utc=starts[0] if starts else None)
     micro_climate_offset = db.get_micro_climate_offset_c(config.DAIKIN_MICRO_CLIMATE_LOOKBACK)
     micro_climate_offset_by_hour = db.get_micro_climate_offset_by_hour_c(
         config.DAIKIN_MICRO_CLIMATE_LOOKBACK

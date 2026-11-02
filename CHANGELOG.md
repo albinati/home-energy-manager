@@ -6,6 +6,8 @@ Major versions track significant LP / dispatch architecture iterations. Minor ve
 
 ## [Unreleased]
 
+- LP initial state rolled forward to slot 0 (#929, behind `LP_INITIAL_SOC_ROLL_FORWARD_ENABLED` and `LP_INITIAL_TANK_ROLL_FORWARD_ENABLED`, both default on): SoC moves with the measured battery power (plus Force* groups starting before slot 0, bounded by fdSoc) and a visibly reheating tank is extrapolated (setpoint cap, +5 C max, live readings <= 40 min). `lp_inputs_snapshot` gains `soc_measured_kwh` / `tank_measured_c`; the missing-indoor W3 case is logged and recorded as `w3_disabled_reason`.
+
 - Peak-band conformal margin (#923, behind `LP_PEAK_MARGIN_ENABLED`, default off): the pessimistic scenario floors the 16-19 band at nominal + a conformal margin on a residual basis (measured load minus measured heat pump minus committed base; same base-forecaster key only), never below the summed slot spread; `GET /api/v1/load/expected` exposes the cached `peak_margin`.
 
 - Residual-load profile v3 (#922, behind `LP_RESIDUAL_PROFILE_V3`, default off): per-slot heat-pump subtraction from measured Onecta energy, mean statistic, weekday shrinkage, hard away exclusion; see `docs/ENV_NOTES.md`.

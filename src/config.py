@@ -3068,6 +3068,34 @@ class Config:
         )
 
     @property
+    def LP_INITIAL_SOC_ROLL_FORWARD_ENABLED(self) -> bool:
+        """#929 kill switch: roll the SoC seed forward to slot 0."""
+        return str(self._rt_get("LP_INITIAL_SOC_ROLL_FORWARD_ENABLED")).strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+
+    @LP_INITIAL_SOC_ROLL_FORWARD_ENABLED.setter
+    def LP_INITIAL_SOC_ROLL_FORWARD_ENABLED(self, value: Any) -> None:
+        self._rt_set(
+            "LP_INITIAL_SOC_ROLL_FORWARD_ENABLED",
+            "true" if (value is True or str(value).strip().lower() in ("1", "true", "yes", "on")) else "false",
+        )
+
+    @property
+    def LP_INITIAL_TANK_ROLL_FORWARD_ENABLED(self) -> bool:
+        """#929 kill switch: roll the tank seed forward to slot 0."""
+        return str(self._rt_get("LP_INITIAL_TANK_ROLL_FORWARD_ENABLED")).strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+
+    @LP_INITIAL_TANK_ROLL_FORWARD_ENABLED.setter
+    def LP_INITIAL_TANK_ROLL_FORWARD_ENABLED(self, value: Any) -> None:
+        self._rt_set(
+            "LP_INITIAL_TANK_ROLL_FORWARD_ENABLED",
+            "true" if (value is True or str(value).strip().lower() in ("1", "true", "yes", "on")) else "false",
+        )
+
+    @property
     def LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE(self) -> float:
         return float(self._rt_get("LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE"))
 
