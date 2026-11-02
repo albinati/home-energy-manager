@@ -249,3 +249,22 @@ LP filter (`src/scheduler/lp_dispatch.py:filter_robust_peak_export`) replaces it
 `EXPORT_DISCHARGE_FLOOR_SOC_PERCENT` is unrelated and still in use — it's the `fdSoC`
 parameter sent to Fox in the ForceDischarge group.
 
+## Residual-load profile v3 (#922, epic #920)
+
+Runtime settings (admin UI / `PUT /api/v1/settings`), read by `db.residual_load_profile_v2`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `LP_RESIDUAL_PROFILE_V3` | false | Master kill switch. false = the v2 builder, byte-identical. |
+| `LP_RESIDUAL_STATISTIC` | mean | `mean` or `median` for the central value (p75/p90 spreads unchanged). |
+| `LP_RESIDUAL_DOW_SHRINK` | 0.5 | 0..1. value = w x weekday profile + (1-w) x all-days profile per (hour, minute). |
+| `LP_RESIDUAL_AWAY_HARD_EXCLUDE` | true | Drop days with a non-normal preset (`lp_inputs_snapshot`), Daikin holiday (`daikin_telemetry.holiday_active`) and the first day back. The 0.4 x median heuristic stays as fallback. |
+
+What v3 changes: heat-pump energy is subtracted per 30-min slot from the MEASURED Onecta
+2h buckets (`telemetry_integral` rows are a weather-curve model and are ignored; those
+buckets get `daily - sum(Onecta)` spread by model weight; no daily row = physics), shared
+over the bucket's slots by load shape. v2 summed physics per SAMPLE (~10/slot at 3-min
+telemetry), so its calibration factor was ~10x too small and the residual kept the HP draw.
+Tier counts are slot-days. `LP_LOAD_PROFILE_WINDOW_DAYS` (120) is unchanged; short windows
+backtest worse. Caches key on the new settings.
+
