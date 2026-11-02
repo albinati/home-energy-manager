@@ -349,6 +349,8 @@ class TestReconcile:
             # fires exactly once (at the threshold), as a still-failing command.
             assert ping.call_count == 1
             assert ping.call_args.kwargs["recovered"] is False
+            # no armed/scheduled job for this appliance: record-only
+            assert ping.call_args.kwargs["record_only_reason"]
 
     def test_pat_invalid_pings_once(
         self, monkeypatch, appliance_id, fake_scheduler, patch_st
@@ -361,9 +363,10 @@ class TestReconcile:
         with patch.object(appliance_dispatch, "report_command_failure") as ping:
             for _ in range(3):
                 appliance_dispatch.reconcile()
-            assert ping.call_count == 1
-            assert ping.call_args.args[0] == "smartthings_pat_invalid"
-            assert ping.call_args.kwargs["recovered"] is False
+            # no in-process latch: every failing tick reports, the helper dedupes per day
+            assert ping.call_count == 3
+            assert all(c.args[0] == "smartthings_pat_invalid" for c in ping.call_args_list)
+            assert all(c.kwargs["recovered"] is False for c in ping.call_args_list)
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +427,7 @@ class TestFireCron:
             "transport", "down"
         )
         job_id = self._make_armed_job(appliance_id, datetime.now(UTC))
-        with patch.object(appliance_dispatch, "notify_risk"):
+        with patch.object(appliance_dispatch, "report_command_failure"):
             appliance_dispatch._fire_cron(job_id)
         row = db.get_appliance_job(job_id)
         assert row["status"] == "failed"
@@ -699,7 +702,7 @@ class TestRearmLatch:
             avg_price_pence=5.0,
             last_replan_at_utc=datetime.now(UTC).isoformat(),
         )
-        with patch.object(appliance_dispatch, "notify_risk"):
+        with patch.object(appliance_dispatch, "report_command_failure"):
             appliance_dispatch._fire_cron(job_id)
         assert db.get_appliance_job(job_id)["status"] == "failed"
         assert db.is_appliance_rearm_blocked(appliance_id) is True
@@ -796,7 +799,7 @@ class TestRehydrate:
             planned_start_utc=past.isoformat(),
             planned_end_utc=(past + timedelta(hours=2)).isoformat(),
         )
-        with patch.object(appliance_dispatch, "notify_risk"):
+        with patch.object(appliance_dispatch, "report_command_failure"):
             summary = appliance_dispatch.rehydrate_crons()
         assert summary["expired"] == 1
         row = db.get_appliance_job(job_id)

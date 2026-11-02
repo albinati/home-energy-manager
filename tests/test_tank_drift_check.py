@@ -186,7 +186,11 @@ def test_drift_alert_only_when_auto_recover_disabled(monkeypatch) -> None:
 
     apply_restore.assert_not_called()
     notify_critical.assert_called_once()
-    assert notify_critical.call_args.kwargs["recovered"] is False
+    kw = notify_critical.call_args.kwargs
+    # not attempted: record-only, honest text, never "tentou e não conseguiu"
+    assert kw["recovered"] is False and kw["record_only_reason"] == "auto-recover desligado; HEM não corrigiu"
+    assert "não corrigiu" in notify_critical.call_args.args[1]
+    assert "tentou" not in notify_critical.call_args.args[1]
 
 
 def test_drift_disabled_when_flag_false(monkeypatch) -> None:
@@ -215,7 +219,9 @@ def test_drift_no_recover_in_read_only(monkeypatch) -> None:
 
     apply_restore.assert_not_called()
     notify_critical.assert_called_once()
-    assert notify_critical.call_args.kwargs["recovered"] is False
+    kw = notify_critical.call_args.kwargs
+    assert kw["recovered"] is False and kw["record_only_reason"] == "HEM em modo passivo/somente-leitura; não corrigiu"
+    assert "tentou" not in notify_critical.call_args.args[1]
 
 
 def test_drift_ignores_overridden_row_in_window(monkeypatch) -> None:
@@ -243,3 +249,21 @@ def test_drift_ignores_overridden_row_in_window(monkeypatch) -> None:
 
     apply_restore.assert_called_once()
     notify_risk.assert_called_once()
+
+
+def test_drift_attempted_and_failed_pushes(monkeypatch) -> None:
+    """Active mode, auto-recover on, the restore write raises: attempted_failed -> push."""
+    from src.daikin.client import DaikinError
+
+    monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False, raising=False)
+    monkeypatch.setattr(config, "TANK_DRIFT_AUTO_RECOVER", True, raising=False)
+    dev = _FakeDev(tank_on=False)
+    rcf = MagicMock()
+    monkeypatch.setattr("src.notifier.report_command_failure", rcf)
+    monkeypatch.setattr(sm, "apply_comfort_restore", MagicMock(side_effect=DaikinError("x")))
+    sm._check_tank_power_drift([], MagicMock(), dev, datetime(2026, 6, 1, 19, 0, tzinfo=UTC), trigger="hb")
+    rcf.assert_called_once()
+    assert rcf.call_args.kwargs["recovered"] is False
+    assert rcf.call_args.kwargs.get("record_only_reason") is None
+    assert "tentou" in rcf.call_args.args[1]

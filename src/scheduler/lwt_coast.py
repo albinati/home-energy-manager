@@ -335,10 +335,12 @@ def backstop_tick(
             getattr(config, "OPENCLAW_READ_ONLY", False)
         ):
             _backstop_ticks = 0
+            _backstop_write_fails = 0
             return out
         row = _active_negative_row(plan_date, now_utc)
         if row is None:
             _backstop_ticks = 0
+            _backstop_write_fails = 0
             return out
         out["active_row"] = int(row["id"])
         reading = db.get_latest_indoor_reading(
@@ -352,6 +354,7 @@ def backstop_tick(
         out.update(indoor=indoor, floor=floor, margin=margin)
         if indoor >= floor - margin:
             _backstop_ticks = 0
+            _backstop_write_fails = 0
             return out
         _backstop_ticks += 1
         out["ticks"] = _backstop_ticks
@@ -407,6 +410,7 @@ def backstop_tick(
             return out
         db.mark_action(int(row["id"]), "completed", error_msg="comfort_backstop")
         _backstop_ticks = 0
+        _backstop_write_fails = 0
         out["fired"] = True
         hold_minutes = max(0, int(getattr(config, "LWT_COMFORT_BACKSTOP_HOLD_MINUTES", 90)))
         hold_until = now_utc + timedelta(minutes=hold_minutes)

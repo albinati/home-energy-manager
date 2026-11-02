@@ -115,23 +115,56 @@ def test_dedupe_per_kind_per_day(transport, monkeypatch):
     assert len(transport) == 3
 
 
-def test_dedupe_key_written_after_dispatch(monkeypatch, tdb):
+def test_dedupe_key_written_after_delivered_dispatch(monkeypatch, tdb):
     order: list[str] = []
-    monkeypatch.setattr(notifier, "_dispatch", lambda *a, **k: order.append("dispatch"))
+    monkeypatch.setattr(notifier, "_dispatch", lambda *a, **k: order.append("dispatch") or True)
     real_set = db.set_kv
     monkeypatch.setattr(db, "set_kv", lambda k, v: (order.append("set_kv"), real_set(k, v)))
     notifier.report_command_failure("k4", "x", recovered=False, device="foxess")
     assert order == ["dispatch", "set_kv"]
 
 
-def test_failed_dispatch_does_not_burn_the_dedupe_key(monkeypatch, tdb):
+def test_undelivered_dispatch_does_not_burn_the_key(monkeypatch, tdb):
+    monkeypatch.setattr(notifier, "_dispatch", lambda *a, **k: False)
+    notifier.report_command_failure("k4b", "x", recovered=False, device="foxess")
+    assert not any(k.startswith("command_failed_pushed:k4b") for k in _kv_keys())
+
+
+def test_muted_route_does_not_burn_the_key(transport, tdb):
+    with db.get_connection() as conn:
+        conn.execute("UPDATE notification_routes SET enabled=0 WHERE alert_type='command_failed'")
+        conn.commit()
+    notifier.report_command_failure("k4c", "x", recovered=False, device="foxess")
+    assert transport == []
+    assert not any(k.startswith("command_failed_pushed:k4c") for k in _kv_keys())
+    assert _recorded()
+
+
+def test_failed_telegram_send_does_not_burn_the_key(monkeypatch, tdb):
+    monkeypatch.setattr(config, "OPENCLAW_NOTIFY_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "OPENCLAW_NOTIFY_TARGET", "chat", raising=False)
+    monkeypatch.setattr("src.telegram_transport.is_configured", lambda: True)
+    monkeypatch.setattr("src.telegram_transport.send_message", lambda *a, **k: False)
+    notifier.report_command_failure("k4d", "x", recovered=False, device="foxess")
+    assert not any(k.startswith("command_failed_pushed:k4d") for k in _kv_keys())
+
+
+def test_helper_never_raises_and_does_not_burn_the_key(monkeypatch, tdb):
     def boom(*a, **k):
         raise RuntimeError("transport down")
 
     monkeypatch.setattr(notifier, "_dispatch", boom)
-    with pytest.raises(RuntimeError):
-        notifier.report_command_failure("k5", "x", recovered=False, device="foxess")
+    notifier.report_command_failure("k5", "x", recovered=False, device="foxess")  # no raise
     assert not any(k.startswith("command_failed_pushed:k5") for k in _kv_keys())
+    monkeypatch.setattr(notifier, "_record_notification", boom)
+    notifier.report_command_failure("k5", "x", recovered=True, device="foxess")  # no raise
+
+
+def test_record_only_reason_records_without_push(transport):
+    notifier.report_command_failure(
+        "k6", "passivo", recovered=False, device="daikin", record_only_reason="passivo"
+    )
+    assert transport == [] and _recorded()
 
 
 def _kv_keys() -> list[str]:
@@ -165,6 +198,18 @@ def test_lwt_drift_reset_ok_is_record_only(monkeypatch, rcf):
     rcf.assert_called_once()
     assert rcf.call_args.args[0] == "lwt_offset_drift"
     assert rcf.call_args.kwargs["recovered"] is True
+
+
+def test_lwt_drift_passive_is_record_only_not_attempted(monkeypatch, rcf):
+    sm = _drift_env(monkeypatch)
+    monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "passive")
+    sm._check_lwt_offset_drift(
+        [], MagicMock(), DaikinDevice(id="g", name="x", lwt_offset=3.0),
+        datetime.now(UTC), trigger="t",
+    )
+    assert rcf.call_args.kwargs["recovered"] is False
+    assert rcf.call_args.kwargs["record_only_reason"]
+    assert "tentou" not in rcf.call_args.args[1]
 
 
 def test_lwt_drift_reset_failed_pushes(monkeypatch, rcf):
@@ -264,35 +309,116 @@ class _Fox:
         self._do("min_soc_on_grid")
 
 
-def test_survival_mode_pushes_and_fallback_failure_pushes(monkeypatch, rcf):
+def _survival(monkeypatch, rcf, fox, read_only=False):
     from src.scheduler import octopus_fetch as of
 
     monkeypatch.setattr(of, "report_command_failure", rcf)
-
-    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", read_only)
     now = datetime(2026, 7, 8, 12, 34, tzinfo=UTC)
-    of._maybe_survival_mode(_Fox(fail={"work_mode"}), 5, (now - timedelta(hours=25)).isoformat(), now)
-    kinds = [c.args[0] for c in rcf.call_args_list]
-    assert kinds == ["octopus_survival_mode", "octopus_survival_fox_fallback"]
-    assert all(c.kwargs["recovered"] is False for c in rcf.call_args_list)
+    of._maybe_survival_mode(fox, 5, (now - timedelta(hours=25)).isoformat(), now)
 
 
-def test_apply_safe_defaults_pushes_once_summarising_legs(monkeypatch, rcf):
+def test_survival_fallback_ok_is_record_only(monkeypatch, rcf):
+    _survival(monkeypatch, rcf, _Fox())
+    rcf.assert_called_once()
+    assert rcf.call_args.args[0] == "octopus_survival_mode"
+    assert rcf.call_args.kwargs["recovered"] is True
+
+
+def test_survival_fallback_failure_pushes(monkeypatch, rcf):
+    _survival(monkeypatch, rcf, _Fox(fail={"work_mode"}))
+    rcf.assert_called_once()
+    assert rcf.call_args.args[0] == "octopus_survival_fox_fallback"
+    assert rcf.call_args.kwargs["recovered"] is False
+    assert not rcf.call_args.kwargs.get("record_only_reason")
+
+
+def test_survival_read_only_records_that_nothing_was_done(monkeypatch, rcf):
+    fox = _Fox()
+    fox.set_work_mode = MagicMock()
+    _survival(monkeypatch, rcf, fox, read_only=True)
+    fox.set_work_mode.assert_not_called()
+    assert rcf.call_args.kwargs["record_only_reason"]
+    assert "somente-leitura" in rcf.call_args.args[1]
+
+
+def test_survival_report_failure_cannot_skip_the_fallback(monkeypatch, tdb):
+    from src.scheduler import octopus_fetch as of
+
+    monkeypatch.setattr(notifier, "_dispatch", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+    fox = _Fox()
+    fox.set_work_mode = MagicMock()
+    now = datetime(2026, 7, 8, 12, 34, tzinfo=UTC)
+    of._maybe_survival_mode(fox, 5, (now - timedelta(hours=25)).isoformat(), now)
+    fox.set_work_mode.assert_called_once_with("Self Use")
+
+
+def test_apply_safe_defaults_boot_pushes_once_after_one_retry(monkeypatch, rcf):
     from src.state_machine import apply_safe_defaults
 
     monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
-    apply_safe_defaults(_Fox(fail={"work_mode", "min_soc_on_grid"}), None, trigger="t")
+    fox = _Fox(fail={"work_mode", "min_soc_on_grid"})
+    calls = {"work_mode": 0}
+    orig = fox.set_work_mode
+
+    def counting(m):
+        calls["work_mode"] += 1
+        return orig(m)
+
+    fox.set_work_mode = counting
+    apply_safe_defaults(fox, None, trigger="boot_recovery_survival")
+    assert calls["work_mode"] == 2  # first attempt + exactly one retry
     rcf.assert_called_once()
+    assert rcf.call_args.args[0] == "apply_safe_defaults:boot_recovery_survival"
     assert rcf.call_args.kwargs["recovered"] is False
+    assert not rcf.call_args.kwargs.get("record_only_reason")
     detail = rcf.call_args.args[1]
     assert "work_mode" in detail and "min_soc_on_grid" in detail
+
+
+def test_apply_safe_defaults_retry_success_reports_nothing(monkeypatch, rcf):
+    from src.state_machine import apply_safe_defaults
+
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+
+    class _Flaky(_Fox):
+        n = 0
+
+        def set_work_mode(self, m):
+            _Flaky.n += 1
+            if _Flaky.n == 1:
+                raise FoxESSError("transient")
+
+    apply_safe_defaults(_Flaky(), None, trigger="boot_empty_schedule")
+    rcf.assert_not_called()
+
+
+def test_apply_safe_defaults_shutdown_is_record_only(monkeypatch, rcf):
+    from src.state_machine import apply_safe_defaults
+
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+    apply_safe_defaults(_Fox(fail={"work_mode"}), None, trigger="shutdown")
+    rcf.assert_called_once()
+    assert rcf.call_args.args[0] == "apply_safe_defaults:shutdown"
+    assert rcf.call_args.kwargs["record_only_reason"]
+
+
+def test_apply_safe_defaults_daikin_read_failure_is_not_a_leg(monkeypatch, rcf):
+    from src.state_machine import apply_safe_defaults
+
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+    dk = MagicMock()
+    dk.get_devices.side_effect = DaikinError("read failed")
+    apply_safe_defaults(None, dk, trigger="boot_recovery_survival")
+    rcf.assert_not_called()
 
 
 def test_apply_safe_defaults_success_reports_nothing(monkeypatch, rcf):
     from src.state_machine import apply_safe_defaults
 
     monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
-    apply_safe_defaults(_Fox(), None, trigger="t")
+    apply_safe_defaults(_Fox(), None, trigger="boot_recovery_survival")
     rcf.assert_not_called()
 
 
@@ -344,30 +470,57 @@ def _hw(enabled):
     return hw
 
 
-def test_fox_flag_disabled_is_record_only_when_repair_ok(monkeypatch, rcf):
-    from src.state_machine import heartbeat_repair_fox_scheduler
-
-    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+def _flag_off_fox(set_flag_error=None):
     fox = MagicMock()
     fox.api_key = "k"
     fox.get_scheduler_flag.return_value = False
     fox.get_scheduler_v3.return_value = _hw(False)
+    if set_flag_error:
+        fox.set_scheduler_flag.side_effect = set_flag_error
+    return fox
+
+
+def test_fox_flag_disabled_is_record_only_when_repair_ok(monkeypatch, rcf):
+    from src.state_machine import heartbeat_repair_fox_scheduler
+
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+    fox = _flag_off_fox()
     heartbeat_repair_fox_scheduler(fox)
     rcf.assert_called_once()
     assert rcf.call_args.kwargs["recovered"] is True
     fox.set_scheduler_flag.assert_called_with(True)
 
 
-def test_fox_flag_repair_failure_pushes(monkeypatch, rcf):
+def test_fox_flag_disabled_read_only_does_not_claim_reenabled(monkeypatch, rcf):
+    from src.state_machine import heartbeat_repair_fox_scheduler
+
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", True)
+    fox = _flag_off_fox()
+    heartbeat_repair_fox_scheduler(fox)
+    assert rcf.call_args.kwargs["recovered"] is False
+    assert rcf.call_args.kwargs["record_only_reason"]
+    assert "não religou" in rcf.call_args.args[1]
+    fox.set_scheduler_flag.assert_not_called()
+
+
+def test_fox_repair_failure_pushes_on_second_consecutive(monkeypatch, rcf):
     from src.state_machine import heartbeat_repair_fox_scheduler
 
     monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
-    fox = MagicMock()
-    fox.api_key = "k"
-    fox.get_scheduler_flag.return_value = False
-    fox.get_scheduler_v3.return_value = _hw(False)
-    fox.set_scheduler_flag.side_effect = FoxESSError("boom")
+    fox = _flag_off_fox(FoxESSError("boom"))
     heartbeat_repair_fox_scheduler(fox)
-    recs = [c.kwargs["recovered"] for c in rcf.call_args_list]
-    assert recs == [True, False]
-    assert rcf.call_args_list[-1].args[0] == "fox_scheduler_repair_failed"
+    assert [c.kwargs["recovered"] for c in rcf.call_args_list] == [True]  # only the record
+    heartbeat_repair_fox_scheduler(fox)
+    last = rcf.call_args_list[-1]
+    assert last.args[0] == "fox_scheduler_repair_failed" and last.kwargs["recovered"] is False
+
+
+def test_fox_repair_failure_never_pushes_in_survival_mode(monkeypatch, rcf):
+    from src.state_machine import heartbeat_repair_fox_scheduler
+
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+    db.update_octopus_fetch_state(survival_mode_since=datetime.now(UTC).isoformat())
+    fox = _flag_off_fox(FoxESSError("boom"))
+    for _ in range(3):
+        heartbeat_repair_fox_scheduler(fox)
+    assert not any(c.args[0] == "fox_scheduler_repair_failed" for c in rcf.call_args_list)

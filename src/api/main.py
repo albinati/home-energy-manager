@@ -256,7 +256,7 @@ async def lifespan(app: FastAPI):
         yield
     try:
         if fox is not None and daikin is not None:
-            await asyncio.to_thread(apply_safe_defaults, fox, daikin)
+            await asyncio.to_thread(apply_safe_defaults, fox, daikin, trigger="shutdown")
     except Exception:
         logger.warning("Safe defaults on shutdown failed", exc_info=True)
     stop_background_scheduler()

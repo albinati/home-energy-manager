@@ -158,7 +158,7 @@ def test_verify_mismatch_retries_once_then_alerts_once(monkeypatch):
     monkeypatch.setattr(dbp.db, "log_action", lambda **kw: logged.append(kw))
     alerts: list = []
     def _rcf(kind, msg, *, recovered, device, extra=None):
-        assert recovered is False and device == "daikin" and kind == "daikin_write_verify"
+        assert recovered is False and device == "daikin" and kind == "daikin_write_verify:lwt_offset"
         alerts.append((msg, extra))
     monkeypatch.setattr("src.notifier.report_command_failure", _rcf)
     rescheduled: list[dict] = []

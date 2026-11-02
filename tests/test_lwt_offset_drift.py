@@ -22,7 +22,7 @@ def _common(monkeypatch, *, enabled=True):
     monkeypatch.setattr("src.config.config.OPTIMIZATION_PRESET", "normal")
     monkeypatch.setattr("src.config.config.USER_OVERRIDE_RESPECT_HOURS", 4.0)
     monkeypatch.setattr("src.daikin_bulletproof.config.OPENCLAW_READ_ONLY", False)
-    monkeypatch.setattr("src.state_machine.notify_risk", lambda *a, **k: None)
+    monkeypatch.setattr("src.notifier.report_command_failure", lambda *a, **k: None)
     sm._LWT_DRIFT_NOTIFIED = False
     applied: list[dict] = []
     monkeypatch.setattr(

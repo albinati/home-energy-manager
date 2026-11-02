@@ -209,7 +209,10 @@ def bs(monkeypatch, tmpdb):
     notified = []
     monkeypatch.setattr("src.daikin_bulletproof.apply_scheduled_daikin_params",
                         lambda dev, client, params, trigger, **kw: applied.append((params, trigger)) or True)
-    monkeypatch.setattr("src.notifier.report_command_failure", lambda kind, msg, **kw: notified.append(kw.get("extra")))
+    def _rcf(kind, msg, **kw):
+        assert kw["recovered"] is True and kind == "lwt_cold_backstop"  # successful fire is record-only
+        notified.append(kw.get("extra"))
+    monkeypatch.setattr("src.notifier.report_command_failure", _rcf)
     replan = MagicMock(return_value=True)
 
     def run(indoor, in_peak=False, now_=now):
@@ -547,7 +550,7 @@ def test_hold_applies_to_tier_source_too(monkeypatch, osc):
 def test_dedupe_key_is_hold_start_not_row_start(monkeypatch, osc):
     now, plan_date, rid, _ = osc
     seen = []
-    monkeypatch.setattr("src.notifier.report_command_failure", lambda kind, msg, **kw: seen.append(kw["extra"]["warning_key"]))
+    monkeypatch.setattr("src.notifier.report_command_failure", lambda kind, msg, **kw: (seen.append(kw["extra"]["warning_key"]), kw["recovered"] is True or pytest.fail("must be recovered")))
     _fire(now, plan_date)
     assert seen == [f"lwt_backstop_{now.astimezone(ZoneInfo('Europe/London')):%Y-%m-%d_%H%M}"]
 

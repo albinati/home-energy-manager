@@ -81,3 +81,35 @@ def test_every_dispatch_call_in_src_uses_valid_keywords():
                 bad.append(f"{where}: {exc}")
     assert n >= 20, "AST scan found too few _dispatch calls; scan is broken"
     assert not bad, bad
+
+
+def test_every_report_command_failure_call_is_valid():
+    """#941: 2 positional args (kind, detail); `recovered` and `device` keywords required."""
+    sig = inspect.signature(notifier.report_command_failure)
+    bad: list[str] = []
+    n = 0
+    for path in Path(notifier.__file__).parent.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
+            if name != "report_command_failure":
+                continue
+            n += 1
+            where = f"{path.name}:{node.lineno}"
+            kws = {k.arg for k in node.keywords}
+            if None in kws or any(isinstance(a, ast.Starred) for a in node.args):
+                bad.append(f"{where}: dynamic call")
+                continue
+            if len(node.args) != 2:
+                bad.append(f"{where}: expected 2 positional args, got {len(node.args)}")
+            if not {"recovered", "device"} <= kws:
+                bad.append(f"{where}: missing recovered/device keyword")
+            try:
+                sig.bind(*[0] * len(node.args), **{k: 0 for k in kws})
+            except TypeError as exc:
+                bad.append(f"{where}: {exc}")
+    assert n >= 15, "AST scan found too few report_command_failure calls"
+    assert not bad, bad

@@ -472,7 +472,7 @@ def post_write_verify_job(
                 from .notifier import report_command_failure
 
                 report_command_failure(
-                    "daikin_write_verify",
+                    "daikin_write_verify:" + "+".join(sorted(str(k) for k in expected)),
                     f"O Daikin não refletiu a escrita após duas leituras (HEM já repetiu a leitura). "
                     f"Esperado {expected}, no aparelho {out.get('actual')}. "
                     "Confira no app Onecta e, se persistir, reaplique o plano.",

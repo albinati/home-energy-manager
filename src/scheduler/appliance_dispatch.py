@@ -67,26 +67,31 @@ def _record_reconcile_error(appliance_id: int, err: Exception) -> None:
         isinstance(err, SmartThingsError) and err.code == "pat_invalid"
     )
     if is_pat_invalid:
-        if not _pat_invalid_notified:
-            report_command_failure(
-                "smartthings_pat_invalid",
-                "O token SmartThings (PAT) foi rejeitado (HTTP 401): o despacho de "
-                "eletrodomésticos está parado. Gere um novo PAT e grave em "
-                "/api/v1/integrations/smartthings/credentials.",
-                recovered=False, device="smartthings",
-                extra={"appliance_id": appliance_id, "code": "pat_invalid"},
-            )
-            _pat_invalid_notified = True
-        # PAT-invalid is a single-ping condition — skip the threshold path.
+        # No in-process latch (#941): the helper dedupes per day, so a PAT that stays
+        # invalid reminds once a day instead of once per process.
+        report_command_failure(
+            "smartthings_pat_invalid",
+            "O token SmartThings (PAT) foi rejeitado (HTTP 401): o despacho de "
+            "eletrodomésticos está parado. Gere um novo PAT e grave em "
+            "/api/v1/integrations/smartthings/credentials.",
+            recovered=False, device="smartthings",
+            extra={"appliance_id": appliance_id, "code": "pat_invalid"},
+        )
         return
 
     if n == threshold:
+        # Only worth a push when a cycle is actually armed/scheduled for this appliance.
+        try:
+            has_job = db.get_active_appliance_job(appliance_id) is not None
+        except Exception:  # noqa: BLE001
+            has_job = True
         report_command_failure(
             "smartthings_reconcile_errors",
             f"A reconciliação SmartThings do eletrodoméstico #{appliance_id} falhou {n} vezes "
             f"seguidas ({err}). HEM segue tentando; confira a conexão/PAT do SmartThings.",
             recovered=False, device="smartthings",
-            extra={"appliance_id": appliance_id, "consecutive_errors": n},
+            extra={"appliance_id": appliance_id, "consecutive_errors": n, "armed_job": has_job},
+            record_only_reason=None if has_job else "sem ciclo armado/agendado",
         )
 
 
