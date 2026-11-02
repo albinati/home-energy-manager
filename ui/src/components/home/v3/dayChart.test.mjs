@@ -260,3 +260,14 @@ test("series: measured load comes from pv load_actual_kwh, not exec consumption"
   assert.deepEqual(s.loadAct.map((p) => p.v), [0.8]);
   assert.equal(s.loadFc.length, 3);
 });
+
+test("series: tomorrow tab has no measured load even if load_actual_kwh is present", () => {
+  const bounds = localDayBounds("2026-11-02", TZ);
+  const nowMs = Date.parse("2026-11-01T12:20:00Z");
+  const pv = [{ date: "2026-11-02", now_utc: "", slots: [
+    slot("2026-11-02T10:00:00Z", { load_forecast_kwh: 0.3, load_actual_kwh: 0.9 }),
+  ] }];
+  const s = buildDaySeries({ bounds, nowMs, isToday: false, pv, exec: [], timeline: null, capacityKwh: null, socNowPct: null });
+  assert.equal(s.loadAct.length, 0);
+  assert.equal(s.loadFc.length, 1);
+});

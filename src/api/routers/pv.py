@@ -78,8 +78,12 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
       * ``date`` — the UTC day rendered.
       * ``now_utc`` — server time (the boundary between realised and future).
       * ``slots[]`` — one per 30-min slot: ``{slot_utc, pv_forecast_kwh,
-        pv_actual_kwh}``. ``pv_actual_kwh`` is ``null`` for future slots (and
-        for past slots with no telemetry) so the UI doesn't plot a zero.
+        pv_actual_kwh, load_actual_kwh, ...}``. ``pv_actual_kwh`` is ``null`` for
+        future slots (and for past slots with no telemetry) so the UI doesn't
+        plot a zero. ``load_actual_kwh`` is the trapezoid-integrated measured
+        house load (``pv_realtime_history.load_power_kw``, same basis as
+        ``load_error_log``); ``null`` for future slots, slots without telemetry,
+        and a just-finished slot whose closing sample hasn't arrived yet.
       * ``accuracy`` — over elapsed slots: ``{slots_compared, forecast_kwh,
         actual_kwh, mae_kwh, bias_kwh}`` (bias = actual − forecast; positive =
         forecast under-predicted). ``null`` when nothing has elapsed yet.
@@ -124,22 +128,26 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     except Exception as e:  # forecast provider down / no cache — degrade gracefully
         logger.warning("pv/today: forecast unavailable (%s); planned line will be zero", e)
 
-    # --- Realised PV: trapezoidal roll-up of pv_realtime_history (same helper
-    # the PnL export valuation uses), keyed by UTC half-hour slot ISO.
+    # --- Realised PV + HOUSE LOAD: trapezoidal roll-ups of pv_realtime_history
+    # keyed by UTC half-hour slot ISO. Uses the indexed range helper (the per-day
+    # helper's substr() filter scans the whole never-pruned table) and runs off
+    # the event loop. Load shares the integrator behind load_error_log, so the
+    # measured line has the forecast's basis. Caveats, shared with load_error_log:
+    # Fox reports 0.0 (not null) for a missing loadsPower, and a telemetry gap
+    # credits the pair's energy to the earlier slot (falsely high, then a gap).
+    def _rollups() -> tuple[dict[str, float], dict[str, float], datetime | None]:
+        end = day_start + timedelta(days=1)
+        return (
+            db.half_hourly_kwh_for_utc_range(day_start, end, "solar_power_kw"),
+            db.half_hourly_kwh_for_utc_range(day_start, end, "load_power_kw"),
+            db.latest_pv_realtime_sample_utc(),
+        )
+
     try:
-        actual_map = db.half_hourly_solar_kwh_for_day(d)
+        actual_map, load_actual_map, latest_sample = await asyncio.to_thread(_rollups)
     except Exception as e:
         logger.warning("pv/today: realised roll-up failed (%s)", e)
-        actual_map = {}
-
-    # Realised HOUSE LOAD: same trapezoidal integrator as load_error_log
-    # (rebuild_load_error_log_for_date), so the chart's measured line shares the
-    # forecast's basis. NB the helper treats NULL load samples as 0 kW.
-    try:
-        load_actual_map = db._half_hourly_grid_kwh_for_day(d, "load_power_kw")
-    except Exception as e:
-        logger.warning("pv/today: realised load roll-up failed (%s)", e)
-        load_actual_map = {}
+        actual_map, load_actual_map, latest_sample = {}, {}, None
 
     # --- Full-day overlays so the chart needs only this one endpoint (no
     # client-side key-matching across differently-formatted ISO strings):
@@ -241,7 +249,13 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         a_raw = actual_map.get(key)
         a: float | None = round(float(a_raw), 4) if (elapsed and a_raw is not None) else None
         la_raw = load_actual_map.get(key)
-        load_actual: float | None = round(float(la_raw), 4) if (elapsed and la_raw is not None) else None
+        # A slot's energy only closes when the next sample (at/after slot end)
+        # arrives; until then (or 10 min grace) the last finished slot reads low.
+        load_closed = elapsed and (
+            (latest_sample is not None and latest_sample >= slot_end)
+            or now >= slot_end + timedelta(minutes=10)
+        )
+        load_actual: float | None = round(float(la_raw), 4) if (load_closed and la_raw is not None) else None
         local = st.astimezone(tz)
         committed = committed_load_by.get(key)
         # base_load_kwh: prefer the committed residual for this slot (true
