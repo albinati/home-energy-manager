@@ -738,6 +738,56 @@ SCHEMA: dict[str, SettingSpec] = {
             "heuristic stays on as a fallback either way."
         ),
     ),
+    # --- #923 peak-band margin (load-forecast epic #920) ---------------------
+    "LP_PEAK_MARGIN_ENABLED": SettingSpec(
+        key="LP_PEAK_MARGIN_ENABLED",
+        type_name="str",  # "true" / "false" — kill switch, false = summed slot spread
+        env_default=_str_env("LP_PEAK_MARGIN_ENABLED", "false"),
+        enum=("true", "false"),
+        description=(
+            "Peak-band conformal margin (#923). true = the pessimistic scenario "
+            "(and so the peak-entry charge floor) sizes the expensive band "
+            "(Cosy 16-19; Agile expensive/severe_peak) as nominal + a margin "
+            "computed directly on the band SUM (quantile of recent measured "
+            "band-sum errors), instead of summing per-slot p75 spreads, which "
+            "cover the band sum on only ~57-72% of days. false = legacy "
+            "summed-slot spread, bit-identical."
+        ),
+    ),
+    "LP_PEAK_MARGIN_QUANTILE": SettingSpec(
+        key="LP_PEAK_MARGIN_QUANTILE",
+        type_name="float",
+        env_default=_float_env("LP_PEAK_MARGIN_QUANTILE", "0.75"),
+        min_value=0.5,
+        max_value=0.95,
+        description=(
+            "Quantile of the recent band-sum errors (actual - committed forecast) "
+            "used as the peak-band margin (#923). 0.75 = covers ~3 days in 4."
+        ),
+    ),
+    "LP_PEAK_MARGIN_WINDOW_DAYS": SettingSpec(
+        key="LP_PEAK_MARGIN_WINDOW_DAYS",
+        type_name="int",
+        env_default=_int_env("LP_PEAK_MARGIN_WINDOW_DAYS", "42"),
+        min_value=14,
+        max_value=90,
+        description=(
+            "How many past days of band-sum errors feed the peak-band margin "
+            "(#923). Away/holiday/return and non-normal-preset days are skipped; "
+            "fewer than 10 usable days = margin off (legacy spread)."
+        ),
+    ),
+    "LP_PEAK_MARGIN_MAX_KWH": SettingSpec(
+        key="LP_PEAK_MARGIN_MAX_KWH",
+        type_name="float",
+        env_default=_float_env("LP_PEAK_MARGIN_MAX_KWH", "2.0"),
+        min_value=0.0,
+        max_value=6.0,
+        description=(
+            "Hard cap (kWh) on the peak-band margin (#923); the margin is also "
+            "never negative."
+        ),
+    ),
     # --- #876 closed-loop auto-tune (story 1: ledger + kill switch) ----------
     "AUTO_TUNE_ENABLED": SettingSpec(
         key="AUTO_TUNE_ENABLED",

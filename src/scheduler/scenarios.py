@@ -174,6 +174,7 @@ def _solve_one_scenario(
     export_price_pence: list[float] | None,
     base_load_spread: list[float] | None = None,
     micro_climate_offset_by_hour_c: dict[int, float] | None = None,
+    pessimistic_band_extra_kwh: list[float | None] | None = None,
 ) -> ScenarioSolveResult:
     """Solve one perturbed scenario; capture wall-clock duration + error.
 
@@ -185,6 +186,12 @@ def _solve_one_scenario(
     p = _perturbation_for(scenario)
     w = perturb_weather(weather, p.temp_delta_c, p.pv_factor)
     bl = perturb_base_load(base_load_kwh, p.load_factor, spread=base_load_spread)
+    if scenario == "pessimistic" and pessimistic_band_extra_kwh:
+        # #923 — expensive-band slots: nominal + the conformal band-sum margin
+        # (share of it) INSTEAD OF the per-slot spread. Other slots untouched.
+        for i, ex in enumerate(pessimistic_band_extra_kwh):
+            if ex is not None and i < len(bl):
+                bl[i] = max(0.0, base_load_kwh[i] + float(ex))
     t0 = time.monotonic()
     try:
         plan = solve_lp(
@@ -242,6 +249,7 @@ def solve_scenarios(
     scenarios: tuple[Scenario, ...] = SCENARIOS,
     base_load_spread: list[float] | None = None,
     micro_climate_offset_by_hour_c: dict[int, float] | None = None,
+    pessimistic_band_extra_kwh: list[float | None] | None = None,
 ) -> dict[Scenario, ScenarioSolveResult]:
     """Solve the LP under each scenario in parallel; return scenario → result.
 
@@ -275,6 +283,7 @@ def solve_scenarios(
                 export_price_pence=export_price_pence,
                 base_load_spread=base_load_spread,
                 micro_climate_offset_by_hour_c=micro_climate_offset_by_hour_c,
+                pessimistic_band_extra_kwh=pessimistic_band_extra_kwh,
             ): s
             for s in scenarios
         }
@@ -313,6 +322,7 @@ def solve_scenarios_with_nominal(
     export_price_pence: list[float] | None = None,
     base_load_spread: list[float] | None = None,
     micro_climate_offset_by_hour_c: dict[int, float] | None = None,
+    pessimistic_band_extra_kwh: list[float | None] | None = None,
 ) -> dict[Scenario, ScenarioSolveResult]:
     """Same as ``solve_scenarios`` but reuses an already-computed nominal plan.
 
@@ -332,6 +342,7 @@ def solve_scenarios_with_nominal(
         scenarios=("optimistic", "pessimistic"),
         base_load_spread=base_load_spread,
         micro_climate_offset_by_hour_c=micro_climate_offset_by_hour_c,
+        pessimistic_band_extra_kwh=pessimistic_band_extra_kwh,
     )
     extras["nominal"] = ScenarioSolveResult(
         scenario="nominal",

@@ -6,6 +6,8 @@ Major versions track significant LP / dispatch architecture iterations. Minor ve
 
 ## [Unreleased]
 
+- Peak-band conformal margin (#923, behind `LP_PEAK_MARGIN_ENABLED`, default off): the pessimistic scenario and the peak-entry charge floor size the 16-19 band as nominal + q75 of recent band-sum errors instead of summed slot p75 spreads; `GET /api/v1/load/expected` exposes `peak_margin`.
+
 - Residual-load profile v3 (#922, behind `LP_RESIDUAL_PROFILE_V3`, default off): per-slot heat-pump subtraction from measured Onecta energy, mean statistic, weekday shrinkage, hard away exclusion; see `docs/ENV_NOTES.md`.
 
 - `GET /api/v1/pv/today` slots carry `load_actual_kwh` (integrated measured house load); Home v3 day chart plots the load forecast over the whole day and draws measured load from it.

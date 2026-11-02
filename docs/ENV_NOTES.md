@@ -270,3 +270,14 @@ What v3 changes:
 - Tier counts are slot-days. Spread semantics changed: `spread` = centre + (tier p75 - tier median) (p90 likewise), weekday-shrunk like the centre; it is a day-to-day slot quantile, no longer a sample quantile.
 - `LP_LOAD_PROFILE_WINDOW_DAYS` (120) is unchanged; short windows backtest worse. Caches key on the new settings.
 
+
+## Peak-band conformal margin (#923, epic #920)
+
+Summing per-slot p75 spreads over the expensive band covers the band SUM on only 57-72% of days (slot errors are correlated; quantiles do not add). With `LP_PEAK_MARGIN_ENABLED=true` the pessimistic scenario sizes the expensive band (Cosy peak 16-19; Agile `expensive`/`severe_peak` windows) as `nominal + margin`, the margin being the q-quantile of the last N days of `measured band load - committed total forecast` (band sum, from `load_error_log`; days missing there are rebuilt from the same committed stitch + load integrator). The margin is spread over the band slots in proportion to the nominal shape and REPLACES the summed slot spread on those slots; other slots keep the spread. The peak-entry charge floor is read from that pessimistic SoC trajectory, so the re-solve sees it. Away / holiday / return / non-normal-preset days are excluded (`_hard_away_dates`, #922). Fewer than 10 usable days = legacy behaviour. Cached per hour; each solve logs it under `exogenous_snapshot["peak_band_margin"]`; `GET /api/v1/load/expected` returns it as `peak_margin` (`margin_kwh`, `coverage_pct` = share of window days with error <= margin, `n_days`, `fallback`).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `LP_PEAK_MARGIN_ENABLED` | false | Kill switch. false = summed slot spread, byte-identical. |
+| `LP_PEAK_MARGIN_QUANTILE` | 0.75 | 0.5..0.95, quantile of the band-sum errors. |
+| `LP_PEAK_MARGIN_WINDOW_DAYS` | 42 | 14..90 days of history. |
+| `LP_PEAK_MARGIN_MAX_KWH` | 2.0 | Cap on the margin (also clamped >= 0). |
