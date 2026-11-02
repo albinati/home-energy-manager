@@ -18,12 +18,17 @@ from ..daikin import service as daikin_service
 from ..foxess.service import get_cached_realtime, get_cached_realtime_age_seconds
 from .lp_optimizer import LpInitialState
 from .lp_roll_forward import (
+    TANK_MAX_READING_AGE_S,
+    find_inforce_group,
     find_schedule_onset,
     roll_soc_with_onset,
     roll_tank_forward,
 )
 
 logger = logging.getLogger(__name__)
+
+
+_last_w3_warn_monotonic: float = -1e9
 
 
 def _now_utc() -> datetime:
@@ -80,16 +85,21 @@ def read_lp_initial_state(
 
     logger.debug("LP initial SoC=%.2f kWh (source=%s)", soc_kwh, soc_source)
 
-    roll_on = slot0_utc is not None and bool(
-        getattr(config, "LP_INITIAL_STATE_ROLL_FORWARD_ENABLED", False)
+    soc_roll_on = slot0_utc is not None and bool(
+        getattr(config, "LP_INITIAL_SOC_ROLL_FORWARD_ENABLED", False)
     )
-    if roll_on and soc_source == "fox_realtime_cache" and rt is not None:
+    tank_roll_on = slot0_utc is not None and bool(
+        getattr(config, "LP_INITIAL_TANK_ROLL_FORWARD_ENABLED", False)
+    )
+    soc_measured = soc_kwh
+    if soc_roll_on and soc_source == "fox_realtime_cache" and rt is not None:
         try:
             soc_kwh, roll["soc"] = _roll_soc(soc_kwh, rt, now, slot0_utc)
         except Exception as e:  # pragma: no cover - never break the solve
             logger.warning("LP SoC roll-forward failed (%s) - using reading as is", e)
 
     tank = float(config.DHW_TEMP_NORMAL_C)
+    tank_measured = tank
     tank_source = "default"
 
     try:
@@ -112,7 +122,11 @@ def read_lp_initial_state(
         if state.get("tank_temp_c") is not None:
             tank = float(state["tank_temp_c"])
             tank_source = src
-            if roll_on:
+            # M1: only a LIVE (not estimated / degraded / stale) seed is rolled.
+            tank_measured = tank
+            if tank_roll_on and src != "live":
+                roll["tank"] = {"applied": False, "mode": f"none:source_{src}"}
+            elif tank_roll_on:
                 try:
                     tank, roll["tank"] = _roll_tank(tank, now, slot0_utc)
                 except Exception as e:  # pragma: no cover - never break the solve
@@ -138,11 +152,18 @@ def read_lp_initial_state(
     w3_reason: str | None = None
     if indoor_c is None and bool(getattr(config, "LP_W3_TIN_ENABLED", False)):
         w3_reason = "no_fresh_indoor_reading"
-        logger.warning(
-            "LP initial state: no indoor reading within %s min - W3 (indoor-temperature "
-            "model) is OFF for this solve",
-            getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30),
-        )
+        # Display/API callers (no slot0) are rate-limited to 1 / 15 min; real solves always warn.
+        global _last_w3_warn_monotonic
+        import time as _time
+
+        _m = _time.monotonic()
+        if slot0_utc is not None or _m - _last_w3_warn_monotonic > 900.0:
+            _last_w3_warn_monotonic = _m
+            logger.warning(
+                "LP initial state: no indoor reading within %s min - W3 (indoor-temperature "
+                "model) is OFF for this solve",
+                getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30),
+            )
 
     # #866: freshest LIVE leaving-water temperature (<= 30 min old) seeds the emitter-lag
     # state h[0] (only read by the LP when LP_W3_EMITTER_TAU_MIN > 0).
@@ -176,6 +197,8 @@ def read_lp_initial_state(
         soc_source=soc_source,
         tank_source=tank_source,
         roll_forward=roll or None,
+        soc_measured_kwh=soc_measured,
+        tank_measured_c=tank_measured,
         w3_disabled_reason=w3_reason,
     )
 
@@ -183,11 +206,12 @@ def read_lp_initial_state(
 def _roll_soc(soc_kwh: float, rt: Any, now: datetime, slot0_utc: datetime) -> tuple[float, dict]:
     """SoC at slot 0 from the cached Fox realtime reading (measured battery power)."""
     cap = float(config.BATTERY_CAPACITY_KWH)
-    age = get_cached_realtime_age_seconds()
+    age = get_cached_realtime_age_seconds(rt)
     gap_s = (slot0_utc - now).total_seconds() + (age or 0.0)  # reading time -> slot 0
     power = float(rt.battery_power)  # + charging, - discharging
     reading_t = now - timedelta(seconds=age or 0.0)
     onset = None
+    inforce = None
     try:
         from zoneinfo import ZoneInfo  # group hours are local time
 
@@ -197,6 +221,8 @@ def _roll_soc(soc_kwh: float, rt: Any, now: datetime, slot0_utc: datetime) -> tu
                 st["groups"], reading_t, slot0_utc, ZoneInfo(config.BULLETPROOF_TIMEZONE),
                 max_power_kw=float(config.MAX_INVERTER_KW),
             )
+            inforce = find_inforce_group(
+                st["groups"], reading_t, ZoneInfo(config.BULLETPROOF_TIMEZONE))
     except Exception as e:  # pragma: no cover - schedule is an optional refinement
         logger.debug("LP SoC roll: schedule onset unavailable (%s)", e)
     res = roll_soc_with_onset(
@@ -204,6 +230,7 @@ def _roll_soc(soc_kwh: float, rt: Any, now: datetime, slot0_utc: datetime) -> tu
         capacity_kwh=cap,
         reserve_kwh=cap * float(config.MIN_SOC_RESERVE_PERCENT) / 100.0,
         max_power_kw=float(config.MAX_INVERTER_KW),
+        inforce=inforce,
     )
     info = {
         "applied": res.applied, "reason": res.reason,
@@ -233,10 +260,12 @@ def _roll_tank(tank_c: float, now: datetime, slot0_utc: datetime) -> tuple[float
     last = rows[0]
     reading_t = datetime.fromtimestamp(float(last["fetched_at"]), UTC)
     gap_s = (slot0_utc - reading_t).total_seconds()
+    if (now - reading_t).total_seconds() > TANK_MAX_READING_AGE_S:
+        return tank_c, {"applied": False, "mode": "none:reading_too_old"}
     prev = rows[1] if len(rows) > 1 and rows[1].get("tank_temp_c") is not None else None
     sample_gap = None if prev is None else float(last["fetched_at"]) - float(prev["fetched_at"])
     tgt = last.get("tank_target_c")
-    cap_c = float(tgt) if tgt is not None and float(tgt) > tank_c else float(config.DHW_TEMP_MAX_C)
+    cap_c = _reheat_cap_c(tank_c, tgt, reading_t, now)
     tp = resolve_tank_params(ambient_c=live_indoor_ambient_c())
     tank_on = last.get("tank_on")
     res = roll_tank_forward(
@@ -253,3 +282,26 @@ def _roll_tank(tank_c: float, now: datetime, slot0_utc: datetime) -> tuple[float
         "from_c": round(tank_c, 2), "to_c": round(res.tank_c, 2),
         "gap_s": round(gap_s, 1), "cap_c": cap_c,
     }
+
+
+def _reheat_cap_c(tank_c: float, setpoint_c: Any, reading_t: datetime, now: datetime) -> float | None:
+    """Ceiling for a reheat extrapolation. The SETPOINT, unless a boost is positively
+    known (Powerful on, a Powerful action row in force, or the tank already >= setpoint
+    + 3), in which case ``DHW_TEMP_MAX_C``. Reading >= setpoint with no boost = the
+    ordinary end of a reheat: no headroom (None)."""
+    sp = None if setpoint_c is None else float(setpoint_c)
+    if sp is not None and sp > tank_c:
+        return sp
+    boost = sp is not None and tank_c >= sp + 3.0
+    if not boost:
+        try:
+            res = daikin_service.get_cached_devices(allow_refresh=False, actor="lp_init")
+            boost = bool(res.devices and res.devices[0].tank_powerful is True)
+        except Exception:  # noqa: BLE001
+            boost = False
+    if not boost:
+        try:
+            boost = bool(db.get_powerful_action_windows(reading_t.isoformat(), now.isoformat()))
+        except Exception:  # noqa: BLE001
+            boost = False
+    return float(config.DHW_TEMP_MAX_C) if boost else None

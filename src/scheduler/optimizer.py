@@ -1502,6 +1502,13 @@ def _persist_lp_snapshots(
         "horizon_hours": int(config.LP_HORIZON_HOURS),
         "soc_initial_kwh": float(initial.soc_kwh),
         "tank_initial_c": float(initial.tank_temp_c),
+        # #929: the RAW readings (initial.* may be rolled forward to slot 0).
+        "soc_measured_kwh": float(
+            initial.soc_measured_kwh if getattr(initial, "soc_measured_kwh", None) is not None
+            else initial.soc_kwh),
+        "tank_measured_c": float(
+            initial.tank_measured_c if getattr(initial, "tank_measured_c", None) is not None
+            else initial.tank_temp_c),
         # Phase B dropped the LP indoor-temp STATE variable (no room sensor here).
         # #540 W1: now that room sensors push into room_temperature_history, record
         # the freshest reading on the snapshot (source="sensor") so it's captured

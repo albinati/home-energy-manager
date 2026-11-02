@@ -91,10 +91,10 @@ def test_tank_reheat_extrapolates_rate_capped_at_target():
     r = roll_tank_forward(42.0, 1800, prev_tank_c=38.0, sample_gap_s=1200, tank_on=True,
                           target_c=45.0, **TANK)
     assert r.tank_c == 45.0
-    # rate capped at physics max (0.6 C/min)
+    # absolute rise capped at +5 C
     r = roll_tank_forward(42.0, 600, prev_tank_c=20.0, sample_gap_s=1200, tank_on=True,
                           target_c=60.0, **TANK)
-    assert r.tank_c == pytest.approx(42.0 + 6.0)
+    assert r.tank_c == pytest.approx(47.0)
 
 
 def test_tank_standing_loss_vs_noise():
@@ -135,7 +135,7 @@ def env(monkeypatch):
     monkeypatch.setattr(config, "MAX_INVERTER_KW", 6.0, raising=False)
     monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London", raising=False)
     monkeypatch.setattr(lp_initial_state, "_now_utc", lambda: NOW)
-    monkeypatch.setattr(lp_initial_state, "get_cached_realtime_age_seconds", lambda: 60.0)
+    monkeypatch.setattr(lp_initial_state, "get_cached_realtime_age_seconds", lambda rt=None: 60.0)
     monkeypatch.setattr(
         lp_initial_state, "get_cached_realtime",
         lambda *a, **k: RealTimeData(soc=50.0, battery_power=3.0),
@@ -161,34 +161,40 @@ def _tele(age_s, tank, target=60.0, on=1):
 
 
 def test_initial_state_rolls_soc_and_tank(env):
-    config.LP_INITIAL_STATE_ROLL_FORWARD_ENABLED = True
+    config.LP_INITIAL_SOC_ROLL_FORWARD_ENABLED = True
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = True
     _tele(1800, 38.0)
     _tele(600, 42.0)   # +4 C / 20 min = 0.2 C/min ; reading 10 min old
     st = lp_initial_state.read_lp_initial_state(slot0_utc=SLOT0)
     # SoC: 5.0 kWh + 3 kW * (20 min + 1 min reading age)
     assert st.soc_kwh == pytest.approx(5.0 + 3.0 * 21 / 60)
-    # tank: reading 10 min old -> 30 min to slot0 = +6 C
-    assert st.tank_temp_c == pytest.approx(48.0)
+    # tank: reading 10 min old -> 30 min to slot0 = +6 C, capped at +5 C
+    assert st.tank_temp_c == pytest.approx(47.0)
+    assert st.tank_measured_c == 42.0 and st.soc_measured_kwh == 5.0
     assert st.roll_forward["soc"]["applied"] and st.roll_forward["tank"]["mode"] == "reheat"
 
 
 def test_kill_switch_off_is_identical_to_legacy(env):
     _tele(1800, 38.0)
     _tele(600, 42.0)
-    config.LP_INITIAL_STATE_ROLL_FORWARD_ENABLED = False
+    config.LP_INITIAL_SOC_ROLL_FORWARD_ENABLED = False
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = False
     off = lp_initial_state.read_lp_initial_state(slot0_utc=SLOT0)
     legacy = lp_initial_state.read_lp_initial_state()
     assert off.soc_kwh == legacy.soc_kwh == 5.0
     assert off.tank_temp_c == legacy.tank_temp_c == 42.0
     assert off.roll_forward is None
+    assert off.soc_measured_kwh == 5.0 and off.tank_measured_c == 42.0
     # enabled but no slot0 given (other callers) is legacy too
-    config.LP_INITIAL_STATE_ROLL_FORWARD_ENABLED = True
+    config.LP_INITIAL_SOC_ROLL_FORWARD_ENABLED = True
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = True
     assert lp_initial_state.read_lp_initial_state().soc_kwh == 5.0
 
 
 def test_stale_battery_power_falls_back(env):
-    config.LP_INITIAL_STATE_ROLL_FORWARD_ENABLED = True
-    env.setattr(lp_initial_state, "get_cached_realtime_age_seconds", lambda: 900.0)
+    config.LP_INITIAL_SOC_ROLL_FORWARD_ENABLED = True
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = True
+    env.setattr(lp_initial_state, "get_cached_realtime_age_seconds", lambda rt=None: 900.0)
     st = lp_initial_state.read_lp_initial_state(slot0_utc=SLOT0)
     assert st.soc_kwh == 5.0
     assert st.roll_forward["soc"]["reason"] == "stale_power"
@@ -204,12 +210,8 @@ def test_missing_indoor_records_w3_disabled_reason(env, caplog):
 
 
 # --- wire: the optimizer hands solve_lp the rolled-forward soc ---------------
-def test_wire_solve_lp_receives_rolled_forward_soc(monkeypatch):
-    from test_lp_appliance_real_solver import (
-        TARIFF,
-        _seed_realistic_day,
-        _stub_optimal_lp_plan,
-    )
+def _setup_wire(monkeypatch):
+    from test_lp_appliance_real_solver import TARIFF, _seed_realistic_day
     db.init_db()
     monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")
     monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", TARIFF)
@@ -220,14 +222,19 @@ def test_wire_solve_lp_receives_rolled_forward_soc(monkeypatch):
     now = datetime(2026, 5, 20, 18, 5, tzinfo=UTC)          # slot 0 = 18:30
     monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
     monkeypatch.setattr(lp_initial_state, "_now_utc", lambda: now)
-    monkeypatch.setattr(lp_initial_state, "get_cached_realtime_age_seconds", lambda: 0.0)
+    monkeypatch.setattr(lp_initial_state, "get_cached_realtime_age_seconds", lambda rt=None: 0.0)
     monkeypatch.setattr(lp_initial_state, "get_cached_realtime",
                         lambda *a, **k: RealTimeData(soc=40.0, battery_power=3.0))
     monkeypatch.setattr(lp_initial_state.daikin_service, "get_lp_state_cached_or_estimated",
                         lambda actor=None: {"tank_temp_c": 45.0, "source": "live"})
     _seed_realistic_day(datetime(2026, 5, 20, 0, 0, tzinfo=UTC))
     _seed_realistic_day(datetime(2026, 5, 21, 0, 0, tzinfo=UTC))
+    return now
 
+
+def test_wire_solve_lp_receives_rolled_forward_soc(monkeypatch):
+    from test_lp_appliance_real_solver import _stub_optimal_lp_plan
+    _setup_wire(monkeypatch)
     seen: dict = {}
 
     def _capture(*, initial, **kwargs):
@@ -235,12 +242,195 @@ def test_wire_solve_lp_receives_rolled_forward_soc(monkeypatch):
         return _stub_optimal_lp_plan(**kwargs)
 
     monkeypatch.setattr("src.scheduler.lp_optimizer.solve_lp", _capture)
-    config.LP_INITIAL_STATE_ROLL_FORWARD_ENABLED = True
+    config.LP_INITIAL_SOC_ROLL_FORWARD_ENABLED = True
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = True
     optimizer.run_optimizer(fox=None, daikin=None)
     # 4.0 kWh + 3 kW * 25 min = +1.25
     assert seen["initial"].soc_kwh == pytest.approx(4.0 + 3.0 * 25 / 60)
 
     seen.clear()
-    config.LP_INITIAL_STATE_ROLL_FORWARD_ENABLED = False
+    config.LP_INITIAL_SOC_ROLL_FORWARD_ENABLED = False
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = False
     optimizer.run_optimizer(fox=None, daikin=None)
     assert seen["initial"].soc_kwh == pytest.approx(4.0)
+
+
+# ---------------------------------------------------------------- review fixes (#933)
+def test_tank_end_of_reheat_48_vs_setpoint_47_does_not_roll_up(env):
+    """Regression: reading 48, setpoint 47, previous 41 = the ordinary end of a reheat."""
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = True
+    env.setattr(lp_initial_state.daikin_service, "get_lp_state_cached_or_estimated",
+                lambda actor=None: {"tank_temp_c": 48.0, "source": "live"})
+    env.setattr(lp_initial_state.daikin_service, "get_cached_devices",
+                lambda **k: (_ for _ in ()).throw(RuntimeError("no cache")))
+    _tele(1800, 41.0, target=47.0)
+    _tele(600, 48.0, target=47.0)
+    st = lp_initial_state.read_lp_initial_state(slot0_utc=SLOT0)
+    assert st.tank_temp_c == 48.0
+    assert st.roll_forward["tank"]["mode"] == "none:reheat_no_headroom"
+
+
+def test_tank_boost_known_uses_dhw_temp_max(env):
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = True
+    env.setattr(config, "DHW_TEMP_MAX_C", 60.0, raising=False)
+    env.setattr(lp_initial_state.daikin_service, "get_lp_state_cached_or_estimated",
+                lambda actor=None: {"tank_temp_c": 48.0, "source": "live"})
+
+    class _D:
+        tank_powerful = True
+
+    class _Res:
+        devices = [_D()]
+
+    env.setattr(lp_initial_state.daikin_service, "get_cached_devices", lambda **k: _Res())
+    _tele(1800, 41.0, target=47.0)
+    _tele(600, 48.0, target=47.0)
+    st = lp_initial_state.read_lp_initial_state(slot0_utc=SLOT0)
+    assert st.roll_forward["tank"]["mode"] == "reheat"
+    assert 48.0 < st.tank_temp_c <= 53.0           # +5 C cap, ceiling 60
+    # reading >= setpoint + 3 is also a known boost
+    assert lp_initial_state._reheat_cap_c(51.0, 47.0, NOW, NOW) == 60.0
+
+
+def test_tank_estimate_source_is_not_rolled(env):
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = True
+    env.setattr(lp_initial_state.daikin_service, "get_lp_state_cached_or_estimated",
+                lambda actor=None: {"tank_temp_c": 42.0, "source": "estimate"})
+    _tele(1800, 38.0)
+    _tele(600, 42.0)
+    st = lp_initial_state.read_lp_initial_state(slot0_utc=SLOT0)
+    assert st.tank_temp_c == 42.0
+    assert st.roll_forward["tank"]["mode"] == "none:source_estimate"
+
+
+def test_tank_reading_older_than_40_min_is_not_rolled(env):
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = True
+    _tele(4000, 38.0)
+    _tele(2700, 42.0)   # 45 min old
+    st = lp_initial_state.read_lp_initial_state(slot0_utc=SLOT0)
+    assert st.tank_temp_c == 42.0
+    assert st.roll_forward["tank"]["mode"] == "none:reading_too_old"
+
+
+def test_tank_min_sample_gap_600s():
+    r = roll_tank_forward(46.0, 600, prev_tank_c=44.0, sample_gap_s=300, tank_on=True,
+                          target_c=60.0, **TANK)
+    assert r.mode != "reheat"
+
+
+def test_onset_exactly_at_slot0_is_ignored():
+    t0 = datetime(2026, 10, 18, 11, 30, tzinfo=UTC)          # 12:30 BST
+    slot0 = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)        # 13:00 BST
+    g = [{"workMode": "ForceCharge", "startHour": 13, "startMinute": 0, "endHour": 15,
+          "endMinute": 59, "extraParam": {"fdPwr": 4000, "fdSoc": 100}}]
+    assert find_schedule_onset(g, t0, slot0, LON, max_power_kw=6.0) is None
+
+
+def test_fdsoc_clamp_only_post_onset_and_discharge_never_raises():
+    t0 = datetime(2026, 10, 18, 11, 59, 30, tzinfo=UTC)
+    slot0 = t0 + timedelta(minutes=30)
+    g = [{"workMode": "ForceDischarge", "startHour": 13, "startMinute": 0, "endHour": 15,
+          "endMinute": 59, "extraParam": {"fdPwr": 3000, "fdSoc": 90}}]
+    onset = find_schedule_onset(g, t0, slot0, LON, max_power_kw=6.0)
+    r = roll_soc_with_onset(5.0, 3.0, 30, 1800, onset, **KW)
+    pre = 5.0 + 3.0 * 30 / 3600
+    assert r.soc_kwh <= pre + 1e-9                            # a ForceDischarge never raises SoC
+    g2 = [{"workMode": "ForceCharge", "startHour": 13, "startMinute": 0, "endHour": 15,
+           "endMinute": 59, "extraParam": {"fdPwr": 4000, "fdSoc": 30}}]
+    onset2 = find_schedule_onset(g2, t0, slot0, LON, max_power_kw=6.0)
+    r2 = roll_soc_with_onset(5.0, 3.0, 30, 1800, onset2, **KW)
+    assert r2.soc_kwh >= pre - 1e-9                           # fdSoc below SoC: measured part kept
+
+
+def test_inforce_fdsoc_caps_measured_roll():
+    from src.scheduler.lp_roll_forward import find_inforce_group
+    t0 = datetime(2026, 10, 17, 21, 33, tzinfo=UTC)           # 22:33 BST
+    g = [{"workMode": "ForceCharge", "startHour": 22, "startMinute": 0, "endHour": 23,
+          "endMinute": 59, "extraParam": {"fdPwr": 1900, "fdSoc": 55}}]
+    inf = find_inforce_group(g, t0, LON)
+    assert inf is not None and inf.target_soc_pct == 55
+    r = roll_soc_with_onset(5.18, 3.0, 0, 1620, None, inforce=inf, **KW)
+    assert r.soc_kwh == pytest.approx(5.5)                    # would be 6.53 uncapped
+    r = roll_soc_with_onset(6.0, 3.0, 0, 1620, None, inforce=inf, **KW)
+    assert r.soc_kwh == pytest.approx(6.0)                    # above ceiling: not pushed down
+    assert find_inforce_group(g, datetime(2026, 10, 18, 0, 0, tzinfo=UTC), LON) is None
+
+
+def test_atomic_age_requires_same_snapshot():
+    import time as _t
+
+    from src.foxess import service as fs
+    rt = RealTimeData(soc=1.0)
+    other = RealTimeData(soc=2.0)
+    fs._last_realtime, fs._last_realtime_updated_monotonic = rt, _t.monotonic()
+    assert fs.get_cached_realtime_age_seconds(rt) is not None
+    assert fs.get_cached_realtime_age_seconds(other) is None
+
+
+def test_roll_forward_persisted_in_exogenous_snapshot(monkeypatch):
+    import json as _json
+    _setup_wire(monkeypatch)
+    config.LP_INITIAL_SOC_ROLL_FORWARD_ENABLED = True
+    optimizer.run_optimizer(fox=None, daikin=None)
+    conn = db.get_connection()
+    row = conn.execute(
+        "SELECT soc_initial_kwh, soc_measured_kwh, tank_measured_c, exogenous_snapshot_json "
+        "FROM lp_inputs_snapshot ORDER BY run_id DESC LIMIT 1").fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == pytest.approx(4.0 + 3.0 * 25 / 60) and row[1] == pytest.approx(4.0)
+    assert row[2] == 45.0
+    assert _json.loads(row[3])["initial_roll_forward"]["soc"]["applied"] is True
+
+
+def test_wire_solve_lp_receives_rolled_forward_tank(monkeypatch):
+    from test_lp_appliance_real_solver import _stub_optimal_lp_plan
+    now = _setup_wire(monkeypatch)
+    conn = db.get_connection()
+    conn.execute("DELETE FROM daikin_telemetry")
+    for age, t in ((1800, 41.0), (600, 45.0)):
+        conn.execute("INSERT INTO daikin_telemetry (fetched_at, source, tank_temp_c, tank_target_c, tank_on) "
+                     "VALUES (?,?,?,?,?)", (now.timestamp() - age, "live", t, 50.0, 1))
+    conn.commit()
+    conn.close()
+    seen: dict = {}
+
+    def _capture(*, initial, **kwargs):
+        seen.setdefault("initial", initial)
+        return _stub_optimal_lp_plan(**kwargs)
+
+    monkeypatch.setattr("src.scheduler.lp_optimizer.solve_lp", _capture)
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = True
+    optimizer.run_optimizer(fox=None, daikin=None)
+    # 45 + 0.2 C/min * 25 min = 50 (also the setpoint and the +5 C cap)
+    assert seen["initial"].tank_temp_c > 45.0
+    assert seen["initial"].tank_temp_c <= 50.0
+    seen.clear()
+    config.LP_INITIAL_TANK_ROLL_FORWARD_ENABLED = False
+    optimizer.run_optimizer(fox=None, daikin=None)
+    assert seen["initial"].tank_temp_c == 45.0
+
+
+def test_lp_simulation_passes_slot0(monkeypatch):
+    from test_lp_appliance_real_solver import TARIFF, _seed_realistic_day
+
+    from src.scheduler import lp_simulation
+    db.init_db()
+    monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", TARIFF)
+    monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")
+    now = datetime(2026, 5, 20, 18, 5, tzinfo=UTC)
+    monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
+    _seed_realistic_day(datetime(2026, 5, 20, 0, 0, tzinfo=UTC))
+    _seed_realistic_day(datetime(2026, 5, 21, 0, 0, tzinfo=UTC))
+    captured: dict = {}
+
+    def _fake(daikin=None, **kw):
+        captured.update(kw)
+        raise RuntimeError("stop after capture")
+
+    monkeypatch.setattr(lp_simulation, "read_lp_initial_state", _fake)
+    try:
+        lp_simulation.run_lp_simulation(allow_daikin_refresh=False)
+    except RuntimeError:
+        pass
+    assert captured.get("slot0_utc") == datetime(2026, 5, 20, 18, 30, tzinfo=UTC)

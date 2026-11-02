@@ -33,7 +33,9 @@ MAX_ROLL_S = 45 * 60.0  # never extrapolate more than 45 min
 # marks an active reheat (standing loss is ~0.01 C/min; sensor step is 0.5-1 C).
 REHEAT_MIN_RISE_C = 0.4
 REHEAT_MAX_SAMPLE_GAP_S = 40 * 60.0
-REHEAT_MIN_SAMPLE_GAP_S = 60.0
+REHEAT_MIN_SAMPLE_GAP_S = 600.0
+REHEAT_MAX_RISE_C = 5.0  # never extrapolate more than this above the reading
+TANK_MAX_READING_AGE_S = 40 * 60.0
 REHEAT_MAX_RATE_C_PER_MIN = 0.6  # ~8 kW thermal into 200 L
 # The Daikin tank sensor is quantised to 1 C and the thermostat keeps topping the
 # tank up, so a standing-loss correction below this is noise: on the October audit
@@ -136,7 +138,7 @@ def roll_tank_forward(
             if target_c is None or target_c <= tank_c:
                 return TankRoll(tank_c, 0.0, False, "none:reheat_no_headroom")
             rate = min(rise / (sample_gap_s / 60.0), REHEAT_MAX_RATE_C_PER_MIN)
-            new = min(float(target_c), tank_c + rate * gap / 60.0)
+            new = min(float(target_c), tank_c + rate * gap / 60.0, tank_c + REHEAT_MAX_RISE_C)
             return TankRoll(new, new - tank_c, True, "reheat")
     new = standing_loss_tank_c(
         tank_c, gap, ua_w_per_k=ua_w_per_k, ambient_c=ambient_c,
@@ -149,19 +151,57 @@ def roll_tank_forward(
 
 @dataclass(frozen=True)
 class ScheduleOnset:
-    """A ForceCharge / ForceDischarge group that STARTS after the last battery
-    power reading and before slot 0 - the measured power cannot reflect it."""
+    """A ForceCharge / ForceDischarge group that STARTS strictly after the last battery
+    power reading and strictly before slot 0 - the measured power cannot reflect it."""
     offset_s: float  # seconds from the reading to the group start
     power_kw: float  # signed: + charge, - discharge
     target_soc_pct: float | None  # fdSoc (charge: ceiling, discharge: floor)
 
 
+@dataclass(frozen=True)
+class InForce:
+    """The Force* group in force at the reading: its fdSoc bounds the measured roll
+    (a ForceCharge stops at fdSoc, a ForceDischarge at its floor)."""
+    mode: str  # "ForceCharge" | "ForceDischarge"
+    target_soc_pct: float | None
+
+
+def _group_minutes(g) -> tuple[int, int, int]:
+    sh, sm = int(g["startHour"]), int(g["startMinute"])
+    eh, em = int(g["endHour"]), int(g["endMinute"])
+    gs = sh * 60 + sm
+    ge = eh * 60 + em
+    # Same convention as lp_dispatch._prepend_inflight_group: :00/:30 ends are
+    # exclusive, anything else (:29/:59) inclusive.
+    ge_excl = ge if ge % 30 == 0 else ge + 1
+    return gs, ge_excl, ge
+
+
+def find_inforce_group(groups, reading_t, tz) -> InForce | None:
+    """Force* group covering ``reading_t`` (local clock), or None."""
+    loc = reading_t.astimezone(tz)
+    m = loc.hour * 60 + loc.minute
+    for g in groups or []:
+        try:
+            mode = str(g.get("workMode") or "")
+            if mode not in ("ForceCharge", "ForceDischarge"):
+                continue
+            gs, ge_excl, _ = _group_minutes(g)
+            covered = (gs <= m < ge_excl) if gs < ge_excl else (m >= gs or m < ge_excl)
+            if not covered:
+                continue
+            fd = (g.get("extraParam") or {}).get("fdSoc")
+            return InForce(mode, float(fd) if fd is not None else None)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
 def find_schedule_onset(groups, reading_t, slot0_t, tz, *, max_power_kw: float) -> ScheduleOnset | None:
-    """First ForceCharge/ForceDischarge group whose start falls in
-    (reading_t, slot0_t]. ``groups`` = Fox scheduler groups as stored in
-    ``fox_schedule_state.groups_json`` (local-time hours/minutes). Contiguous
-    groups are not merged: a group that starts at a slot boundary inside the
-    window only matters if it begins strictly after the reading."""
+    """First ForceCharge/ForceDischarge group whose start falls in the OPEN-ENDED
+    window (reading_t, slot0_t): a group starting exactly at slot 0 is the LP's own
+    business and contributes nothing to the state at slot 0. ``groups`` = Fox
+    scheduler groups as stored in ``fox_schedule_state`` (local-time hours/minutes)."""
     from datetime import datetime, timedelta
 
     best: ScheduleOnset | None = None
@@ -183,7 +223,7 @@ def find_schedule_onset(groups, reading_t, slot0_t, tz, *, max_power_kw: float) 
         for day in (-1, 0, 1):
             d = (base + timedelta(days=day)).date()
             start = datetime(d.year, d.month, d.day, sh, sm, tzinfo=tz)
-            if reading_t < start <= slot0_t:
+            if reading_t < start < slot0_t:
                 off = (start - reading_t).total_seconds()
                 if best is None or off < best.offset_s:
                     best = ScheduleOnset(
@@ -203,30 +243,55 @@ def roll_soc_with_onset(
     capacity_kwh: float,
     reserve_kwh: float,
     max_power_kw: float,
+    inforce: InForce | None = None,
     max_power_age_s: float = MAX_POWER_AGE_S,
 ) -> SocRoll:
-    """Like :func:`roll_soc_forward`, but when a scheduled Force* group starts
-    between the reading and slot 0 the measured power is used up to the group
-    start and the group's ``fdPwr`` (capped at the inverter limit) after it,
-    stopping at its ``fdSoc``."""
+    """:func:`roll_soc_forward` plus the schedule.
+
+    * ``inforce`` (M3): the measured-power roll is bounded by the fdSoc of the group in
+      force now (ForceCharge: ceiling, never below the current SoC; ForceDischarge: floor).
+    * ``onset``: when a Force* group starts between the reading and slot 0, measured
+      power applies up to its start and its ``fdPwr`` after it; the group's fdSoc bounds
+      ONLY that post-onset part. A ForceDischarge never raises SoC.
+    """
     base = roll_soc_forward(
         soc_kwh, battery_power_kw, power_age_s, gap_s, capacity_kwh=capacity_kwh,
         reserve_kwh=reserve_kwh, max_power_kw=max_power_kw, max_power_age_s=max_power_age_s,
     )
-    if not base.applied or onset is None or gap_s <= 0:
+    if not base.applied:
         return base
     gap = min(float(gap_s), MAX_ROLL_S)
-    t1 = max(0.0, min(onset.offset_s, gap))
     p = max(-max_power_kw, min(max_power_kw, float(battery_power_kw)))
-    s = soc_kwh + p * t1 / 3600.0
-    s += onset.power_kw * max(0.0, gap - t1) / 3600.0
-    if onset.target_soc_pct is not None:
-        lim = capacity_kwh * onset.target_soc_pct / 100.0
-        if onset.power_kw > 0:
-            s = min(s, max(lim, soc_kwh))
-        else:
-            s = max(s, min(lim, soc_kwh))
     lo = min(soc_kwh, reserve_kwh)
     hi = capacity_kwh if soc_kwh <= capacity_kwh else soc_kwh
-    s = max(lo, min(hi, s))
-    return SocRoll(s, s - soc_kwh, True, "ok+schedule_onset")
+
+    def _clamp(v: float) -> float:
+        return max(lo, min(hi, v))
+
+    def _bound(v: float, start: float, power: float, fd_pct: float | None, mode: str | None) -> float:
+        if fd_pct is None or mode is None:
+            return v
+        lim = capacity_kwh * fd_pct / 100.0
+        if mode == "ForceCharge" and power > 0:
+            return min(v, max(lim, start))
+        if mode == "ForceDischarge" and power < 0:
+            return max(v, min(lim, start))
+        return v
+
+    t1 = gap if onset is None else max(0.0, min(onset.offset_s, gap))
+    s1 = _clamp(soc_kwh + p * t1 / 3600.0)
+    if inforce is not None:
+        s1 = _bound(s1, soc_kwh, p, inforce.target_soc_pct, inforce.mode)
+    reason = "ok"
+    s = s1
+    if onset is not None and gap > t1:
+        s2 = s1 + onset.power_kw * (gap - t1) / 3600.0
+        mode = "ForceCharge" if onset.power_kw > 0 else "ForceDischarge"
+        s2 = _bound(s2, s1, onset.power_kw, onset.target_soc_pct, mode)
+        if onset.power_kw < 0:
+            s2 = min(s2, s1)
+        s = _clamp(s2)
+        reason = "ok+schedule_onset"
+    if inforce is not None and reason == "ok":
+        reason = "ok+inforce_bound" if s != _clamp(soc_kwh + p * t1 / 3600.0) else "ok"
+    return SocRoll(s, s - soc_kwh, True, reason)

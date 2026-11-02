@@ -1284,6 +1284,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     # writes a snapshot so the constraints can be replayed offline.
     if "lp_status" not in lp_cols:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN lp_status TEXT")
+    # #929: soc_initial_kwh / tank_initial_c are the values the LP was SEEDED with, which are
+    # rolled forward to slot 0 when LP_INITIAL_*_ROLL_FORWARD_ENABLED. These two keep the
+    # RAW measured reading so audits never mistake a rolled value for a measurement.
+    if "soc_measured_kwh" not in lp_cols:
+        conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN soc_measured_kwh REAL")
+    if "tank_measured_c" not in lp_cols:
+        conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN tank_measured_c REAL")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_lp_inputs_snapshot_forecast_fetch ON lp_inputs_snapshot(forecast_fetch_at_utc)"
     )
@@ -7566,18 +7573,22 @@ def save_lp_snapshots(
                     soc_source, tank_source, indoor_source,
                     base_load_json, micro_climate_offset_c, forecast_fetch_at_utc, exogenous_snapshot_json, config_snapshot_json,
                     price_quantize_p, peak_threshold_p, cheap_threshold_p,
-                    daikin_control_mode, optimization_preset, energy_strategy_mode, lp_status)
+                    daikin_control_mode, optimization_preset, energy_strategy_mode, lp_status,
+                    soc_measured_kwh, tank_measured_c)
                    VALUES (:run_id, :run_at_utc, :plan_date, :horizon_hours,
                            :soc_initial_kwh, :tank_initial_c, :indoor_initial_c,
                            :soc_source, :tank_source, :indoor_source,
                            :base_load_json, :micro_climate_offset_c, :forecast_fetch_at_utc, :exogenous_snapshot_json, :config_snapshot_json,
                            :price_quantize_p, :peak_threshold_p, :cheap_threshold_p,
-                           :daikin_control_mode, :optimization_preset, :energy_strategy_mode, :lp_status)""",
+                           :daikin_control_mode, :optimization_preset, :energy_strategy_mode, :lp_status,
+                           :soc_measured_kwh, :tank_measured_c)""",
                 {
                     "run_id": run_id,
                     "forecast_fetch_at_utc": inputs_row.get("forecast_fetch_at_utc"),
                     "exogenous_snapshot_json": inputs_row.get("exogenous_snapshot_json"),
                     "lp_status": inputs_row.get("lp_status"),
+                    "soc_measured_kwh": inputs_row.get("soc_measured_kwh"),
+                    "tank_measured_c": inputs_row.get("tank_measured_c"),
                     **inputs_row,
                 },
             )

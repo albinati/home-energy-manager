@@ -112,11 +112,19 @@ def get_refresh_stats_extended() -> dict:
     }
 
 
-def get_cached_realtime_age_seconds() -> float | None:
-    """Age (s) of the cached realtime reading, or None when nothing is cached."""
-    if _last_realtime is None or _last_realtime_updated_monotonic is None:
-        return None
-    return max(0.0, time.monotonic() - _last_realtime_updated_monotonic)
+def get_cached_realtime_age_seconds(rt: RealTimeData | None = None) -> float | None:
+    """Age (s) of the cached realtime reading, or None when nothing is cached.
+
+    Pass the snapshot you are using: the age is returned only if that exact object
+    is still the cached one (a concurrent refresh in between would otherwise pair a
+    new age with an old reading); else None.
+    """
+    with _realtime_fetch_lock:
+        if _last_realtime is None or _last_realtime_updated_monotonic is None:
+            return None
+        if rt is not None and rt is not _last_realtime:
+            return None
+        return max(0.0, time.monotonic() - _last_realtime_updated_monotonic)
 
 
 def get_cached_realtime(max_age_seconds: int | None = None) -> RealTimeData:

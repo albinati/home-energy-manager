@@ -1073,17 +1073,27 @@ SCHEMA: dict[str, SettingSpec] = {
         ),
     ),
     # --- #929 roll the LP initial state forward to slot 0 --------------------
-    "LP_INITIAL_STATE_ROLL_FORWARD_ENABLED": SettingSpec(
-        key="LP_INITIAL_STATE_ROLL_FORWARD_ENABLED",
-        type_name="str",  # "true" / "false" - kill switch, false = state read at run time exactly
-        env_default=_str_env("LP_INITIAL_STATE_ROLL_FORWARD_ENABLED", "true"),
+    "LP_INITIAL_SOC_ROLL_FORWARD_ENABLED": SettingSpec(
+        key="LP_INITIAL_SOC_ROLL_FORWARD_ENABLED",
+        type_name="str",  # "true" / "false" - kill switch, false = SoC read at run time exactly
+        env_default=_str_env("LP_INITIAL_SOC_ROLL_FORWARD_ENABLED", "true"),
         enum=("true", "false"),
         description=(
             "#929: slot 0 of the LP is the next half-hour boundary, up to 29 min "
-            "after the SoC / tank readings. true = roll SoC forward with the "
-            "measured battery power (and a Force* schedule group that starts in "
-            "the gap) and the tank with the recent reheat rate. false = seed the "
-            "LP with the values read at run time (legacy)."
+            "after the SoC reading. true = roll SoC forward with the measured "
+            "battery power (and a Force* schedule group that starts in the gap). "
+            "false = seed the LP with the SoC read at run time (legacy)."
+        ),
+    ),
+    "LP_INITIAL_TANK_ROLL_FORWARD_ENABLED": SettingSpec(
+        key="LP_INITIAL_TANK_ROLL_FORWARD_ENABLED",
+        type_name="str",
+        env_default=_str_env("LP_INITIAL_TANK_ROLL_FORWARD_ENABLED", "true"),
+        enum=("true", "false"),
+        description=(
+            "#929: true = extrapolate a visible tank reheat (capped at the "
+            "setpoint, +5 C max) from the reading to slot 0. false = seed the "
+            "LP with the tank temperature read at run time (legacy)."
         ),
     ),
     "LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE": SettingSpec(

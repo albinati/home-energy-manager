@@ -117,6 +117,9 @@ class LpInitialState:
     # #929: audit of the roll-forward to slot 0 (None = not attempted / kill switch off)
     # and why W3 has no indoor seed (None = it has one).
     roll_forward: dict | None = None
+    # #929: the raw (un-rolled) readings; None = same as soc_kwh / tank_temp_c.
+    soc_measured_kwh: float | None = None
+    tank_measured_c: float | None = None
     w3_disabled_reason: str | None = None
     # #872 — Daikin holiday mode per management point (isHolidayModeActive). None = read
     # the cached service state ONCE per solve; replays pass False so a historical day is
