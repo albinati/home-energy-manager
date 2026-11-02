@@ -6,7 +6,7 @@ Major versions track significant LP / dispatch architecture iterations. Minor ve
 
 ## [Unreleased]
 
-_Nothing yet._
+- `GET /api/v1/pv/today` slots carry `load_actual_kwh` (integrated measured house load); Home v3 day chart plots the load forecast over the whole day and draws measured load from it.
 
 ## [14.0.0] — 2026-07-06
 

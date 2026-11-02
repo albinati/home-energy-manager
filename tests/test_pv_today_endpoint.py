@@ -51,7 +51,7 @@ def test_pv_today_shape_and_accuracy():
     assert len(resp["slots"]) == 48
     # Every slot carries the full overlay key set; forecast is 0 (no provider
     # in test); price/load/kind are null (no rates/profile/runs seeded).
-    expected_keys = {"slot_utc", "pv_forecast_kwh", "pv_planned_kwh", "pv_actual_kwh", "import_price_p", "base_load_kwh", "load_forecast_kwh", "kind"}
+    expected_keys = {"slot_utc", "pv_forecast_kwh", "pv_planned_kwh", "pv_actual_kwh", "import_price_p", "base_load_kwh", "load_forecast_kwh", "load_actual_kwh", "kind"}
     assert all(set(s) == expected_keys for s in resp["slots"])
     assert all(s["pv_forecast_kwh"] == 0.0 for s in resp["slots"])
     # No optimizer run seeded → committed-plan PV is null everywhere.
@@ -199,3 +199,82 @@ def test_past_day_serves_committed_load_forecast():
     # fall back to the live profile — None here, since no samples seeded).
     k_uncovered = datetime(day.year, day.month, day.day, 12, 0, tzinfo=UTC).isoformat().replace("+00:00", "Z")
     assert by_slot[k_uncovered]["load_forecast_kwh"] is None
+
+
+def test_pv_today_load_actual_integrated_and_future_null():
+    now = datetime.now(UTC)
+    y = (now - timedelta(days=1)).date()
+    start = datetime(y.year, y.month, y.day, 10, 0, tzinfo=UTC)
+    for k in range(0, 41):  # 3-min cadence, 10:00 .. 12:00 inclusive, constant 2 kW
+        ts = start + timedelta(minutes=3 * k)
+        db.save_pv_realtime_sample(ts.isoformat().replace("+00:00", "Z"), load_power_kw=2.0, source="test")
+    resp = asyncio.run(pv_router.get_pv_today(date=y.isoformat()))
+    by = {s["slot_utc"]: s for s in resp["slots"]}
+    for hh, mm in ((10, 0), (10, 30), (11, 0), (11, 30)):
+        key = f"{y.isoformat()}T{hh:02d}:{mm:02d}:00Z"
+        assert by[key]["load_actual_kwh"] == pytest.approx(1.0, abs=0.01)   # 2 kW x 0.5 h
+    assert by[f"{y.isoformat()}T03:00:00Z"]["load_actual_kwh"] is None      # no telemetry
+
+    # Today: seed samples from the current slot onward; unfinished slots stay null.
+    day = now.date()
+    cur = now.replace(minute=(now.minute // 30) * 30, second=0, microsecond=0)
+    for k in range(0, 30):
+        ts = cur + timedelta(minutes=3 * k)
+        if ts.date() == day:
+            db.save_pv_realtime_sample(ts.isoformat().replace("+00:00", "Z"), load_power_kw=2.0, source="test")
+    t = asyncio.run(pv_router.get_pv_today(date=day.isoformat()))
+    now_t = datetime.fromisoformat(t["now_utc"].replace("Z", "+00:00"))
+    future = [s for s in t["slots"]
+              if datetime.fromisoformat(s["slot_utc"].replace("Z", "+00:00")) + timedelta(minutes=30) > now_t]
+    assert future
+    assert all(s["load_actual_kwh"] is None for s in future)
+
+
+def test_range_helper_matches_per_day_helper():
+    y = (datetime.now(UTC) - timedelta(days=1)).date()
+    start = datetime(y.year, y.month, y.day, 10, 0, tzinfo=UTC)
+    for k in range(0, 41):
+        ts = start + timedelta(minutes=3 * k)
+        db.save_pv_realtime_sample(ts.isoformat().replace("+00:00", "Z"), load_power_kw=1.0 + k / 40, solar_power_kw=2.0, source="test")
+    ds = datetime(y.year, y.month, y.day, tzinfo=UTC)
+    for col in ("load_power_kw", "solar_power_kw"):
+        new = db.half_hourly_kwh_for_utc_range(ds, ds + timedelta(days=1), col)
+        old = db._half_hourly_grid_kwh_for_day(y, col)
+        assert new.keys() == old.keys()
+        assert all(new[k] == pytest.approx(old[k]) for k in new)
+
+
+def test_pv_today_last_finished_slot_null_until_closed():
+    now = datetime.now(UTC)
+    cur = now.replace(minute=(now.minute // 30) * 30, second=0, microsecond=0)
+    if cur.date() != now.date() or cur - timedelta(minutes=30) < datetime(now.year, now.month, now.day, tzinfo=UTC):
+        pytest.skip("too close to UTC midnight")
+    prev = cur - timedelta(minutes=30)
+    # samples up to just before the slot end: slot not closed, within grace -> null
+    for k in range(0, 10):
+        ts = prev + timedelta(minutes=3 * k)
+        db.save_pv_realtime_sample(ts.isoformat().replace("+00:00", "Z"), load_power_kw=2.0, source="test")
+    key = prev.isoformat().replace("+00:00", "Z")
+    if now - cur < timedelta(minutes=10):
+        t = asyncio.run(pv_router.get_pv_today(date=now.date().isoformat()))
+        assert {s["slot_utc"]: s for s in t["slots"]}[key]["load_actual_kwh"] is None
+    # a sample at/after slot end closes it
+    db.save_pv_realtime_sample(cur.isoformat().replace("+00:00", "Z"), load_power_kw=2.0, source="test")
+    t = asyncio.run(pv_router.get_pv_today(date=now.date().isoformat()))
+    assert {s["slot_utc"]: s for s in t["slots"]}[key]["load_actual_kwh"] is not None
+
+
+def test_pv_today_http_exposes_load_actual_kwh():
+    from fastapi.testclient import TestClient
+
+    from src.api.main import app
+    y = (datetime.now(UTC) - timedelta(days=1)).date()
+    start = datetime(y.year, y.month, y.day, 10, 0, tzinfo=UTC)
+    for k in range(0, 21):
+        ts = start + timedelta(minutes=3 * k)
+        db.save_pv_realtime_sample(ts.isoformat().replace("+00:00", "Z"), load_power_kw=2.0, source="test")
+    r = TestClient(app).get(f"/api/v1/pv/today?date={y.isoformat()}")
+    assert r.status_code == 200
+    by = {s["slot_utc"]: s for s in r.json()["slots"]}
+    assert by[f"{y.isoformat()}T10:00:00Z"]["load_actual_kwh"] == pytest.approx(1.0, abs=0.01)
+    assert by[f"{y.isoformat()}T20:00:00Z"]["load_actual_kwh"] is None

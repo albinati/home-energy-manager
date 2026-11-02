@@ -4729,6 +4729,23 @@ def half_hourly_kwh_for_utc_range(
     return dict(buckets)
 
 
+def latest_pv_realtime_sample_utc() -> datetime | None:
+    """Timestamp of the newest ``pv_realtime_history`` row (PK lookup), or None."""
+    with _lock:
+        conn = get_connection()
+        try:
+            row = conn.execute("SELECT MAX(captured_at) FROM pv_realtime_history").fetchone()
+        finally:
+            conn.close()
+    if not row or not row[0]:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+
+
 def _half_hourly_grid_kwh_for_day(
     day: date,
     column: str,

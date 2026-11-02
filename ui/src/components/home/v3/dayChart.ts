@@ -9,6 +9,9 @@ export interface PvSlot {
   pv_planned_kwh: number | null;      // committed plan, stitched across the day's solves
   pv_actual_kwh: number | null;       // measured, null for future / no-telemetry slots
   load_forecast_kwh: number | null;   // committed total household load
+  // Measured house load, trapezoid-integrated from load_power_kw (same basis as the forecast
+  // error log). Absent on an older backend; null for future / no-telemetry slots.
+  load_actual_kwh?: number | null;
 }
 export interface PvTodayResp { date: string; now_utc: string; slots: PvSlot[] }
 export interface ExecSlot { slot_utc: string; consumption_kwh: number | null; soc_percent: number | null }
@@ -111,6 +114,8 @@ export function buildDaySeries(inp: SeriesInput): DaySeries {
     .filter((x) => Number.isFinite(x.t) && inDay(x.t) && !seen.has(x.t) && seen.add(x.t))
     .sort((a, b) => a.t - b.t);
 
+  // Old backend (no load_actual_kwh key at all): fall back to the exec consumption_kwh path below.
+  const hasLoadActual = pvSlots.some(({ s }) => "load_actual_kwh" in s);
   let fcSum = 0, fcN = 0, actSum = 0, actN = 0, cmpA = 0, cmpE = 0, cmpN = 0;
   for (const { s, t } of pvSlots) {
     const elapsed = t + SLOT_MS <= nowMs;
@@ -125,7 +130,10 @@ export function buildDaySeries(inp: SeriesInput): DaySeries {
       if (isNum(s.pv_planned_kwh)) { cmpA += s.pv_actual_kwh; cmpE += s.pv_planned_kwh; cmpN++; }
     }
     const lf = s.load_forecast_kwh;
-    if (isNum(lf) && (!isToday || mid > nowMs)) out.loadFc.push({ t: mid, v: lf * 2 });
+    if (isNum(lf)) out.loadFc.push({ t: mid, v: lf * 2 });
+    if (hasLoadActual && elapsed && isNum(s.load_actual_kwh) && s.load_actual_kwh >= 0) {
+      out.loadAct.push({ t: mid, v: s.load_actual_kwh * 2 });
+    }
   }
   if (fcN > 0 && fcSum < MIN_DAY_FORECAST_KWH) {
     out.pvFc = [];                       // an all-zero day forecast is a failed provider, not a dark day
@@ -142,9 +150,8 @@ export function buildDaySeries(inp: SeriesInput): DaySeries {
       .sort((a, b) => a.t - b.t);
     for (const { s, t } of ex) {
       if (isNum(s.soc_percent)) out.socAct.push({ t: t + SLOT_MS, v: s.soc_percent });
-      if (isNum(s.consumption_kwh) && s.consumption_kwh > 0) out.loadAct.push({ t: t + SLOT_MS / 2, v: s.consumption_kwh * 2 });
+      if (!hasLoadActual && isNum(s.consumption_kwh) && s.consumption_kwh > 0) out.loadAct.push({ t: t + SLOT_MS / 2, v: s.consumption_kwh * 2 });
     }
-    if (out.loadAct.length && out.loadFc.length) out.loadFc.unshift({ t: nowMs, v: out.loadAct[out.loadAct.length - 1].v });
   }
 
   // Planned battery: the plan's soc_kwh (end of slot) as % of the pack. Only what exists.
