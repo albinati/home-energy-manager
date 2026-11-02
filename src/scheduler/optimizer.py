@@ -2673,6 +2673,13 @@ def _run_optimizer_lp(
     if _reserve_audit is not None:
         exogenous_snapshot["soc_reserve_recovery"] = _reserve_audit
 
+    try:  # #944 — W3 plausibility gate outcome (why the LP source may fall back to tier)
+        from .lp_dispatch import w3_gate_snapshot
+
+        exogenous_snapshot["w3_gate"] = w3_gate_snapshot(plan)
+    except Exception:  # noqa: BLE001 — audit only, never block a plan
+        logger.debug("w3_gate snapshot failed", exc_info=True)
+
     lp_slots = lp_plan_to_slots(plan)
     counts = {"negative": 0, "cheap": 0, "solar_charge": 0, "standard": 0, "peak": 0, "peak_export": 0}
     for s in lp_slots:

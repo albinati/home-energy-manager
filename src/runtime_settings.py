@@ -200,6 +200,34 @@ SCHEMA: dict[str, SettingSpec] = {
             "22-07): how cold the house may drift under the blankets (°C)."
         ),
     ),
+    # #944 — W3 plausibility gate: how big / how long a floor undershoot the
+    # gate forgives before it discards the LP trajectory for the tier rule.
+    "LP_W3_SLACK_TOL_C": SettingSpec(
+        key="LP_W3_SLACK_TOL_C",
+        type_name="float",
+        env_default=_float_env("LP_W3_SLACK_TOL_C", "0.5"),
+        min_value=0.0,
+        max_value=2.0,
+        description=(
+            "W3 plausibility gate (#944): a slot only counts as 'under the comfort "
+            "floor' when the predicted temperature is more than this many °C below "
+            "it. 0.5 = anything above 20.5 against a 21 floor is fine. Does NOT "
+            "change the LP's comfort targets or penalties, nor the emergency-floor "
+            "and ceiling checks (those stay at 0.1)."
+        ),
+    ),
+    "LP_W3_MAX_SLACK_SLOTS": SettingSpec(
+        key="LP_W3_MAX_SLACK_SLOTS",
+        type_name="int",
+        env_default=_int_env("LP_W3_MAX_SLACK_SLOTS", "4"),
+        min_value=0,
+        max_value=48,
+        description=(
+            "W3 plausibility gate (#944): how many 30-min slots may be under the "
+            "floor (by more than LP_W3_SLACK_TOL_C) before the LP trajectory is "
+            "rejected and the tier rule drives the Daikin instead."
+        ),
+    ),
     "LP_W3_PEAK_COAST_DELTA_C": SettingSpec(
         key="LP_W3_PEAK_COAST_DELTA_C",
         type_name="float",

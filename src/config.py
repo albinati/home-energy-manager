@@ -1045,8 +1045,7 @@ class Config:
     # Comfort-slack gate: the LP uses slack only when the pump cannot hold the
     # floor. More than MAX_SLACK_SLOTS slots with slack > SLACK_TOL_C → the
     # model cannot hold the house → LP source unavailable for that plan.
-    LP_W3_SLACK_TOL_C: float = float(os.getenv("LP_W3_SLACK_TOL_C", "0.1"))
-    LP_W3_MAX_SLACK_SLOTS: int = int(os.getenv("LP_W3_MAX_SLACK_SLOTS", "4"))
+    # LP_W3_SLACK_TOL_C / LP_W3_MAX_SLACK_SLOTS are RUNTIME settings since #944 (properties below).
     # LWT pre-heat demand gate: drop phantom single-quantum onecta_cache
     # buckets (the #760 learner guard) before summing trailing heating (#749/#807).
     DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER: bool = os.getenv(
@@ -2667,6 +2666,24 @@ class Config:
     # #820 — the owner's comfort policy, tunable without a restart: how cold the
     # house may drift at night, how far it may coast through the peak band, and
     # WHICH room temperature stands for "the house".
+    @property
+    def LP_W3_SLACK_TOL_C(self) -> float:
+        """#944 — floor slack (°C) the W3 plausibility gate tolerates per slot."""
+        return float(self._rt_get("LP_W3_SLACK_TOL_C"))
+
+    @LP_W3_SLACK_TOL_C.setter
+    def LP_W3_SLACK_TOL_C(self, value: float) -> None:
+        self._rt_set("LP_W3_SLACK_TOL_C", float(value))
+
+    @property
+    def LP_W3_MAX_SLACK_SLOTS(self) -> int:
+        """#944 — how many slots may exceed the slack tolerance before the gate vetoes."""
+        return int(self._rt_get("LP_W3_MAX_SLACK_SLOTS"))
+
+    @LP_W3_MAX_SLACK_SLOTS.setter
+    def LP_W3_MAX_SLACK_SLOTS(self, value: int) -> None:
+        self._rt_set("LP_W3_MAX_SLACK_SLOTS", int(value))
+
     @property
     def LP_W3_NIGHT_FLOOR_C(self) -> float:
         return float(self._rt_get("LP_W3_NIGHT_FLOOR_C"))

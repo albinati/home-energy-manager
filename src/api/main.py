@@ -1949,6 +1949,17 @@ def _apply_written_lwt_offsets(slots_out, today_local, win_start_utc, win_end_ut
             s["lwt_offset"], s["offset_source"] = 0, "none"
 
 
+def _lwt_source_effective_fields() -> dict[str, Any]:
+    from ..scheduler.lp_dispatch import read_lwt_source_effective
+
+    eff = read_lwt_source_effective() or {}
+    return {
+        "lwt_source_effective": eff.get("source"),
+        "lwt_source_effective_reason": eff.get("reason"),
+        "lwt_source_effective_at": eff.get("at"),
+    }
+
+
 @app.get("/api/v1/daikin/heating-plan")
 async def daikin_heating_plan():
     """Per-slot heating-plan timeline for **yesterday · today · tomorrow**,
@@ -2192,6 +2203,8 @@ async def daikin_heating_plan():
         "high_temp_c": high_c,
         "lwt_source": str(getattr(config, "DAIKIN_LWT_SOURCE", "tier") or "tier"),
         "coast_mode": str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback"),
+        # #944: what really drove the last dispatch (lp | tier) and why.
+        **_lwt_source_effective_fields(),
         "days": days_out,
         "slots": slots_out,
     }
