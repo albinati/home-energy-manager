@@ -125,7 +125,7 @@ export function buildDaySeries(inp: SeriesInput): DaySeries {
       if (isNum(s.pv_planned_kwh)) { cmpA += s.pv_actual_kwh; cmpE += s.pv_planned_kwh; cmpN++; }
     }
     const lf = s.load_forecast_kwh;
-    if (isNum(lf) && (!isToday || mid > nowMs)) out.loadFc.push({ t: mid, v: lf * 2 });
+    if (isNum(lf)) out.loadFc.push({ t: mid, v: lf * 2 });
   }
   if (fcN > 0 && fcSum < MIN_DAY_FORECAST_KWH) {
     out.pvFc = [];                       // an all-zero day forecast is a failed provider, not a dark day
@@ -144,7 +144,6 @@ export function buildDaySeries(inp: SeriesInput): DaySeries {
       if (isNum(s.soc_percent)) out.socAct.push({ t: t + SLOT_MS, v: s.soc_percent });
       if (isNum(s.consumption_kwh) && s.consumption_kwh > 0) out.loadAct.push({ t: t + SLOT_MS / 2, v: s.consumption_kwh * 2 });
     }
-    if (out.loadAct.length && out.loadFc.length) out.loadFc.unshift({ t: nowMs, v: out.loadAct[out.loadAct.length - 1].v });
   }
 
   // Planned battery: the plan's soc_kwh (end of slot) as % of the pack. Only what exists.

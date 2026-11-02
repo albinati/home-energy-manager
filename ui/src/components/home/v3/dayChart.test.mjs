@@ -166,16 +166,23 @@ test("series (#6): committed plan wins; an all-zero forecast is missing, not 0 s
   assert.ok(Math.abs(t.pvForecastKwh - 0.8) < 1e-9);
 });
 
-test("series (#8): load forecast keeps only points after now (no step back)", () => {
+test("series: load forecast spans the whole day, independent of measured load (no stitch point)", () => {
   const bounds = localDayBounds("2026-11-01", TZ);
-  const nowMs = Date.parse("2026-11-01T12:20:00Z");   // inside the 12:00 slot, whose midpoint is 12:15
+  const nowMs = Date.parse("2026-11-01T12:20:00Z");
   const pv = [{ date: "2026-11-01", now_utc: "", slots: [
+    slot("2026-11-01T10:00:00Z", { load_forecast_kwh: 0.3 }),
     slot("2026-11-01T12:00:00Z", { load_forecast_kwh: 0.5 }),
     slot("2026-11-01T12:30:00Z", { load_forecast_kwh: 0.5 }),
   ] }];
-  const s = buildDaySeries({ bounds, nowMs, isToday: true, pv, exec: [], timeline: null, capacityKwh: null, socNowPct: null });
-  assert.ok(s.loadFc.every((p) => p.t > nowMs));
-  assert.equal(s.loadFc.length, 1);
+  const exec = [{ slots: [{ slot_utc: "2026-11-01T10:00:00Z", consumption_kwh: 0.25 }] }];
+  const s = buildDaySeries({ bounds, nowMs, isToday: true, pv, exec, timeline: null, capacityKwh: null, socNowPct: null });
+  assert.equal(s.loadFc.length, 3);
+  assert.ok(s.loadFc.some((p) => p.t < nowMs));
+  assert.ok(!s.loadFc.some((p) => p.t === nowMs));   // no stitch point
+  assert.deepEqual(s.loadFc.map((p) => p.v), [0.6, 1, 1]);
+  assert.equal(s.loadAct.length, 1);
+  const t = buildDaySeries({ bounds: localDayBounds("2026-11-02", TZ), nowMs, isToday: false, pv: [{ date: "2026-11-02", now_utc: "", slots: [slot("2026-11-02T10:00:00Z", { load_forecast_kwh: 0.4 })] }], exec: [], timeline: null, capacityKwh: null, socNowPct: null });
+  assert.equal(t.loadFc.length, 1);
 });
 
 test("bands (#1): detail line is real text with the whole band", () => {
