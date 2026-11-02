@@ -1653,8 +1653,11 @@ def _peak_entry_floor_indices(
     """Slot indices where a peak tier window begins (``expensive`` /
     ``severe_peak`` on Agile, ``band_peak`` on a banded tariff — #805).
 
-    Reuses the calendar/tier classifier per LOCAL day (same smoothing, same
-    median) so the "peak" the charge floor protects is word-for-word the one
+    On a banded (TOU) tariff the band structure is detected once over the
+    WHOLE horizon (``detect(..., short_ok=True)``, #930) and applied to every
+    local day, so a partial first day cannot misread the bands. On dynamic
+    tariffs it reuses the calendar/tier classifier per LOCAL day (same
+    smoothing, same median) so the "peak" the charge floor protects is word-for-word the one
     the family calendar shows and the tier_boundary MPC triggers fire for.
     On a mid-day replan the first local day is partial — the classifier then
     works on the remaining slots' median, which is the horizon the floor is
@@ -1668,7 +1671,8 @@ def _peak_entry_floor_indices(
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     n = min(len(slot_starts_utc), len(prices))
     # #930 — on a banded (TOU) tariff the bands are a fixed local-clock
-    # structure, so detect them over the WHOLE horizon (as ``solve_lp`` does)
+    # structure, so detect them over the WHOLE horizon (like ``solve_lp``, but with
+    # ``short_ok=True``, which ``solve_lp`` does not pass)
     # and apply them to every local day. Detecting per day broke when slot 0
     # was 20:00-23:30: the partial first day held only the 22-24 cheap slots,
     # ``detect`` saw one price cluster, called it flat, the day band was read
@@ -1679,6 +1683,8 @@ def _peak_entry_floor_indices(
         _st = detect([float(p) for p in prices[:n]], short_ok=True)
         if _st.is_banded:
             horizon_structure = _st
+        else:
+            logger.debug("peak_entry: horizon not banded (%s) — per-day classify", _st.reason)
     by_day: dict[Any, list[Slot]] = {}
     for i in range(n):
         st = slot_starts_utc[i]
