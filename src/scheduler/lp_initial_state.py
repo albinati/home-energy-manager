@@ -59,7 +59,7 @@ def read_lp_initial_state(
     guarantee even when the MCP-process cache is cold.
 
     ``slot0_utc`` (#929): start of LP slot 0. When given and
-    ``LP_INITIAL_STATE_ROLL_FORWARD_ENABLED`` is on, SoC and tank are rolled
+    ``LP_INITIAL_SOC_ROLL_FORWARD_ENABLED`` / ``LP_INITIAL_TANK_ROLL_FORWARD_ENABLED`` are on, SoC and tank are rolled
     forward from their reading time to slot 0 (``lp_roll_forward``); the audit
     trail lands in ``LpInitialState.roll_forward``. Callers that omit it keep
     the legacy "state at read time" behaviour.
@@ -301,7 +301,7 @@ def _reheat_cap_c(tank_c: float, setpoint_c: Any, reading_t: datetime, now: date
             boost = False
     if not boost:
         try:
-            boost = bool(db.get_powerful_action_windows(reading_t.isoformat(), now.isoformat()))
+            boost = bool(db.get_powerful_action_windows(reading_t.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ")))
         except Exception:  # noqa: BLE001
             boost = False
     return float(config.DHW_TEMP_MAX_C) if boost else None
