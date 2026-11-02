@@ -209,7 +209,7 @@ def bs(monkeypatch, tmpdb):
     notified = []
     monkeypatch.setattr("src.daikin_bulletproof.apply_scheduled_daikin_params",
                         lambda dev, client, params, trigger, **kw: applied.append((params, trigger)) or True)
-    monkeypatch.setattr("src.notifier.notify_risk", lambda msg, extra=None: notified.append(extra))
+    monkeypatch.setattr("src.notifier.report_command_failure", lambda kind, msg, **kw: notified.append(kw.get("extra")))
     replan = MagicMock(return_value=True)
 
     def run(indoor, in_peak=False, now_=now):
@@ -475,7 +475,7 @@ def osc(monkeypatch, tmpdb):
     calls = []
     monkeypatch.setattr("src.daikin_bulletproof.apply_scheduled_daikin_params",
                         lambda dev, client, params, trigger, **kw: calls.append(kw) or True)
-    monkeypatch.setattr("src.notifier.notify_risk", lambda msg, extra=None: None)
+    monkeypatch.setattr("src.notifier.report_command_failure", lambda *a, **kw: None)
     monkeypatch.setattr(db, "get_latest_indoor_reading", lambda max_age_minutes=30: {"temp_c": 10.0})
     return now, plan_date, rid, calls
 
@@ -547,7 +547,7 @@ def test_hold_applies_to_tier_source_too(monkeypatch, osc):
 def test_dedupe_key_is_hold_start_not_row_start(monkeypatch, osc):
     now, plan_date, rid, _ = osc
     seen = []
-    monkeypatch.setattr("src.notifier.notify_risk", lambda msg, extra=None: seen.append(extra["warning_key"]))
+    monkeypatch.setattr("src.notifier.report_command_failure", lambda kind, msg, **kw: seen.append(kw["extra"]["warning_key"]))
     _fire(now, plan_date)
     assert seen == [f"lwt_backstop_{now.astimezone(ZoneInfo('Europe/London')):%Y-%m-%d_%H%M}"]
 
@@ -582,7 +582,7 @@ def test_backstop_apply_not_written_keeps_row_and_counter(monkeypatch, osc):
     monkeypatch.setattr("src.daikin_bulletproof.apply_scheduled_daikin_params",
                         lambda dev, client, params, trigger, **kw: False)
     notified = []
-    monkeypatch.setattr("src.notifier.notify_risk", lambda msg, extra=None: notified.append(1))
+    monkeypatch.setattr("src.notifier.report_command_failure", lambda *a, **kw: notified.append(1))
     out = _fire(now, plan_date)
     assert not out["fired"] and lwt_coast._backstop_ticks >= 2          # still armed
     assert db.get_action_by_id(rid)["status"] == "active"

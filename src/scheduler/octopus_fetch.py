@@ -9,7 +9,7 @@ from typing import Any
 from .. import db
 from ..config import config
 from ..foxess.client import FoxESSClient, FoxESSError
-from ..notifier import notify_critical
+from ..notifier import report_command_failure
 from .agile import fetch_agile_export_rates, fetch_agile_rates
 
 logger = logging.getLogger(__name__)
@@ -189,9 +189,12 @@ def _maybe_survival_mode(
         return
 
     db.update_octopus_fetch_state(survival_mode_since=now.isoformat())
-    notify_critical(
-        "Survival mode: no Octopus Agile rates for 24h in this failure streak. "
-        "Fox ESS Scheduler V3 disabled; inverter set to Self Use until the next successful fetch."
+    report_command_failure(
+        "octopus_survival_mode",
+        "Sem tarifas Octopus há 24h: o plano não pode ser calculado e a bateria está fora do plano. "
+        "HEM desligou o Scheduler V3 do Fox e colocou o inversor em Self Use até a próxima "
+        "busca bem-sucedida. Se persistir, confira a chave/API da Octopus.",
+        recovered=False, device="foxess",
     )
     if not fox or config.OPENCLAW_READ_ONLY:
         return
@@ -213,6 +216,12 @@ def _maybe_survival_mode(
         )
     except FoxESSError as e:
         logger.warning("Survival mode Fox fallback failed: %s", e)
+        report_command_failure(
+            "octopus_survival_fox_fallback",
+            f"Modo de sobrevivência: a escrita Self Use no Fox falhou ({e}). A bateria segue "
+            "o último agendamento. Coloque o inversor em Self Use no app Fox.",
+            recovered=False, device="foxess",
+        )
 
 
 # #691 export-gap retry state (in-process; a restart re-solves on boot anyway).

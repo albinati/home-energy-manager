@@ -3238,6 +3238,36 @@ def _record_fox_intent(
         logger.warning("Could not record Fox schedule intent: %s", e)
 
 
+_FOX_UPLOAD_FAIL_KEY = "fox_upload_consecutive_failures"
+# #941 -- push command_failed on the 2nd consecutive failed Fox upload (one failure
+# is retried by the next solve and is not paged).
+FOX_UPLOAD_FAIL_PUSH_THRESHOLD = 2
+
+
+def _track_fox_upload_result(ok: bool, error: str = "") -> None:
+    """Persist the consecutive failed-upload counter (kv_state); a success resets it."""
+    try:
+        if ok:
+            if db.get_kv(_FOX_UPLOAD_FAIL_KEY):
+                db.set_kv(_FOX_UPLOAD_FAIL_KEY, "0")
+            return
+        n = int(db.get_kv(_FOX_UPLOAD_FAIL_KEY, "0") or 0) + 1
+        db.set_kv(_FOX_UPLOAD_FAIL_KEY, str(n))
+        if n >= FOX_UPLOAD_FAIL_PUSH_THRESHOLD:
+            from ..notifier import report_command_failure
+
+            report_command_failure(
+                "fox_upload_failed",
+                f"O upload do plano para o Fox falhou {n} vezes seguidas ({error}). "
+                "O inversor segue o agendamento anterior. HEM tenta de novo a cada recálculo; "
+                "confira o app Fox/API.",
+                recovered=False, device="foxess",
+                extra={"consecutive_failures": n},
+            )
+    except Exception as exc:  # tracking must never change the upload outcome
+        logger.warning("fox upload failure tracking failed: %s", exc)
+
+
 def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGroup]) -> bool:
     fox_ok = False
     if fox and fox.api_key and not config.OPENCLAW_READ_ONLY:
@@ -3266,6 +3296,19 @@ def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGr
                     i, gi.work_mode, gi.start_hour, gi.start_minute, gi.end_hour, gi.end_minute,
                     j, gj.work_mode, gj.start_hour, gj.start_minute, gj.end_hour, gj.end_minute,
                 )
+            try:
+                from ..notifier import report_command_failure
+
+                report_command_failure(
+                    "fox_upload_overlap_refused",
+                    "O plano gerado tem grupos sobrepostos e o upload ao Fox foi recusado; o "
+                    "inversor segue o agendamento anterior. HEM recalcula no próximo ciclo; "
+                    "se repetir, avise para investigar o plano.",
+                    recovered=False, device="foxess",
+                    extra={"overlaps": [list(o) for o in overlaps][:5]},
+                )
+            except Exception as exc:
+                logger.warning("fox overlap report failed: %s", exc)
             return False
         intent = [g.to_api_dict() for g in groups]
         try:
@@ -3275,6 +3318,7 @@ def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGr
             fox_ok = True
             db.save_fox_schedule_state(intent, enabled=True)
             _record_fox_intent(intent, upload_ok=True)
+            _track_fox_upload_result(True)
         except FoxESSError as e:
             logger.warning("Fox Scheduler V3 upload failed: %s", e)
             # Record the plan we FAILED to push (#779). Without this the drift
@@ -3282,6 +3326,7 @@ def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGr
             # which the hardware trivially still matches — so it reported
             # "in sync" through all 37 h of the #777 outage.
             _record_fox_intent(intent, upload_ok=False, error_msg=str(e))
+            _track_fox_upload_result(False, str(e))
         except Exception as e:
             # Only HTTPError becomes FoxESSError; URLError, socket timeouts and
             # a malformed JSON body all escape as themselves. Catching just
@@ -3292,6 +3337,7 @@ def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGr
             # Record and RE-RAISE: swallowing here would change what callers
             # see for every non-Fox exception, which is a separate decision.
             _record_fox_intent(intent, upload_ok=False, error_msg=f"{type(e).__name__}: {e}")
+            _track_fox_upload_result(False, f"{type(e).__name__}: {e}")
             raise
     elif fox and fox.api_key:
         logger.info("Skipping Fox Scheduler V3 upload (read-only)")

@@ -369,11 +369,13 @@ def _record_auth_failure(reason: str) -> None:
             _circuit_notified = True
             try:
                 # Import here to avoid a hard notifier dependency at module load.
-                from ..notifier import notify_risk
-                notify_risk(
-                    "Daikin auth failing repeatedly — refresh_token likely expired. "
-                    "Run `python -m src.daikin.auth` to re-authorise. Falling back "
-                    "to cached/estimated telemetry in the meantime.",
+                from ..notifier import report_command_failure
+                report_command_failure(
+                    "daikin_auth_circuit",
+                    "A autenticação do Daikin falhou várias vezes seguidas (HEM já tentou renovar o "
+                    "token): o refresh_token provavelmente expirou e o HEM não controla mais o Daikin. "
+                    "Refaça o login (re-auth Onecta, deploy/README) — enquanto isso usa telemetria em cache.",
+                    recovered=False, device="daikin",
                     extra={"consecutive_failures": _consecutive_auth_failures, "reason": reason},
                 )
             except Exception:

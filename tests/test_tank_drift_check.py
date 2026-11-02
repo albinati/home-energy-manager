@@ -77,8 +77,7 @@ def test_no_drift_when_planned_shutdown_active(monkeypatch) -> None:
         "params": {"tank_power": False},
     }]
     notify = MagicMock()
-    monkeypatch.setattr(sm, "notify_critical", notify)
-    monkeypatch.setattr(sm, "notify_risk", notify)
+    monkeypatch.setattr("src.notifier.report_command_failure", notify)
     sm._check_tank_power_drift(actions, client, dev, now, trigger="hb")
     client.assert_not_called()
     notify.assert_not_called()
@@ -91,8 +90,7 @@ def test_drift_detected_alerts_and_recovers(monkeypatch) -> None:
     notify_risk = MagicMock()
     notify_critical = MagicMock()
     apply_restore = MagicMock()
-    monkeypatch.setattr(sm, "notify_risk", notify_risk)
-    monkeypatch.setattr(sm, "notify_critical", notify_critical)
+    monkeypatch.setattr("src.notifier.report_command_failure", notify_risk)
     monkeypatch.setattr(sm, "apply_comfort_restore", apply_restore)
 
     now = datetime(2026, 6, 1, 19, 0, tzinfo=UTC)
@@ -100,7 +98,8 @@ def test_drift_detected_alerts_and_recovers(monkeypatch) -> None:
 
     apply_restore.assert_called_once()
     notify_risk.assert_called_once()
-    notify_critical.assert_not_called()
+    assert notify_risk.call_args.kwargs["recovered"] is True
+    assert notify_risk.call_args.args[0] == "tank_power_drift"
     assert sm._TANK_DRIFT_NOTIFIED is True
 
 
@@ -109,7 +108,7 @@ def test_drift_dedup_within_episode(monkeypatch) -> None:
     dev = _FakeDev(tank_on=False)
     client = MagicMock()
     notify_risk = MagicMock()
-    monkeypatch.setattr(sm, "notify_risk", notify_risk)
+    monkeypatch.setattr("src.notifier.report_command_failure", notify_risk)
     monkeypatch.setattr(sm, "apply_comfort_restore", MagicMock())
 
     now = datetime(2026, 6, 1, 19, 0, tzinfo=UTC)
@@ -125,7 +124,7 @@ def test_drift_dedup_resets_when_tank_returns(monkeypatch) -> None:
     dev = _FakeDev(tank_on=False)
     client = MagicMock()
     notify_risk = MagicMock()
-    monkeypatch.setattr(sm, "notify_risk", notify_risk)
+    monkeypatch.setattr("src.notifier.report_command_failure", notify_risk)
     monkeypatch.setattr(sm, "apply_comfort_restore", MagicMock())
 
     now = datetime(2026, 6, 1, 19, 0, tzinfo=UTC)
@@ -149,7 +148,7 @@ def test_drift_respects_user_override(monkeypatch) -> None:
     client = MagicMock()
     notify_risk = MagicMock()
     apply_restore = MagicMock()
-    monkeypatch.setattr(sm, "notify_risk", notify_risk)
+    monkeypatch.setattr("src.notifier.report_command_failure", notify_risk)
     monkeypatch.setattr(sm, "apply_comfort_restore", apply_restore)
 
     now = datetime(2026, 6, 1, 19, 0, tzinfo=UTC)
@@ -181,14 +180,13 @@ def test_drift_alert_only_when_auto_recover_disabled(monkeypatch) -> None:
     notify_critical = MagicMock()
     notify_risk = MagicMock()
     monkeypatch.setattr(sm, "apply_comfort_restore", apply_restore)
-    monkeypatch.setattr(sm, "notify_critical", notify_critical)
-    monkeypatch.setattr(sm, "notify_risk", notify_risk)
+    monkeypatch.setattr("src.notifier.report_command_failure", notify_critical)
 
     sm._check_tank_power_drift([], client, dev, datetime(2026, 6, 1, 19, 0, tzinfo=UTC), trigger="hb")
 
     apply_restore.assert_not_called()
     notify_critical.assert_called_once()
-    notify_risk.assert_not_called()
+    assert notify_critical.call_args.kwargs["recovered"] is False
 
 
 def test_drift_disabled_when_flag_false(monkeypatch) -> None:
@@ -211,13 +209,13 @@ def test_drift_no_recover_in_read_only(monkeypatch) -> None:
     apply_restore = MagicMock()
     notify_critical = MagicMock()
     monkeypatch.setattr(sm, "apply_comfort_restore", apply_restore)
-    monkeypatch.setattr(sm, "notify_critical", notify_critical)
-    monkeypatch.setattr(sm, "notify_risk", MagicMock())
+    monkeypatch.setattr("src.notifier.report_command_failure", notify_critical)
 
     sm._check_tank_power_drift([], client, dev, datetime(2026, 6, 1, 19, 0, tzinfo=UTC), trigger="hb")
 
     apply_restore.assert_not_called()
     notify_critical.assert_called_once()
+    assert notify_critical.call_args.kwargs["recovered"] is False
 
 
 def test_drift_ignores_overridden_row_in_window(monkeypatch) -> None:
@@ -228,7 +226,7 @@ def test_drift_ignores_overridden_row_in_window(monkeypatch) -> None:
     client = MagicMock()
     notify_risk = MagicMock()
     apply_restore = MagicMock()
-    monkeypatch.setattr(sm, "notify_risk", notify_risk)
+    monkeypatch.setattr("src.notifier.report_command_failure", notify_risk)
     monkeypatch.setattr(sm, "apply_comfort_restore", apply_restore)
 
     now = datetime(2026, 6, 1, 17, 0, tzinfo=UTC)

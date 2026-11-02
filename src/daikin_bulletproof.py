@@ -469,12 +469,15 @@ def post_write_verify_job(
             except Exception:  # pragma: no cover
                 pass
             try:
-                from .notifier import notify_risk
+                from .notifier import report_command_failure
 
-                notify_risk(
-                    f"Daikin write not reflected after two reads: expected {expected}, "
-                    f"device {out.get('actual')} (written {written_at}, trigger {trigger})",
-                    extra={"warning_key": key},
+                report_command_failure(
+                    "daikin_write_verify",
+                    f"O Daikin não refletiu a escrita após duas leituras (HEM já repetiu a leitura). "
+                    f"Esperado {expected}, no aparelho {out.get('actual')}. "
+                    "Confira no app Onecta e, se persistir, reaplique o plano.",
+                    recovered=False, device="daikin",
+                    extra={"warning_key": key, "trigger": trigger},
                 )
             except Exception:  # pragma: no cover
                 logger.debug("daikin_write_verify notify failed", exc_info=True)

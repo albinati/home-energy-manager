@@ -196,7 +196,7 @@ def test_target_divergence_alert_is_skipped_while_a_boost_row_is_pending(env, mo
 
 def test_boot_paths_take_the_tank_lock():
     assert "TANK_WRITE_LOCK" in inspect.getsource(sm.recover_on_boot)
-    assert "TANK_WRITE_LOCK" in inspect.getsource(sm.apply_safe_defaults)
+    assert "TANK_WRITE_LOCK" in inspect.getsource(sm._apply_safe_defaults_impl)
 
 
 def test_gated_ticks_do_not_consume_restore_attempts(env, monkeypatch):

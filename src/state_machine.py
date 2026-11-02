@@ -22,7 +22,7 @@ from .daikin_bulletproof import (
 )
 from .foxess.client import FoxESSClient, FoxESSError, scheduler_groups_from_stored_json
 from .foxess.models import _group_fingerprint, fingerprints_match
-from .notifier import notify_critical, notify_risk, notify_user_override
+from .notifier import notify_critical, notify_risk, notify_user_override  # noqa: F401 (notify_critical kept: tests patch it)
 
 logger = logging.getLogger(__name__)
 
@@ -857,7 +857,39 @@ def apply_safe_defaults(
     *,
     trigger: str = "recovery",
 ) -> None:
-    """Force safe house state after arbitrage windows or on fault."""
+    """Force safe house state after arbitrage windows or on fault.
+
+    #941: leg failures are collected and pushed ONCE per call (command_failed),
+    summarising which legs did not apply.
+    """
+    failed_legs: list[str] = []
+    try:
+        _apply_safe_defaults_impl(fox, daikin, trigger=trigger, failed_legs=failed_legs)
+    finally:
+        if failed_legs:
+            try:
+                from .notifier import report_command_failure
+
+                report_command_failure(
+                    "apply_safe_defaults",
+                    "Os padrões seguros não foram aplicados por completo "
+                    f"(trigger={trigger}). Falharam: " + "; ".join(failed_legs) + ". "
+                    "HEM já tentou cada etapa; confira o inversor/Daikin nos apps e reaplique.",
+                    recovered=False,
+                    device="foxess" if any(x.startswith("fox") for x in failed_legs) else "daikin",
+                    extra={"failed_legs": list(failed_legs), "trigger": trigger},
+                )
+            except Exception as exc:
+                logger.warning("apply_safe_defaults failure report failed: %s", exc)
+
+
+def _apply_safe_defaults_impl(
+    fox: FoxESSClient | None,
+    daikin: DaikinClient | None,
+    *,
+    trigger: str,
+    failed_legs: list[str],
+) -> None:
     if fox and not config.OPENCLAW_READ_ONLY:
         # Isolate each set_* call so action_log + logs identify exactly which
         # endpoint Fox rejects. Historically the bundled try/except masked this:
@@ -880,6 +912,7 @@ def apply_safe_defaults(
                 applied[name] = step_value[name]
             except (FoxESSError, ValueError) as e:
                 failures[name] = str(e)
+                failed_legs.append(f"fox {name}: {e}")
                 logger.warning("Fox safe-default step %s failed: %s", name, e)
 
         if fox.api_key and "scheduler_flag" in applied:
@@ -988,6 +1021,7 @@ def apply_safe_defaults(
             trigger=trigger,
             error_msg=str(e),
         )
+        failed_legs.append(f"daikin: {e}")
         logger.warning("Daikin safe defaults failed: %s", e)
 
 
@@ -2118,11 +2152,16 @@ def _check_tank_power_drift(
         _TANK_DRIFT_NOTIFIED = True
         try:
             msg = (
-                "Tank power=OFF and no plan slot scheduled it off — "
-                f"{'force-restored to NORMAL' if recovered else 'manual recovery may be needed'} "
+                "Tanque DESLIGADO sem nenhum slot do plano pedindo isso — "
+                f"{'HEM religou e restaurou o alvo normal' if recovered else 'HEM tentou restaurar e não conseguiu; ligue o tanque no app Onecta'} "
                 f"(trigger={trigger})"
             )
-            notify_critical(msg) if not recovered else notify_risk(msg)
+            from .notifier import report_command_failure
+
+            report_command_failure(
+                "tank_power_drift", msg, recovered=recovered, device="daikin",
+                extra={"trigger": trigger},
+            )
         except Exception as _exc:
             logger.debug("tank-drift notify failed (non-fatal): %s", _exc)
 
@@ -2803,11 +2842,16 @@ def _check_lwt_offset_drift(
         _LWT_DRIFT_NOTIFIED = True
         try:
             msg = (
-                f"LWT offset = {off:+.0f}°C with no plan slot justifying it — "
-                f"{'reset to 0' if recovered else 'manual reset may be needed'} "
+                f"LWT offset = {off:+.0f}°C sem nenhum slot do plano justificando — "
+                f"{'HEM zerou o offset' if recovered else 'HEM tentou zerar e não conseguiu; zere o offset no app Onecta'} "
                 f"(trigger={trigger})"
             )
-            notify_risk(msg)
+            from .notifier import report_command_failure
+
+            report_command_failure(
+                "lwt_offset_drift", msg, recovered=recovered, device="daikin",
+                extra={"trigger": trigger, "lwt_offset": float(off)},
+            )
         except Exception as _exc:
             logger.debug("lwt-drift notify failed (non-fatal): %s", _exc)
 
@@ -2875,6 +2919,7 @@ def heartbeat_repair_fox_scheduler(fox: FoxESSClient) -> None:
     """
     if not fox.api_key:
         return
+    repair_started = False
     try:
         from datetime import date as _date
         flag_on = fox.get_scheduler_flag()
@@ -2883,13 +2928,22 @@ def heartbeat_repair_fox_scheduler(fox: FoxESSClient) -> None:
         warning_key = f"fox_scheduler_disabled_{plan_date}"
         if not flag_on or not hw.enabled:
             if not db.is_warning_acknowledged(warning_key):
-                notify_risk("Fox ESS scheduler flag disabled — check inverter app.")
+                from .notifier import report_command_failure
+
+                # Record-only (#941): the repair below re-enables the flag; a
+                # failure of that repair is pushed from the except branch.
+                report_command_failure(
+                    "fox_scheduler_flag_disabled",
+                    "O flag do agendador Fox estava desligado; o heartbeat do HEM religa.",
+                    recovered=True, device="foxess",
+                )
                 db.acknowledge_warning(warning_key)
         else:
             # Flag is healthy — drop any prior ack so a fresh failure today
             # re-pings exactly once.
             db.clear_warning(warning_key)
         if not config.OPENCLAW_READ_ONLY:
+            repair_started = True
             if not flag_on or not hw.enabled:
                 fox.set_scheduler_flag(True)
             latest = db.get_latest_fox_schedule_state()
@@ -2909,6 +2963,15 @@ def heartbeat_repair_fox_scheduler(fox: FoxESSClient) -> None:
                     )
     except FoxESSError as e:
         logger.warning("Heartbeat Fox Scheduler V3 repair failed: %s", e)
+        if repair_started:
+            from .notifier import report_command_failure
+
+            report_command_failure(
+                "fox_scheduler_repair_failed",
+                f"O reparo do agendador Fox (religar o flag / reenviar o plano) falhou: {e}. "
+                "HEM tenta de novo a cada heartbeat; confira o app Fox e religue o agendador.",
+                recovered=False, device="foxess",
+            )
 
 
 def _recover_missed_restores(

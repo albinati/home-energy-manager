@@ -104,6 +104,11 @@ class AlertType(str, Enum):
     # enabled: ``risk_alert`` is muted on prod (pull-first owner) and must stay so.
     # Pushed once per UTC day, only for status ``none``.
     PV_FORECAST_DEGRADED = "pv_forecast_degraded"
+    # #941 -- a hardware command/actuation is STILL failing after HEM's own retry
+    # or auto-recovery. The only push channel for command failures (owner rule: no
+    # symptom alerts). Own route, seeded enabled: risk_alert/critical_error are muted
+    # on prod because they also carry informational items.
+    COMMAND_FAILED = "command_failed"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -132,6 +137,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "morning_tank_cold": "EnergyMorningTankCold",
     "actuation_stale": "EnergyActuationStale",
     "pv_forecast_degraded": "EnergyPvForecastDegraded",
+    "command_failed": "EnergyCommandFailed",
 }
 
 
@@ -159,6 +165,7 @@ _TELEGRAM_HEADERS: dict[str, str] = {
     "lp_failure": "🚨 LP solver failure",
     "tank_target_divergence": "🌡️ Tanque fora do plano",
     "morning_tank_cold": "🚿 Tanque frio pro banho",
+    "command_failed": "🛑 Comando não aplicado",
 }
 
 
@@ -1128,6 +1135,55 @@ def notify_actuation_stale(issues: list[str]) -> None:
 
 def notify_risk(message: str, extra: dict[str, Any] | None = None) -> None:
     _dispatch(AlertType.RISK_ALERT, message, urgent=True, extra=extra)
+
+
+def report_command_failure(
+    kind: str,
+    detail: str,
+    *,
+    recovered: bool,
+    device: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """#941: single entry point for hardware command/actuation failures.
+
+    Always recorded (action_log). Pushed via the ``command_failed`` route ONLY when
+    ``recovered`` is False, i.e. still broken after HEM's own retry/auto-recovery;
+    deduped once per (kind, local day). ``detail`` should say what failed, what HEM
+    already tried and what the owner can do (pt-BR, short).
+    """
+    payload = dict(extra or {})
+    payload.update({"kind": kind, "device": device, "recovered": bool(recovered)})
+    if recovered:
+        _record_notification(
+            AlertType.COMMAND_FAILED, f"[{device}/{kind}] recuperado: {detail}",
+            urgent=False, extra=payload,
+        )
+        return
+    key = None
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE or "UTC")
+        key = f"command_failed_pushed:{kind}:{_dt.now(tz).date().isoformat()}"
+        if db.get_kv(key):
+            _record_notification(
+                AlertType.COMMAND_FAILED, f"[{device}/{kind}] (repetido hoje) {detail}",
+                urgent=False, extra=payload,
+            )
+            return
+    except Exception as exc:  # dedupe must never block the alert
+        logger.warning("command_failed dedupe lookup failed: %s", exc)
+    _dispatch(
+        AlertType.COMMAND_FAILED, f"Comando não aplicado ({device}/{kind}): {detail}",
+        urgent=True, extra=payload,
+    )
+    if key:
+        try:
+            db.set_kv(key, "1")
+        except Exception as exc:
+            logger.warning("command_failed dedupe write failed: %s", exc)
 
 
 def notify_pv_forecast_degraded(message: str, extra: dict[str, Any] | None = None) -> None:
