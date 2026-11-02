@@ -1662,10 +1662,23 @@ def _peak_entry_floor_indices(
     """
     from zoneinfo import ZoneInfo
 
-    from ..google_calendar.tiers import Slot, classify_day
+    from ..energy.tariff_structure import detect, prefer_plan_thresholds
+    from ..google_calendar.tiers import Slot, classify_day, classify_day_banded
 
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     n = min(len(slot_starts_utc), len(prices))
+    # #930 — on a banded (TOU) tariff the bands are a fixed local-clock
+    # structure, so detect them over the WHOLE horizon (as ``solve_lp`` does)
+    # and apply them to every local day. Detecting per day broke when slot 0
+    # was 20:00-23:30: the partial first day held only the 22-24 cheap slots,
+    # ``detect`` saw one price cluster, called it flat, the day band was read
+    # as peak, the entry landed at index 0 and the 24:00 cheap exit was lost.
+    # Dynamic (Agile) tariffs keep the per-day relative classifier.
+    horizon_structure = None
+    if n and prefer_plan_thresholds():
+        _st = detect([float(p) for p in prices[:n]], short_ok=True)
+        if _st.is_banded:
+            horizon_structure = _st
     by_day: dict[Any, list[Slot]] = {}
     for i in range(n):
         st = slot_starts_utc[i]
@@ -1696,7 +1709,12 @@ def _peak_entry_floor_indices(
     prev_end: datetime | None = None
     for _, slots in sorted(by_day.items()):
         prev_peak_end = None
-        for w in classify_day(slots):
+        windows = (
+            classify_day_banded(slots, horizon_structure)
+            if horizon_structure is not None
+            else classify_day(slots)
+        )
+        for w in windows:
             contiguous = prev_end is not None and prev_end == w.start_utc
             if w.tier.key in peak_keys:
                 # A severe_peak window butted against an expensive one is the SAME

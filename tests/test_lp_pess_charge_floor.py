@@ -417,3 +417,53 @@ def test_peak_entry_merges_contiguous_expensive_and_severe_windows():
         plan.price_pence[i] = 28.0
     idx = opt_mod._peak_entry_floor_indices(plan.slot_starts_utc, plan.price_pence)
     assert idx == [30]
+
+
+def test_wire_cosy_evening_slot0_floor_lands_at_midnight_exit(monkeypatch):
+    """#930 at the wire: slot 0 = 22:00 local on Cosy. The soc_floor_kwh handed
+    to the re-solve must carry the 24:00 cheap-exit floor (soc[4] -> slot 3)
+    and nothing at index 0."""
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")
+    monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "E-1R-COSY-22-12-08-H")
+    monkeypatch.setattr(config, "OCTOPUS_TARIFF_STRUCTURE", "auto", raising=False)
+    monkeypatch.setattr(config, "LP_PESS_CHARGE_FLOOR_SCOPE", "peak_entry")
+    monkeypatch.setattr(config, "LP_PESS_CHARGE_FLOOR_BAND_EXITS", True, raising=False)
+    tz = ZoneInfo("Europe/London")
+
+    def price(h):
+        if 4 <= h < 7 or 13 <= h < 16 or h >= 22:
+            return 12.4868
+        return 38.174 if 16 <= h < 19 else 25.4461
+
+    n = 96
+    t0 = datetime(2026, 10, 28, 22, 0, tzinfo=tz).astimezone(UTC)
+    starts = [t0 + timedelta(minutes=30 * i) for i in range(n)]
+
+    def mk(soc):
+        return SimpleNamespace(
+            ok=True, status="Optimal", objective_pence=100.0, slot_starts_utc=starts,
+            soc_kwh=[soc] * (n + 1),
+            price_pence=[price(s.astimezone(tz).hour) for s in starts],
+        )
+
+    nominal, pess = mk(2.0), mk(6.0)
+    floored = mk(6.0)
+    floored.soc_floor_slack_kwh = 0.0
+    captured = {}
+
+    def fake_solve(**kw):
+        captured["floor"] = kw.get("soc_floor_kwh")
+        return floored
+
+    monkeypatch.setattr("src.scheduler.lp_optimizer.solve_lp", fake_solve)
+    out = opt_mod._apply_pessimistic_charge_floor(
+        nominal, {"pessimistic": SimpleNamespace(plan=pess)},
+        solve_kwargs={}, exogenous_snapshot={},
+    )
+    assert out is floored
+    floor = captured["floor"]
+    nz = [i for i, f in enumerate(floor) if f > 0.0]
+    assert nz and nz[0] == 3         # soc[4] = 00:00 local, the cheap-band exit
+    assert floor[0] == 0.0
