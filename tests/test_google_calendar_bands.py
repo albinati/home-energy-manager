@@ -256,3 +256,61 @@ def test_publisher_skips_partial_day(monkeypatch):
     svc = _service_with_events([])
     r = publisher._publish_day(svc, DAY, TZ)
     assert r.skipped_reason == "partial_rates" and r.created == 0
+
+
+# ── #930: horizon-wide band classification for the floor indices ─────────────
+
+
+def _horizon(start_local: datetime, n: int = 96):
+    """n Cosy half-hours starting at ``start_local`` (aware, local)."""
+    starts, prices = [], []
+    for i in range(n):
+        loc = (start_local.astimezone(UTC) + timedelta(minutes=30 * i)).astimezone(TZ)
+        starts.append(loc.astimezone(UTC))
+        prices.append(_price(loc.hour))
+    return starts, prices
+
+
+@pytest.mark.parametrize("hh,mm", [(19, 30), (20, 0), (21, 0), (22, 0), (23, 30)])
+def test_cosy_floor_has_midnight_cheap_exit_for_any_evening_slot0(monkeypatch, hh, mm):
+    """#930 - a partial first day holding only the 22-24 cheap slots used to
+    detect as flat; the 24:00 cheap-exit floor was lost and index 0 became a
+    bogus peak entry."""
+    from src.scheduler.optimizer import _peak_entry_floor_indices
+
+    monkeypatch.setattr(config, "LP_PESS_CHARGE_FLOOR_BAND_EXITS", True, raising=False)
+    starts, prices = _horizon(datetime(2026, 10, 28, hh, mm, tzinfo=TZ))
+    idx = _peak_entry_floor_indices(starts, prices)
+    locs = [starts[i].astimezone(TZ) for i in idx]
+    assert 0 not in idx
+    got = [(t.day, t.hour, t.minute) for t in locs]
+    assert got[:3] == [(29, 0, 0), (29, 7, 0), (29, 16, 0)]
+
+
+def test_cosy_floor_indices_on_dst_change_days(monkeypatch):
+    """BST->GMT (2026-10-25, 25 h day) and GMT->BST (2026-03-29): bands follow the local clock."""
+    from src.scheduler.optimizer import _peak_entry_floor_indices
+
+    monkeypatch.setattr(config, "LP_PESS_CHARGE_FLOOR_BAND_EXITS", True, raising=False)
+    for start, day in ((datetime(2026, 10, 24, 22, 0, tzinfo=TZ), 25),
+                       (datetime(2026, 3, 28, 22, 0, tzinfo=TZ), 29)):
+        starts, prices = _horizon(start)
+        idx = _peak_entry_floor_indices(starts, prices)
+        locs = [starts[i].astimezone(TZ) for i in idx]
+        assert [(t.day, t.hour) for t in locs][:3] == [(day, 0), (day, 7), (day, 16)]
+
+
+def test_agile_floor_indices_unchanged_with_evening_slot0(monkeypatch):
+    """Agile (dynamic): the per-day relative classifier still finds the evening peak."""
+    from src.scheduler.optimizer import _peak_entry_floor_indices
+
+    monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "E-1R-AGILE-24-10-01-H")
+    start = datetime(2026, 9, 10, 20, 0, tzinfo=UTC)
+    starts = [start + timedelta(minutes=30 * i) for i in range(96)]
+    prices = [15.0 + (i % 5) * 0.37 for i in range(96)]
+    for i, st in enumerate(starts):
+        if st.astimezone(TZ).hour in (17, 18):  # BST evening peak
+            prices[i] = 45.0 + (i % 3)
+    idx = _peak_entry_floor_indices(starts, prices)
+    hours = [starts[i].astimezone(TZ).hour for i in idx]
+    assert hours and all(h == 17 for h in hours)
