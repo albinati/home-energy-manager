@@ -180,7 +180,7 @@ test("series: load forecast spans the whole day, independent of measured load (n
   assert.ok(s.loadFc.some((p) => p.t < nowMs));
   assert.ok(!s.loadFc.some((p) => p.t === nowMs));   // no stitch point
   assert.deepEqual(s.loadFc.map((p) => p.v), [0.6, 1, 1]);
-  assert.equal(s.loadAct.length, 1);
+  assert.equal(s.loadAct.length, 1);   // old backend (no load_actual_kwh): exec fallback
   const t = buildDaySeries({ bounds: localDayBounds("2026-11-02", TZ), nowMs, isToday: false, pv: [{ date: "2026-11-02", now_utc: "", slots: [slot("2026-11-02T10:00:00Z", { load_forecast_kwh: 0.4 })] }], exec: [], timeline: null, capacityKwh: null, socNowPct: null });
   assert.equal(t.loadFc.length, 1);
 });
@@ -245,4 +245,18 @@ test("real payload shapes: null freshness, Agile tier keys, midnight end_local",
   assert.equal(tierOf({ key: "agile_peak", label: "peak" }), "peak");
   assert.equal(tierOf({ key: "band_cheap", label: "cheap" }), "cheap");
   assert.equal(span("22:00", "00:00"), "22–00");
+});
+
+test("series: measured load comes from pv load_actual_kwh, not exec consumption", () => {
+  const bounds = localDayBounds("2026-11-01", TZ);
+  const nowMs = Date.parse("2026-11-01T12:20:00Z");
+  const pv = [{ date: "2026-11-01", now_utc: "", slots: [
+    slot("2026-11-01T10:00:00Z", { load_forecast_kwh: 0.3, load_actual_kwh: 0.4 }),
+    slot("2026-11-01T10:30:00Z", { load_forecast_kwh: 0.3, load_actual_kwh: null }),
+    slot("2026-11-01T13:00:00Z", { load_forecast_kwh: 0.3, load_actual_kwh: 0.9 }),   // future: ignored
+  ] }];
+  const exec = [{ slots: [{ slot_utc: "2026-11-01T10:00:00Z", consumption_kwh: 0.1 }] }];
+  const s = buildDaySeries({ bounds, nowMs, isToday: true, pv, exec, timeline: null, capacityKwh: null, socNowPct: null });
+  assert.deepEqual(s.loadAct.map((p) => p.v), [0.8]);
+  assert.equal(s.loadFc.length, 3);
 });

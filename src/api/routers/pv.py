@@ -132,6 +132,15 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         logger.warning("pv/today: realised roll-up failed (%s)", e)
         actual_map = {}
 
+    # Realised HOUSE LOAD: same trapezoidal integrator as load_error_log
+    # (rebuild_load_error_log_for_date), so the chart's measured line shares the
+    # forecast's basis. NB the helper treats NULL load samples as 0 kW.
+    try:
+        load_actual_map = db._half_hourly_grid_kwh_for_day(d, "load_power_kw")
+    except Exception as e:
+        logger.warning("pv/today: realised load roll-up failed (%s)", e)
+        load_actual_map = {}
+
     # --- Full-day overlays so the chart needs only this one endpoint (no
     # client-side key-matching across differently-formatted ISO strings):
     #   import price (Agile, per slot), residual load forecast (per slot),
@@ -231,6 +240,8 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         # (and gaps) stay null so the chart draws a clean planned-only line.
         a_raw = actual_map.get(key)
         a: float | None = round(float(a_raw), 4) if (elapsed and a_raw is not None) else None
+        la_raw = load_actual_map.get(key)
+        load_actual: float | None = round(float(la_raw), 4) if (elapsed and la_raw is not None) else None
         local = st.astimezone(tz)
         committed = committed_load_by.get(key)
         # base_load_kwh: prefer the committed residual for this slot (true
@@ -254,6 +265,9 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
             # Consumption chart's "Forecast" line should draw against the
             # total-demand stack. Null where no solve covered the slot.
             "load_forecast_kwh": round(committed[0], 4) if committed is not None else None,
+            # integrated measured house load (pv_realtime_history.load_power_kw);
+            # null for future slots and slots without telemetry.
+            "load_actual_kwh": load_actual,
             "kind": kind_by.get(key),
         })
         if elapsed and a is not None:
