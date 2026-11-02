@@ -32,7 +32,7 @@ def _plan(slack=None, em=None, hi=None, n=12):
 
 def test_defaults_are_runtime_settings():
     from src.runtime_settings import SCHEMA
-    assert float(config.LP_W3_SLACK_TOL_C) == 0.5
+    assert float(config.LP_W3_SLACK_TOL_C) == 0.4
     assert int(config.LP_W3_MAX_SLACK_SLOTS) == 4
     assert "LP_W3_SLACK_TOL_C" in SCHEMA and "LP_W3_MAX_SLACK_SLOTS" in SCHEMA
 
@@ -98,7 +98,7 @@ def test_settings_round_trip(monkeypatch, tmp_path):
 
 def test_gate_snapshot_and_effective_source_kv(monkeypatch):
     snap = ld.w3_gate_snapshot(_plan(slack=[0.13] * 7 + [0.0] * 5))
-    assert snap == {"ok": True, "reason": "ok", "slack_tol_c": 0.5, "max_slack_slots": 4}
+    assert snap == {"ok": True, "reason": "ok", "slack_tol_c": 0.4, "max_slack_slots": 4}
     store: dict[str, str] = {}
     monkeypatch.setattr(ld.db, "set_kv", lambda k, v: store.__setitem__(k, v))
     monkeypatch.setattr(ld.db, "get_kv", lambda k, d=None: store.get(k, d))
@@ -106,3 +106,32 @@ def test_gate_snapshot_and_effective_source_kv(monkeypatch):
     eff = ld.read_lwt_source_effective()
     assert eff["source"] == "tier" and eff["reason"] == "comfort_slack:6_slots>4"
     json.dumps(eff)
+
+
+def test_boundary_exactly_at_tolerance_passes_strict_greater():
+    assert w3_trajectory_plausible(_plan(slack=[0.4] * 12)) == (True, "ok")
+    ok, reason = w3_trajectory_plausible(_plan(slack=[0.41] * 5 + [0.0] * 7))
+    assert not ok and reason.startswith("comfort_slack:5_slots")
+
+
+def test_night_slack_vetoed_via_emergency_when_floors_equal():
+    # prod: emergency floor == night floor == 20; floor slack 0.3 is tolerated,
+    # but the same shortfall on the emergency floor is not.
+    plan = _plan(slack=[0.3] * 3 + [0.0] * 9, em=[0.3] * 3 + [0.0] * 9)
+    assert w3_trajectory_plausible(plan) == (False, "emergency_slack")
+
+
+def test_tolerance_must_stay_below_backstop_margin(monkeypatch, tmp_path):
+    import pytest
+
+    from src import db
+    from src import runtime_settings as rs
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.db"), raising=False)
+    db.init_db()
+    with pytest.raises(rs.SettingValidationError):
+        rs.set_setting("LP_W3_SLACK_TOL_C", 0.5)
+    rs.set_setting("LP_W3_SLACK_TOL_C", 0.4)
+    # a stray value (env/override) is clamped to margin - 0.1 at gate time
+    monkeypatch.setattr(config, "LP_W3_SLACK_TOL_C", 0.9)
+    ok, reason = w3_trajectory_plausible(_plan(slack=[0.45] * 5 + [0.0] * 7))
+    assert not ok and reason.startswith("comfort_slack:5_slots")

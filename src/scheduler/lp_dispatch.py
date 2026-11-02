@@ -651,7 +651,13 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     slack = plan.comfort_slack_c or []
     slack_hi = getattr(plan, "comfort_slack_hi_c", None) or []
     heat = getattr(plan, "space_electric_kwh", None) or []
-    s_tol = float(getattr(config, "LP_W3_SLACK_TOL_C", 0.5))
+    s_tol = float(getattr(config, "LP_W3_SLACK_TOL_C", 0.4))
+    # #944: never let the gate accept a prediction sitting at the cold-backstop
+    # trigger (live floor - LWT_COMFORT_BACKSTOP_MARGIN_C): clamp to margin - 0.1.
+    _margin = float(getattr(config, "LWT_COMFORT_BACKSTOP_MARGIN_C", 0.5))
+    if s_tol > _margin - 0.1 + 1e-9:
+        logger.warning("LP_W3_SLACK_TOL_C %.2f >= backstop margin %.2f - 0.1: clamped", s_tol, _margin)
+        s_tol = max(0.0, _margin - 0.1)
     strict_tol = _W3_STRICT_SLACK_TOL_C
     max_slack_slots = int(getattr(config, "LP_W3_MAX_SLACK_SLOTS", 4))
     # #866: with an emitter lag a heat deficit in the first ceil(tau/30)+1 slots cannot be
@@ -726,7 +732,7 @@ def w3_gate_snapshot(plan: LpPlan) -> dict[str, Any]:
     ok, reason = w3_trajectory_plausible(plan)
     return {
         "ok": bool(ok), "reason": reason,
-        "slack_tol_c": float(getattr(config, "LP_W3_SLACK_TOL_C", 0.5)),
+        "slack_tol_c": float(getattr(config, "LP_W3_SLACK_TOL_C", 0.4)),
         "max_slack_slots": int(getattr(config, "LP_W3_MAX_SLACK_SLOTS", 4)),
     }
 
@@ -1932,6 +1938,7 @@ def _write_lwt_preheat_actions(
     quota headroom here, dropping trailing pairs so we can never exceed budget.
     """
     if not config.DAIKIN_LWT_PREHEAT_ENABLED:
+        record_lwt_source_effective("none", "preheat_off")
         return 0
 
     # Demand gate (#540 quick win, #847): no BOOST offsets without measured
@@ -1959,6 +1966,7 @@ def _write_lwt_preheat_actions(
         # Nothing to boost AND no space heat planned: a setback on a non-heating
         # house is pure quota churn -> old behaviour, write no rows (#847 review).
         logger.info("LWT pre-heat: demand gate closed and no space heat planned — no rows written")
+        record_lwt_source_effective("none", "no_space_heat")
         return 0
     if gate_closed:
         logger.info(
@@ -2055,6 +2063,7 @@ def _write_lwt_preheat_actions(
             len(pairs), headroom,
         )
         _record(list(pairs))
+        record_lwt_source_effective("none", "quota")  # #944: nothing was written
         _PRESERVE.flag = True  # rows were already cleared: put the old ones back (#847)
         return 0
     if len(pairs) > max_pairs:
@@ -2410,6 +2419,7 @@ def _write_daikin_from_lp_plan_impl(
         else:
             db.clear_actions_for_date(plan_date, device="daikin")
         logger.info("write_daikin_from_lp_plan: skipped (Daikin holiday mode)")
+        record_lwt_source_effective("none", "holiday")
         return 0
 
     # #714 — LP-OWNED regime. Gated on ``plan.dhw_lp_owned`` (the plan's own record of

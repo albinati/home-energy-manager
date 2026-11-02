@@ -94,7 +94,7 @@ def test_comfort_slack_makes_lp_unavailable():
     plan.comfort_slack_c = [0.0, 0.0, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1]  # 6 slots > 0.5 (#944 tol)
     ok, reason = w3_trajectory_plausible(plan)
     assert not ok and reason.startswith("comfort_slack:6_slots")
-    plan.comfort_slack_c = [0.0] * 6 + [0.2, 0.3]  # 2 slots: a real cold-snap dip is tolerated
+    plan.comfort_slack_c = [0.0] * 4 + [0.6, 0.7, 0.8, 0.9]  # 4 slots > tol: still within MAX_SLACK_SLOTS, tolerated
     assert w3_trajectory_plausible(plan)[0]
 
 

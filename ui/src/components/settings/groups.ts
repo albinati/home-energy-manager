@@ -256,7 +256,7 @@ export const KEY_LABELS: Record<string, string> = {
   LWT_K_MAX_STEP_PCT: "Mudança máxima do k por reajuste (%)",
   LWT_K_MIN_DAYS: "Dias medidos mínimos para recalibrar o k",
   LP_W3_SLACK_TOL_C: "Tolerância abaixo do mínimo de conforto (°C)",
-  LP_W3_MAX_SLACK_SLOTS: "Quantos blocos de 30 min podem ficar abaixo do mínimo",
+  LP_W3_MAX_SLACK_SLOTS: "Blocos de 30 min permitidos abaixo do mínimo além da tolerância",
   LP_W3_INTERNAL_GAIN_KW: "Calor interno da casa",
   LP_W3_SOLAR_GAIN_KW_PER_PV_KW: "Ganho solar por kW de painel",
   LP_LOAD_SCALE_FACTOR: "Fator da previsão de consumo",

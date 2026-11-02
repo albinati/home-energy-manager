@@ -205,13 +205,13 @@ SCHEMA: dict[str, SettingSpec] = {
     "LP_W3_SLACK_TOL_C": SettingSpec(
         key="LP_W3_SLACK_TOL_C",
         type_name="float",
-        env_default=_float_env("LP_W3_SLACK_TOL_C", "0.5"),
+        env_default=_float_env("LP_W3_SLACK_TOL_C", "0.4"),
         min_value=0.0,
         max_value=2.0,
         description=(
             "W3 plausibility gate (#944): a slot only counts as 'under the comfort "
             "floor' when the predicted temperature is more than this many °C below "
-            "it. 0.5 = anything above 20.5 against a 21 floor is fine. Does NOT "
+            "it. 0.4 = anything above 20.6 against a 21 floor is fine. Must stay below LWT_COMFORT_BACKSTOP_MARGIN_C (0.5). Does NOT "
             "change the LP's comfort targets or penalties, nor the emergency-floor "
             "and ceiling checks (those stay at 0.1)."
         ),
@@ -1607,6 +1607,13 @@ def set_setting(key: str, value: Any, *, actor: str = "api") -> Any:
         if float(canonical) < sp + 0.5 - 1e-9:
             raise SettingValidationError(
                 f"LP_W3_CEILING_C ({canonical}) must be >= INDOOR_SETPOINT_C + 0.5 ({sp + 0.5})"
+            )
+    if key == "LP_W3_SLACK_TOL_C":
+        from .config import config as _cfg
+        _m = float(getattr(_cfg, "LWT_COMFORT_BACKSTOP_MARGIN_C", 0.5))
+        if float(canonical) >= _m - 1e-9:
+            raise SettingValidationError(
+                f"LP_W3_SLACK_TOL_C ({canonical}) must be < LWT_COMFORT_BACKSTOP_MARGIN_C ({_m})"
             )
     if key == "INDOOR_SETPOINT_C":
         try:
