@@ -29,12 +29,38 @@ from ..physics import (
     get_daikin_heating_kw,
     get_lwt_base_c,
     lwt_offset_from_space_kw,
+    lwt_offset_from_space_kw_device,
+    space_floor_device_draw_kw,
+    space_floor_device_params,
     predict_passive_daikin_load,
 )
 from ..weather import WeatherLpSeries
 from .pv_trust import PvSufficiencyGuardDiag, evaluate_pv_sufficiency_guard
 
 logger = logging.getLogger(__name__)
+
+
+def w3_space_floor_kwh_slot(
+    *,
+    curve_kw: float,
+    k_kw_per_k: float,
+    min_offset_k: float,
+    factor: float,
+    slot_h: float,
+    cap_kwh: float,
+) -> float:
+    """#921 — electric kWh the firmware still draws in a heating slot at the DEEPEST offset
+    the dispatcher will write (device-based, not building-based).
+
+    ``draw_min = max(0, curve_kw + k*min_offset)`` (``min_offset_k`` <= 0; the same linear
+    model ``lwt_offset_from_space_kw`` inverts, so a slot planned at the floor is written as
+    exactly ``min_offset_k``). ``factor`` scales it; ``cap_kwh`` (ceiling / HP cap) keeps the
+    constraint satisfiable. No gains: the firmware curve ignores sun and internal heat.
+    """
+    draw_kw = space_floor_device_draw_kw(
+        curve_kw, min(0.0, float(min_offset_k)), factor=factor, k_t=k_kw_per_k,
+    )
+    return max(0.0, min(float(cap_kwh), draw_kw * float(slot_h)))
 
 
 def dhw_block_ambient_c(initial: Any) -> float | None:
@@ -149,6 +175,9 @@ class LpPlan:
     """#863 — per-slot lift segment widths (kWh) and marginal COPs; empty lists when off."""
     """#863 — per-slot effective space COP = thermal / electric (cop_space when e_space ~ 0), len N."""
     w3_emergency_floor_c: float | None = None
+    w3_space_floor_kwh: list[float] = field(default_factory=list)
+    """#921 — per-slot W3 space-heating floor (kWh electric) the solve was constrained with;
+    empty when ``LP_W3_SPACE_FLOOR_ENABLED`` is off or W3 inactive."""
     comfort_slack_emergency_c: list[float] = field(default_factory=list)
     """#863 — per-slot shortfall under the emergency floor (°C, len N). The plan must
     never rely on it; non-zero from a start >= the floor makes the plan implausible."""
@@ -756,6 +785,22 @@ def solve_lp(
                 return w3_day_sp - w3_peak_delta
             return w3_day_sp
 
+    # #921 — W3 space-heating floor (kill switch LP_W3_SPACE_FLOOR_ENABLED): the electric draw the
+    # firmware keeps at the deepest offset the dispatcher writes for a HEATING slot
+    # (lp_dispatch._lp_offsets: clamp to max(OPTIMIZATION_LWT_OFFSET_MIN, DAIKIN_LWT_LP_OFFSET_MIN)).
+    w3_sf_on = bool(w3) and bool(getattr(config, "LP_W3_SPACE_FLOOR_ENABLED", False)) and not off_climate
+    w3_sf_floor: list[float] = [0.0] * n
+    _fac, _k = 1.0, 0.0
+    if w3_sf_on:
+        _min_off = min(0.0, max(float(config.OPTIMIZATION_LWT_OFFSET_MIN), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
+        _fac, _k = space_floor_device_params()
+        for _i in range(n):
+            w3_sf_floor[_i] = w3_space_floor_kwh_slot(
+                curve_kw=get_daikin_heating_kw(float(t_out[_i])), k_kw_per_k=_k,
+                min_offset_k=_min_off, factor=_fac, slot_h=slot_h,
+                cap_kwh=min(float(space_ceil_kwh[_i]), max_hp_kwh),
+            )
+
     # Minimum HP ON duration (anti short-cycling)
     hp_min_on = int(getattr(config, "LP_HP_MIN_ON_SLOTS", 2))
 
@@ -1313,6 +1358,12 @@ def solve_lp(
             # curve floor). So skip the floor when W3 owns comfort.
             if space_floor_kwh[i] > 0 and not w3 and not off_climate:
                 prob += e_space[i] + e_dhw[i] >= space_floor_kwh[i]
+            # #921 — W3 space-heating floor: the firmware keeps running its curve; offsets
+            # only trim the draw. The compressor is shared with DHW, so DHW heat covers the
+            # floor by TIME-SHARE (DHW at the full cap = the slot is all DHW): always feasible
+            # because floor <= max_hp_kwh (legionella at full compressor stays valid).
+            if w3 and w3_sf_on and not off_climate and w3_sf_floor[i] > 1e-9:
+                prob += e_space[i] + (w3_sf_floor[i] / max_hp_kwh) * _dhw_e_compressor >= w3_sf_floor[i]
 
         # ── W3 (#540): building RC dynamics + soft comfort + gentle recovery ──
         # C·dT/dt = q_heat − UA·(T_in − T_out), discretised to a 30-min slot.
@@ -2089,9 +2140,15 @@ def solve_lp(
         else:
             plan.cop_space_effective.append(cop_space[i])
         # Back-compute the LWT offset the Daikin must apply to deliver this energy draw.
-        plan.lwt_offset_c.append(lwt_offset_from_space_kw(
-            es_val / slot_h, t_out[i], lo=_lwt_inv_lo, hi=_lwt_inv_hi,
-        ))
+        if w3_sf_on and _fac > 0.0 and _k > 0.0:
+            # #921 — invert the SAME device model the floor uses (a slot at the floor = deepest offset).
+            plan.lwt_offset_c.append(lwt_offset_from_space_kw_device(
+                es_val / slot_h, t_out[i], factor=_fac, k_t=_k, lo=_lwt_inv_lo, hi=_lwt_inv_hi,
+            ))
+        else:
+            plan.lwt_offset_c.append(lwt_offset_from_space_kw(
+                es_val / slot_h, t_out[i], lo=_lwt_inv_lo, hi=_lwt_inv_hi,
+            ))
     for i in range(n + 1):
         plan.soc_kwh.append(_v(soc[i]))
         plan.tank_temp_c.append(
@@ -2105,6 +2162,8 @@ def solve_lp(
             plan.w3_ceiling_c = w3_ceiling
             plan.w3_internal_gain_kw = w3_g_int
             plan.w3_emergency_floor_c = w3_em_floor
+            if w3_sf_on:
+                plan.w3_space_floor_kwh = [float(x) for x in w3_sf_floor]
             plan.w3_solar_gain_kw_per_pv_kw = w3_g_sol
             if w3_emit:
                 plan.w3_emitter_tau_min = w3_emit_tau_min
