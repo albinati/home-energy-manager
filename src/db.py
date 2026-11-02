@@ -3395,6 +3395,7 @@ def _v3_slot_records(
     recs: list[tuple[datetime, str, float, float, float, float, bool]] = []
     calibrated_dates: set[str] = set()
     scaled_days: set[str] = set()
+    measured_slots: set[tuple[str, int, int]] = set()  # (date, hour, minute) in a MEASURED bucket
     for date_iso in dates:
         meas: dict[int, float] = {}
         meas_frac: dict[int, float] = {}
@@ -3450,12 +3451,15 @@ def _v3_slot_records(
                 hps = [min(x[2], x[1]) for x in slots]  # physics fallback, per slot
                 frac = day_dhw_frac.get(date_iso, 0.0)
             for (local, load, _ph, excl), hp in zip(slots, hps):
+                if b in shaped:
+                    measured_slots.add((date_iso, local.hour, 30 if local.minute >= 30 else 0))
                 hp_dhw = hp * frac
                 recs.append((local, date_iso, max(0.0, load - hp), hp, hp_dhw, hp - hp_dhw, excl))
 
     return {
         "recs": recs, "dates": dates, "calibrated_dates": calibrated_dates,
         "scaled_days": scaled_days, "partial_daily": partial_daily,
+        "measured_slots": measured_slots,
     }
 
 
@@ -3470,7 +3474,9 @@ def measured_residual_by_local_slot(
     buckets, ``telemetry_integral`` model rows ignored, daily remainder,
     water-fill). Only days whose HP split is MEASURED (Onecta bucket or a
     complete daily row) are returned; physics-only days are omitted, so the
-    caller never mixes a modelled heat pump into a residual."""
+    caller never mixes a modelled heat pump into a residual. Within a day only
+    slots of MEASURED buckets (metered, or shaped from a COMPLETE daily row) are
+    returned; the caller drops a day missing any slot it needs."""
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     start = datetime(first_day.year, first_day.month, first_day.day, tzinfo=tz).astimezone(UTC)
     nxt = last_day + timedelta(days=1)
@@ -3501,9 +3507,10 @@ def measured_residual_by_local_slot(
     sr = _v3_slot_records(samples, tz=tz, cutoff_iso=start_iso)
     out: dict[str, dict[tuple[int, int], tuple[float, float]]] = {}
     for local, d_, res, hp, _hd, _hs, _excl in sr["recs"]:
-        if d_ not in sr["calibrated_dates"]:
-            continue
-        out.setdefault(d_, {})[(local.hour, 30 if local.minute >= 30 else 0)] = (res, hp)
+        k_ = (local.hour, 30 if local.minute >= 30 else 0)
+        if (d_, k_[0], k_[1]) not in sr["measured_slots"]:
+            continue   # physics-fallback bucket (unmetered, no complete daily row): HP unknown
+        out.setdefault(d_, {})[k_] = (res, hp)
     return out
 
 
@@ -9275,7 +9282,11 @@ def prune_history_tables() -> dict[str, int]:
         ("meteo_forecast_history", "forecast_fetch_at_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
         ("forecast_skill_log", "built_at_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
         ("pv_error_log", "slot_time_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
-        ("load_error_log", "slot_time_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
+        # #923 — the peak-band margin reads up to 90 days of load_error_log; keep
+        # at least that (tiny table: ~48 rows/day). Preset-based away exclusion
+        # (lp_inputs_snapshot, 90 d) covers holidays older than the 30-day
+        # daikin_telemetry flags.
+        ("load_error_log", "slot_time_utc", max(90, _config.METEO_FORECAST_HISTORY_RETENTION_DAYS), False),
         ("lp_solution_snapshot", "slot_time_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("lp_inputs_snapshot", "run_at_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("config_audit", "changed_at_utc", _config.CONFIG_AUDIT_RETENTION_DAYS, False),

@@ -58,6 +58,7 @@ def fake_meas(monkeypatch):
     RESID.clear()
     HP.clear()
     calls = {"n": 0}
+    monkeypatch.setattr(pm, "_daily_row_complete", lambda day, tz: True)
 
     def fake(first, last):
         calls["n"] += 1
@@ -263,12 +264,16 @@ def test_measured_residual_subtracts_measured_hp_and_skips_unmeasured_days():
     d1, d2 = date(2026, 10, 14), date(2026, 10, 15)
     for d in (d1, d2):
         _seed_day_samples(d, 8, 2.0)            # 1.0 kWh/slot, 4.0 per bucket
+        _seed_day_samples(d, 9, 2.0)            # bucket 9 (18:00-20:00) has load but NO meter
     db.upsert_daikin_consumption_2hourly(
         date=d1.isoformat(), bucket_idx=8, kwh_total=1.2, kwh_heating=1.2, kwh_dhw=0.0, source="onecta_cache")
     out = db.measured_residual_by_local_slot(d1, d2)
     assert d2.isoformat() not in out                       # no measured HP -> omitted (never modelled)
     res, hp = out[d1.isoformat()][(16, 0)]
     assert hp == pytest.approx(0.3, abs=0.02) and res == pytest.approx(0.7, abs=0.02)
+    # the unmetered bucket (no complete daily row) is NOT returned: HP unknown there, the
+    # residual would be the full load
+    assert (18, 0) not in out[d1.isoformat()] and (18, 30) not in out[d1.isoformat()]
 
 
 # ---- real classifier: Cosy bands incl. DST days (no band monkeypatching) -----------
@@ -521,3 +526,93 @@ def test_endpoint_serves_the_warmed_margin(monkeypatch, fake_band, fake_meas):
     out = asyncio.run(pv.get_load_expected())
     assert out["peak_margin"]["fallback"] is None and out["peak_margin"]["n_days"] == 16
     assert out["peak_margin"]["margin_kwh"] == pytest.approx(0.5)
+
+
+def test_day_with_an_unmeasured_band_slot_is_dropped(fake_band, monkeypatch):
+    d = AS_OF - timedelta(days=1)
+    _seed_base(d, 3.0)
+    part = {k: (0.5, 0.1) for k in BAND if k not in {(18, 0), (18, 30)}}
+    monkeypatch.setattr(db, "measured_residual_by_local_slot", lambda f, l: {d.isoformat(): part})
+    monkeypatch.setattr(pm, "_daily_row_complete", lambda day, tz: True)
+    assert pm.peak_band_error_history(AS_OF, 14) == []
+
+
+def test_day_with_incomplete_daily_row_is_not_cached_and_retried_after_ttl(fake_band, fake_meas, monkeypatch):
+    _seed([0.5] * 3)
+    monkeypatch.setattr(pm, "_daily_row_complete", lambda day, tz: False)
+    assert pm.peak_band_error_history(AS_OF, 14) == []
+    assert pm._day_cache == {}
+    monkeypatch.setattr(pm, "_daily_row_complete", lambda day, tz: True)
+    assert pm.peak_band_error_history(AS_OF, 14) == []       # inside the 1 h negative TTL
+    for k in list(pm._day_miss):
+        pm._day_miss[k] -= pm._NEG_TTL_S + 1
+    assert len(pm.peak_band_error_history(AS_OF, 14)) == 3
+
+
+def _seed_run(run_id: int, run_at: datetime, key: str, status: str, resid: list[float] | None,
+              slots: list[datetime] | None = None) -> None:
+    import json
+    exo = {"base_forecaster_key": key}
+    if resid is not None:
+        exo["base_load_components"] = {"residual_profile_kwh": resid}
+    conn = db.get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO lp_inputs_snapshot (run_id, run_at_utc, exogenous_snapshot_json, lp_status) VALUES (?,?,?,?)",
+            (run_id, run_at.strftime("%Y-%m-%dT%H:%M:%SZ"), json.dumps(exo), status))
+        for i, t in enumerate(slots or []):
+            conn.execute("INSERT INTO lp_solution_snapshot (run_id, slot_index, slot_time_utc) VALUES (?,?,?)",
+                         (run_id, i, t.astimezone(UTC).isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_base_prefers_committed_pre_appliance_residual(fake_band, fake_meas):
+    d = AS_OF - timedelta(days=1)
+    _seed_base(d, 3.6)        # log base (includes an appliance run) 3.6
+    RESID[d.isoformat()] = 3.0
+    band_utc = [datetime(d.year, d.month, d.day, h, m, tzinfo=LON).astimezone(UTC) for (h, m) in sorted(BAND)]
+    _seed_run(1, datetime(d.year, d.month, d.day, 6, 0, tzinfo=UTC), "v2|bias=0", "Optimal",
+              [0.4] * len(band_utc), band_utc)          # pre-appliance residual: 6 x 0.4 = 2.4
+    h = pm.peak_band_error_history(AS_OF, 14)
+    assert len(h) == 1 and h[0]["base_src"] == "pre_appliance"
+    assert h[0]["base_kwh"] == pytest.approx(2.4) and h[0]["error_kwh"] == pytest.approx(0.6)
+
+
+def test_base_falls_back_to_log_without_pre_appliance_residual(fake_band, fake_meas):
+    d = AS_OF - timedelta(days=1)
+    _seed_base(d, 3.6)
+    RESID[d.isoformat()] = 3.0
+    _seed_run(1, datetime(d.year, d.month, d.day, 6, 0, tzinfo=UTC), "v2|bias=0", "Optimal", None)
+    h = pm.peak_band_error_history(AS_OF, 14)
+    assert h[0]["base_src"] == "log" and h[0]["error_kwh"] == pytest.approx(-0.6)
+
+
+def test_day_runs_prefer_optimal_over_a_later_infeasible_run():
+    d = AS_OF - timedelta(days=1)
+    _seed_run(1, datetime(d.year, d.month, d.day, 6, 0, tzinfo=UTC), "keyA", "Optimal", None)
+    _seed_run(2, datetime(d.year, d.month, d.day, 10, 0, tzinfo=UTC), "keyB", "Infeasible", None)
+    assert pm.day_runs(d, d)[d.isoformat()] == ("keyA", 1)
+    conn = db.get_connection()
+    conn.execute("DELETE FROM lp_inputs_snapshot WHERE run_id = 1")
+    conn.commit()
+    conn.close()
+    assert pm.day_runs(d, d)[d.isoformat()] == ("keyB", 2)      # only an infeasible one: still used
+
+
+def test_load_error_log_is_kept_90_days_by_the_nightly_prune():
+    old = datetime.now(UTC) - timedelta(days=60)
+    recent_pruned = datetime.now(UTC) - timedelta(days=120)
+    conn = db.get_connection()
+    for t in (old, recent_pruned):
+        conn.execute("INSERT OR REPLACE INTO load_error_log (slot_time_utc, forecast_kwh, built_at_utc) VALUES (?,?,?)",
+                     (t.strftime("%Y-%m-%dT%H:%M:%SZ"), 1.0, "x"))
+    conn.commit()
+    conn.close()
+    db.prune_history_tables()
+    conn = db.get_connection()
+    left = {r[0] for r in conn.execute("SELECT slot_time_utc FROM load_error_log").fetchall()}
+    conn.close()
+    assert old.strftime("%Y-%m-%dT%H:%M:%SZ") in left
+    assert recent_pruned.strftime("%Y-%m-%dT%H:%M:%SZ") not in left

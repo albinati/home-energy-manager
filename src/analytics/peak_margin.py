@@ -157,20 +157,25 @@ def excluded_days(first_day: date, tz: ZoneInfo | None = None) -> set[str]:
     return set(away) | set(ret) | set(non_rep)
 
 
-def day_forecaster_keys(first_day: date, last_day: date, tz: ZoneInfo | None = None) -> dict[str, str]:
-    """``{local_date_iso: base_forecaster_key}``: the key of the latest run made
-    before 16:00 local of that day (the run whose base forecast the band got).
-    Days with no keyed run map to ``LEGACY_KEY``."""
+def day_runs(first_day: date, last_day: date, tz: ZoneInfo | None = None
+             ) -> dict[str, tuple[str, int | None]]:
+    """``{local_date_iso: (base_forecaster_key, run_id)}``: the latest run made
+    before 16:00 local of that day within the 36 h before it (the run whose base
+    forecast the band got), preferring runs with an Optimal ``lp_status`` (a
+    NULL status counts as optimal: rows predate the column); an infeasible run
+    is used only if no optimal one qualifies. A run with no key, or no run in
+    range, maps to ``(LEGACY_KEY, None)``."""
     tz = tz or _tz()
-    lo = datetime(first_day.year, first_day.month, first_day.day, tzinfo=tz).astimezone(UTC) - timedelta(days=1)
+    lo = datetime(first_day.year, first_day.month, first_day.day, tzinfo=tz).astimezone(UTC) - timedelta(days=2)
     hi = datetime(last_day.year, last_day.month, last_day.day, 23, tzinfo=tz).astimezone(UTC)
-    runs: list[tuple[datetime, str]] = []
+    runs: list[tuple[datetime, str, int, bool]] = []
     try:
         with db._lock:
             conn = db.get_connection()
             try:
                 rows = conn.execute(
-                    "SELECT run_at_utc, json_extract(exogenous_snapshot_json, '$.base_forecaster_key') AS k "
+                    "SELECT run_id, run_at_utc, lp_status, "
+                    "json_extract(exogenous_snapshot_json, '$.base_forecaster_key') AS k "
                     "FROM lp_inputs_snapshot WHERE run_at_utc >= ? AND run_at_utc <= ? ORDER BY run_at_utc",
                     (lo.isoformat().replace("+00:00", "Z"), hi.isoformat().replace("+00:00", "Z")),
                 ).fetchall()
@@ -183,19 +188,78 @@ def day_forecaster_keys(first_day: date, last_day: date, tz: ZoneInfo | None = N
                     t = t.replace(tzinfo=UTC)
             except (ValueError, TypeError):
                 continue
-            runs.append((t.astimezone(UTC), str(r["k"]) if r["k"] else LEGACY_KEY))
+            st = str(r["lp_status"] or "Optimal").strip().lower()
+            runs.append((t.astimezone(UTC), str(r["k"]) if r["k"] else LEGACY_KEY,
+                         int(r["run_id"]), st.startswith("optimal")))
     except Exception:  # noqa: BLE001
         logger.warning("peak margin: forecaster keys read failed", exc_info=True)
-    times = [t for t, _k in runs]
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, int | None]] = {}
     d = first_day
     while d <= last_day:
         at = datetime(d.year, d.month, d.day, 16, tzinfo=tz).astimezone(UTC)
-        i = bisect.bisect_right(times, at) - 1
-        # only a run made within the 36 h before the band started counts
-        out[d.isoformat()] = runs[i][1] if (i >= 0 and at - times[i] <= timedelta(hours=36)) else LEGACY_KEY
+        cand = [r for r in runs if at - timedelta(hours=36) <= r[0] <= at]
+        pick = next((r for r in reversed(cand) if r[3]), None) or (cand[-1] if cand else None)
+        out[d.isoformat()] = (pick[1], pick[2]) if pick else (LEGACY_KEY, None)
         d += timedelta(days=1)
     return out
+
+
+def day_forecaster_keys(first_day: date, last_day: date, tz: ZoneInfo | None = None) -> dict[str, str]:
+    """``{local_date_iso: base_forecaster_key}`` (see :func:`day_runs`)."""
+    return {k: v[0] for k, v in day_runs(first_day, last_day, tz).items()}
+
+
+def committed_residual_band(run_id: int | None, band_utc: list[datetime]) -> float | None:
+    """Σ over the band slots of the run's committed PRE-appliance residual
+    (``exogenous_snapshot.base_load_components.residual_profile_kwh``), so a
+    comparison against the measured residual (appliance runs removed) is
+    like-for-like. ``None`` when the run/array/any slot is missing."""
+    if run_id is None or not band_utc:
+        return None
+    try:
+        with db._lock:
+            conn = db.get_connection()
+            try:
+                r = conn.execute(
+                    "SELECT json_extract(exogenous_snapshot_json, '$.base_load_components.residual_profile_kwh') AS a "
+                    "FROM lp_inputs_snapshot WHERE run_id = ?", (run_id,)).fetchone()
+                if r is None or r["a"] is None:
+                    return None
+                import json as _json
+                arr = _json.loads(r["a"])
+                marks = ",".join("?" * len(band_utc))
+                idx = {str(x["slot_time_utc"]): int(x["slot_index"]) for x in conn.execute(
+                    f"SELECT slot_time_utc, slot_index FROM lp_solution_snapshot "
+                    f"WHERE run_id = ? AND slot_time_utc IN ({marks})",
+                    (run_id, *[t.astimezone(UTC).isoformat() for t in band_utc])).fetchall()}
+            finally:
+                conn.close()
+        tot = 0.0
+        for t in band_utc:
+            i = idx.get(t.astimezone(UTC).isoformat())
+            if i is None or i >= len(arr):
+                return None
+            tot += float(arr[i])
+        return tot
+    except Exception:  # noqa: BLE001
+        logger.warning("peak margin: committed residual read failed", exc_info=True)
+        return None
+
+
+def _daily_row_complete(day: date, tz: ZoneInfo) -> bool:
+    """A daily Daikin row fetched AFTER its local day ended (earlier it is a
+    partial total that the nightly sync rewrites)."""
+    try:
+        rows = db.get_daikin_consumption_daily_range(day.isoformat(), day.isoformat())
+        if not rows:
+            return False
+        fa = datetime.fromisoformat(str(rows[0].get("fetched_at")).replace("Z", "+00:00"))
+        if fa.tzinfo is None:
+            fa = fa.replace(tzinfo=UTC)
+        end = datetime(day.year, day.month, day.day, tzinfo=tz) + timedelta(days=1)
+        return fa >= end
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _band_utc_days(day: date, band: set[tuple[int, int]], tz: ZoneInfo) -> list[date]:
@@ -280,7 +344,8 @@ def peak_band_error_history(
     first, last = as_of_day - timedelta(days=n), as_of_day - timedelta(days=1)
     cur_key = forecaster_key or current_forecaster_key()
     skip = excluded_days(first, tz)
-    keys = day_forecaster_keys(first, last, tz)
+    runs_by_day = day_runs(first, last, tz)
+    keys = {k: v[0] for k, v in runs_by_day.items()}
     dbp = str(config.DB_PATH)
     if repair_yesterday:
         try:
@@ -316,12 +381,24 @@ def peak_band_error_history(
             if not all(k in b_ and k in m_ for k in band):
                 _day_miss[(dbp, iso)] = now_m
                 continue
+            if not _daily_row_complete(x, tz):
+                # the band's HP may rest on a partial daily row (rewritten ~02:35 UTC
+                # next day): never cache it, retry after the negative TTL
+                _day_miss[(dbp, iso)] = now_m
+                continue
             res = sum(m_[k][0] for k in band)
             hp = sum(m_[k][1] for k in band)
             base = sum(b_[k] for k in band)
+            # like-for-like: the measured residual has completed appliance runs
+            # removed, so compare with the committed PRE-appliance residual when stored
+            band_utc = [datetime(x.year, x.month, x.day, h, mi, tzinfo=tz).astimezone(UTC) for (h, mi) in band]
+            pre = committed_residual_band(runs_by_day.get(iso, (None, None))[1], band_utc)
+            base_src = "log"
+            if pre is not None:
+                base, base_src = pre, "pre_appliance"
             _day_cache[(dbp, iso)] = {
                 "date": iso, "error_kwh": res - base, "residual_kwh": res,
-                "base_kwh": base, "hp_kwh": hp, "n_slots": len(band)}
+                "base_kwh": base, "base_src": base_src, "hp_kwh": hp, "n_slots": len(band)}
     return [dict(_day_cache[(dbp, x.isoformat())]) for x in cand if (dbp, x.isoformat()) in _day_cache]
 
 
