@@ -2007,7 +2007,7 @@ def _run_optimizer_lp(
     try:
         db.refresh_daikin_lwt_kw_calibration()
     except Exception:  # noqa: BLE001 — calibration must never block the solve
-        logger.exception("daikin_lwt_calibration refresh failed; continuing")
+        logger.warning("daikin_lwt_calibration [optimizer call site] refresh raised; continuing", exc_info=True)
 
     # Per-slot residual load (Daikin physics subtracted per S10.13 / #179).
     # Phase B2 (#306 follow-up): use the tariff-aware profile when available

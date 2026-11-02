@@ -30,8 +30,10 @@ from ..physics import (
     get_lwt_base_c,
     lwt_offset_from_space_kw,
     lwt_offset_from_space_kw_device,
+    space_floor_curve_kw,
     space_floor_device_draw_kw,
     space_floor_device_params,
+    space_floor_slope_override,
     predict_passive_daikin_load,
 )
 from ..weather import WeatherLpSeries
@@ -797,13 +799,17 @@ def solve_lp(
     # (lp_dispatch._lp_offsets: clamp to max(OPTIMIZATION_LWT_OFFSET_MIN, DAIKIN_LWT_LP_OFFSET_MIN)).
     w3_sf_on = bool(w3) and bool(getattr(config, "LP_W3_SPACE_FLOOR_ENABLED", False)) and not off_climate
     w3_sf_floor: list[float] = [0.0] * n
-    _fac, _k = 1.0, 0.0
+    _fac, _k, _sf_s = 1.0, 0.0, 0.0
     if w3_sf_on:
         _min_off = min(0.0, max(float(config.OPTIMIZATION_LWT_OFFSET_MIN), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
         _fac, _k = space_floor_device_params()
+        _sf_s = space_floor_slope_override()  # #928: >0 decouples the floor from the calibrated k
+        if _sf_s > 0.0:
+            _k = _sf_s
         for _i in range(n):
             w3_sf_floor[_i] = w3_space_floor_kwh_slot(
-                curve_kw=get_daikin_heating_kw(float(t_out[_i])), k_kw_per_k=_k,
+                curve_kw=(space_floor_curve_kw(float(t_out[_i]), _sf_s) if _sf_s > 0.0
+                          else get_daikin_heating_kw(float(t_out[_i]))), k_kw_per_k=_k,
                 min_offset_k=_min_off, factor=_fac, slot_h=slot_h,
                 cap_kwh=min(float(space_ceil_kwh[_i]), max_hp_kwh),
             )
@@ -2151,6 +2157,7 @@ def solve_lp(
             # #921 — invert the SAME device model the floor uses (a slot at the floor = deepest offset).
             plan.lwt_offset_c.append(lwt_offset_from_space_kw_device(
                 es_val / slot_h, t_out[i], factor=_fac, k_t=_k, lo=_lwt_inv_lo, hi=_lwt_inv_hi,
+                curve_slope=_sf_s if _sf_s > 0.0 else None,
             ))
         else:
             plan.lwt_offset_c.append(lwt_offset_from_space_kw(

@@ -2724,6 +2724,46 @@ class Config:
         self._rt_set("LP_W3_SPACE_FLOOR_TRIM_KW_PER_K", float(value))
 
     @property
+    def LWT_K_CALIBRATION_ENABLED(self) -> bool:
+        return str(self._rt_get("LWT_K_CALIBRATION_ENABLED")).strip().lower() in ("true", "1", "yes", "on")
+
+    @LWT_K_CALIBRATION_ENABLED.setter
+    def LWT_K_CALIBRATION_ENABLED(self, value: bool) -> None:
+        self._rt_set("LWT_K_CALIBRATION_ENABLED", "true" if value in (True, "true", "True", 1, "1") else "false")
+
+    @property
+    def LWT_K_CALIBRATION_SHADOW(self) -> bool:
+        return str(self._rt_get("LWT_K_CALIBRATION_SHADOW")).strip().lower() in ("true", "1", "yes", "on")
+
+    @LWT_K_CALIBRATION_SHADOW.setter
+    def LWT_K_CALIBRATION_SHADOW(self, value: bool) -> None:
+        self._rt_set("LWT_K_CALIBRATION_SHADOW", "true" if value in (True, "true", "True", 1, "1") else "false")
+
+    @property
+    def LP_W3_SPACE_FLOOR_KW_PER_K(self) -> float:
+        return float(self._rt_get("LP_W3_SPACE_FLOOR_KW_PER_K"))
+
+    @LP_W3_SPACE_FLOOR_KW_PER_K.setter
+    def LP_W3_SPACE_FLOOR_KW_PER_K(self, value: float) -> None:
+        self._rt_set("LP_W3_SPACE_FLOOR_KW_PER_K", float(value))
+
+    @property
+    def LWT_K_MAX_STEP_PCT(self) -> float:
+        return float(self._rt_get("LWT_K_MAX_STEP_PCT"))
+
+    @LWT_K_MAX_STEP_PCT.setter
+    def LWT_K_MAX_STEP_PCT(self, value: float) -> None:
+        self._rt_set("LWT_K_MAX_STEP_PCT", float(value))
+
+    @property
+    def LWT_K_MIN_DAYS(self) -> int:
+        return int(self._rt_get("LWT_K_MIN_DAYS"))
+
+    @LWT_K_MIN_DAYS.setter
+    def LWT_K_MIN_DAYS(self, value: int) -> None:
+        self._rt_set("LWT_K_MIN_DAYS", int(value))
+
+    @property
     def LP_COP_LWT_OFFSET_PENALTY_PER_K(self) -> float:
         return float(self._rt_get("LP_COP_LWT_OFFSET_PENALTY_PER_K"))
 
