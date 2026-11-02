@@ -3322,45 +3322,17 @@ def _waterfill_hp(loads: list[float], hp: float) -> tuple[list[float], float]:
     return [max(0.0, l_ - level) for l_ in loads], 0.0
 
 
-def _residual_profile_v3_build(
+def _v3_slot_records(
     v3_samples: list[tuple[datetime, float, float, bool]],
     *,
     tz: ZoneInfo,
-    window_days: int,
-    min_samples: int,
-    statistic: str,
-    dow_shrink: float,
-    hard_away: bool,
-    away_fraction: float,
     cutoff_iso: str,
-    anchor_utc: datetime,
-    outdoor_from_daikin: int,
-    dropped_no_meteo: int,
-    dropped_negative: int,
-    dropped_lwt_offset: int,
 ) -> dict[str, Any]:
-    """#922 residual-load profile v3 — same return shape as the v2 builder.
-
-    Differences from v2 (see the story / the ``loadbt`` backtest):
-
-    * Samples are first aggregated to 30-min UTC slots (mean of the sampled
-      power x 0.5 h), so every number below is a per-SLOT energy and the tier
-      counts are slot-days (not ~10 samples per slot).
-    * Heat-pump energy per local 2h bucket: measured Onecta buckets only
-      (``telemetry_integral`` rows are a weather-curve model, not a meter). Model
-      / missing buckets get ``daily measured - sum(Onecta buckets)`` spread over
-      them by model weight; no (complete) daily row -> the physics estimate.
-      Bucket HP is placed in its slots by water-filling (the part of the load
-      above a common level), so a steady HP draw is not clipped into phantom
-      residual.
-    * Central statistic ``mean`` | ``median``; weekday tiers shrunk toward the
-      all-days profile: ``w * dow + (1 - w) * all``.
-    * Hard away exclusion (preset / holiday / return day) + the 0.4 heuristic.
-    """
-    from statistics import mean as _mean, median as _median, quantiles as _quantiles
-
-    stat_fn = _mean if statistic == "mean" else _median
-
+    """#922 steps 1-3 of the v3 builder, shared with #923: aggregate samples to
+    30-min slots and split each slot's load into residual + measured heat pump
+    (Onecta buckets, ``telemetry_integral`` rows ignored, daily remainder,
+    water-fill). Returns ``recs`` = (local, date, residual, hp, hp_dhw, hp_space,
+    excluded) plus the bookkeeping sets."""
     # 1. slot aggregation (UTC slot start -> sums)
     acc: dict[datetime, list[Any]] = {}
     for ts, load_slot, phys_slot, excl in v3_samples:
@@ -3423,6 +3395,7 @@ def _residual_profile_v3_build(
     recs: list[tuple[datetime, str, float, float, float, float, bool]] = []
     calibrated_dates: set[str] = set()
     scaled_days: set[str] = set()
+    measured_slots: set[tuple[str, int, int]] = set()  # (date, hour, minute) in a MEASURED bucket
     for date_iso in dates:
         meas: dict[int, float] = {}
         meas_frac: dict[int, float] = {}
@@ -3478,8 +3451,112 @@ def _residual_profile_v3_build(
                 hps = [min(x[2], x[1]) for x in slots]  # physics fallback, per slot
                 frac = day_dhw_frac.get(date_iso, 0.0)
             for (local, load, _ph, excl), hp in zip(slots, hps):
+                if b in shaped:
+                    measured_slots.add((date_iso, local.hour, 30 if local.minute >= 30 else 0))
                 hp_dhw = hp * frac
                 recs.append((local, date_iso, max(0.0, load - hp), hp, hp_dhw, hp - hp_dhw, excl))
+
+    return {
+        "recs": recs, "dates": dates, "calibrated_dates": calibrated_dates,
+        "scaled_days": scaled_days, "partial_daily": partial_daily,
+        "measured_slots": measured_slots,
+    }
+
+
+def measured_residual_by_local_slot(
+    first_day: date, last_day: date,
+) -> dict[str, dict[tuple[int, int], tuple[float, float]]]:
+    """#923 — measured ``(residual, heat_pump)`` kWh per local 30-min slot,
+    ``{local_date_iso: {(hour, minute): (residual, hp)}}``, for the local days
+    ``[first_day, last_day]``.
+
+    Reuses #922's hybrid split (:func:`_v3_slot_records`: measured Onecta
+    buckets, ``telemetry_integral`` model rows ignored, daily remainder,
+    water-fill). Only days whose HP split is MEASURED (Onecta bucket or a
+    complete daily row) are returned; physics-only days are omitted, so the
+    caller never mixes a modelled heat pump into a residual. Within a day only
+    slots of MEASURED buckets (metered, or shaped from a COMPLETE daily row) are
+    returned; the caller drops a day missing any slot it needs."""
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    start = datetime(first_day.year, first_day.month, first_day.day, tzinfo=tz).astimezone(UTC)
+    nxt = last_day + timedelta(days=1)
+    end = datetime(nxt.year, nxt.month, nxt.day, tzinfo=tz).astimezone(UTC)
+    start_iso = start.isoformat().replace("+00:00", "Z")
+    end_iso = end.isoformat().replace("+00:00", "Z")
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT captured_at, load_power_kw FROM pv_realtime_history "
+                "WHERE captured_at >= ? AND captured_at < ? AND load_power_kw IS NOT NULL",
+                (start_iso, end_iso),
+            ).fetchall()
+        finally:
+            conn.close()
+    samples: list[tuple[datetime, float, float, bool]] = []
+    for r in rows:
+        try:
+            ts = datetime.fromisoformat(str(r["captured_at"]).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            continue
+        samples.append((ts.astimezone(UTC), float(r["load_power_kw"]) * 0.5, 0.0, False))
+    if not samples:
+        return {}
+    sr = _v3_slot_records(samples, tz=tz, cutoff_iso=start_iso)
+    out: dict[str, dict[tuple[int, int], tuple[float, float]]] = {}
+    for local, d_, res, hp, _hd, _hs, _excl in sr["recs"]:
+        k_ = (local.hour, 30 if local.minute >= 30 else 0)
+        if (d_, k_[0], k_[1]) not in sr["measured_slots"]:
+            continue   # physics-fallback bucket (unmetered, no complete daily row): HP unknown
+        out.setdefault(d_, {})[k_] = (res, hp)
+    return out
+
+
+def _residual_profile_v3_build(
+    v3_samples: list[tuple[datetime, float, float, bool]],
+    *,
+    tz: ZoneInfo,
+    window_days: int,
+    min_samples: int,
+    statistic: str,
+    dow_shrink: float,
+    hard_away: bool,
+    away_fraction: float,
+    cutoff_iso: str,
+    anchor_utc: datetime,
+    outdoor_from_daikin: int,
+    dropped_no_meteo: int,
+    dropped_negative: int,
+    dropped_lwt_offset: int,
+) -> dict[str, Any]:
+    """#922 residual-load profile v3 — same return shape as the v2 builder.
+
+    Differences from v2 (see the story / the ``loadbt`` backtest):
+
+    * Samples are first aggregated to 30-min UTC slots (mean of the sampled
+      power x 0.5 h), so every number below is a per-SLOT energy and the tier
+      counts are slot-days (not ~10 samples per slot).
+    * Heat-pump energy per local 2h bucket: measured Onecta buckets only
+      (``telemetry_integral`` rows are a weather-curve model, not a meter). Model
+      / missing buckets get ``daily measured - sum(Onecta buckets)`` spread over
+      them by model weight; no (complete) daily row -> the physics estimate.
+      Bucket HP is placed in its slots by water-filling (the part of the load
+      above a common level), so a steady HP draw is not clipped into phantom
+      residual.
+    * Central statistic ``mean`` | ``median``; weekday tiers shrunk toward the
+      all-days profile: ``w * dow + (1 - w) * all``.
+    * Hard away exclusion (preset / holiday / return day) + the 0.4 heuristic.
+    """
+    from statistics import mean as _mean, median as _median, quantiles as _quantiles
+
+    stat_fn = _mean if statistic == "mean" else _median
+
+    _sr = _v3_slot_records(v3_samples, tz=tz, cutoff_iso=cutoff_iso)
+    recs, dates = _sr["recs"], _sr["dates"]
+    calibrated_dates, scaled_days, partial_daily = (
+        _sr["calibrated_dates"], _sr["scaled_days"], _sr["partial_daily"])
 
     # 4. away days: hard signals + the 0.4 x median heuristic as fallback
     by_date_daytime: dict[str, list[float]] = {}
@@ -9205,7 +9282,11 @@ def prune_history_tables() -> dict[str, int]:
         ("meteo_forecast_history", "forecast_fetch_at_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
         ("forecast_skill_log", "built_at_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
         ("pv_error_log", "slot_time_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
-        ("load_error_log", "slot_time_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
+        # #923 — the peak-band margin reads up to 90 days of load_error_log; keep
+        # at least that (tiny table: ~48 rows/day). Preset-based away exclusion
+        # (lp_inputs_snapshot, 90 d) covers holidays older than the 30-day
+        # daikin_telemetry flags.
+        ("load_error_log", "slot_time_utc", max(90, _config.METEO_FORECAST_HISTORY_RETENTION_DAYS), False),
         ("lp_solution_snapshot", "slot_time_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("lp_inputs_snapshot", "run_at_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("config_audit", "changed_at_utc", _config.CONFIG_AUDIT_RETENTION_DAYS, False),

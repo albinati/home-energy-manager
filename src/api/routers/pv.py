@@ -540,7 +540,18 @@ async def get_load_expected(date: str | None = None, history_days: int | None = 
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD") from None
     if history_days is not None:
         history_days = max(7, min(int(history_days), 180))
-    return await asyncio.to_thread(expected_load_by_band, d, history_days=history_days)
+    result = await asyncio.to_thread(expected_load_by_band, d, history_days=history_days)
+    # #923 — peak-band conformal margin diagnostics, from the CACHE only (the
+    # solve / the nightly warm computes it; a request never does). It describes
+    # TODAY's margin whatever ``date`` is. ``fallback="not_computed"`` = no cached value yet.
+    from ...analytics.peak_margin import peak_band_margin
+
+    try:
+        result = dict(result)
+        result["peak_margin"] = await asyncio.to_thread(peak_band_margin, compute=False)
+    except Exception:  # noqa: BLE001 - diagnostics must not break the read
+        result["peak_margin"] = None
+    return result
 
 
 @router.get("/api/v1/forecast/daily")

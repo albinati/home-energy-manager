@@ -270,3 +270,23 @@ What v3 changes:
 - Tier counts are slot-days. Spread semantics changed: `spread` = centre + (tier p75 - tier median) (p90 likewise), weekday-shrunk like the centre; it is a day-to-day slot quantile, no longer a sample quantile.
 - `LP_LOAD_PROFILE_WINDOW_DAYS` (120) is unchanged; short windows backtest worse. Caches key on the new settings.
 
+
+## Peak-band conformal margin (#923, epic #920)
+
+Summing per-slot p75 spreads over the expensive band covers the band SUM on only 57-72% of days (slot errors are correlated; quantiles do not add). With `LP_PEAK_MARGIN_ENABLED=true` the pessimistic scenario floors the expensive band (Cosy peak 16-19; Agile `expensive`/`severe_peak` windows) at `nominal + margin`.
+
+- **Residual basis.** Daily error = sum over band slots of (measured load - measured heat pump) minus the committed BASE forecast (`load_error_log.forecast_base_kwh`). The measured HP is #922's hybrid split (`db.measured_residual_by_local_slot`: Onecta buckets + daily remainder + water-fill, never `telemetry_integral`; days without a measured split are skipped). So the margin does not move when the LP's heat-pump model changes.
+- **Conformal.** Margin = the `ceil((n+1)q)`-th smallest of the last N days' errors (capped at n), clamped to `[0, LP_PEAK_MARGIN_MAX_KWH]`. `coverage_oos_pct` is rolling OUT-OF-SAMPLE (each day against the margin from the days before it, at least 14 prior), `n_oos` its sample size.
+- **Same forecaster only.** Each run stores `exogenous_snapshot["base_forecaster_key"]` (`v3|<statistic>|<dow shrink>|away=<0/1>|bias=<0/1>` or `v2|bias=<0/1>`). Only history days whose latest run (within 36 h before 16:00 local) has the CURRENT key are used; runs with no key count as `v2|bias=0`. After changing any base-forecaster setting the history restarts (margin off, legacy spread, until 14 matching days).
+- **Never lowers the pessimistic band.** Per local-day group the band sum is `max(sum of the spread-perturbed band, sum(nominal) + margin)`; when the margin wins it is spread by the nominal shape. Continuous at margin 0. Other slots keep the spread. A band only partly inside the horizon gets the margin scaled by slots / typical band slots. On Agile the band length varies by day.
+- **Off the solve path.** Complete days are cached per process. The nightly `bulletproof_load_error_log_job` runs `peak_margin.warm()` (backfills `load_error_log` for window days missing band rows via `rebuild_load_error_log_for_date`, then caches the margin); a solve only repairs yesterday. The first solve after a restart computes the window once.
+- **Audit/endpoint.** Each solve logs `exogenous_snapshot["peak_band_margin"]`. `GET /api/v1/load/expected` returns `peak_margin` from the cache only (`fallback="not_computed"` when none; it describes TODAY regardless of `date`): `margin_kwh`, `coverage_oos_pct`, `n_oos`, `n_days` (usable), `min_days` (14), `enabled`, `fallback`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `LP_PEAK_MARGIN_ENABLED` | false | Kill switch. false = summed slot spread, byte-identical. |
+| `LP_PEAK_MARGIN_QUANTILE` | 0.75 | 0.5..0.95. |
+| `LP_PEAK_MARGIN_WINDOW_DAYS` | 42 | 14..90 days of history. Fewer than 14 usable days = legacy. |
+| `LP_PEAK_MARGIN_MAX_KWH` | 2.0 | Cap on the margin (also clamped >= 0). |
+
+Peak-margin data rules (#923 follow-up): `measured_residual_by_local_slot` returns a slot only if its 2h bucket is MEASURED (Onecta-metered, or shaped from a COMPLETE daily row); a band with any unmeasured slot drops the day (an unmetered bucket would otherwise count the whole load as residual). A day is cached only when its daily Daikin row was fetched after the day ended; otherwise it is retried after a 1 h negative TTL (yesterday's daily row is partial until the ~02:35 UTC sync). The base compared against is the run's committed PRE-appliance residual (`base_load_components.residual_profile_kwh`) when stored, else `load_error_log.forecast_base_kwh`. The run per day prefers an Optimal `lp_status`. `load_error_log` retention is `max(90, METEO_FORECAST_HISTORY_RETENTION_DAYS)` days (~48 rows/day); away exclusion older than the 30-day `daikin_telemetry` holiday flags is covered by the preset (`lp_inputs_snapshot`, 90 d).

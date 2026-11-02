@@ -2830,6 +2830,42 @@ class Config:
             "true" if (value is True or str(value).strip().lower() in ("1", "true", "yes", "on")) else "false",
         )
 
+    # -- #923 peak-band margin (runtime settings) ------------------------------
+    @property
+    def LP_PEAK_MARGIN_ENABLED(self) -> bool:
+        return str(self._rt_get("LP_PEAK_MARGIN_ENABLED")).strip().lower() in ("1", "true", "yes", "on")
+
+    @LP_PEAK_MARGIN_ENABLED.setter
+    def LP_PEAK_MARGIN_ENABLED(self, value: Any) -> None:
+        self._rt_set(
+            "LP_PEAK_MARGIN_ENABLED",
+            "true" if (value is True or str(value).strip().lower() in ("1", "true", "yes", "on")) else "false",
+        )
+
+    @property
+    def LP_PEAK_MARGIN_QUANTILE(self) -> float:
+        return float(self._rt_get("LP_PEAK_MARGIN_QUANTILE"))
+
+    @LP_PEAK_MARGIN_QUANTILE.setter
+    def LP_PEAK_MARGIN_QUANTILE(self, value: float) -> None:
+        self._rt_set("LP_PEAK_MARGIN_QUANTILE", float(value))
+
+    @property
+    def LP_PEAK_MARGIN_WINDOW_DAYS(self) -> int:
+        return int(self._rt_get("LP_PEAK_MARGIN_WINDOW_DAYS"))
+
+    @LP_PEAK_MARGIN_WINDOW_DAYS.setter
+    def LP_PEAK_MARGIN_WINDOW_DAYS(self, value: int) -> None:
+        self._rt_set("LP_PEAK_MARGIN_WINDOW_DAYS", int(value))
+
+    @property
+    def LP_PEAK_MARGIN_MAX_KWH(self) -> float:
+        return float(self._rt_get("LP_PEAK_MARGIN_MAX_KWH"))
+
+    @LP_PEAK_MARGIN_MAX_KWH.setter
+    def LP_PEAK_MARGIN_MAX_KWH(self, value: float) -> None:
+        self._rt_set("LP_PEAK_MARGIN_MAX_KWH", float(value))
+
     @property
     def LP_SOC_FINAL_KWH(self) -> float:
         return float(self._rt_get("LP_SOC_FINAL_KWH"))
