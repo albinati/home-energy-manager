@@ -340,6 +340,8 @@ Audit and surfacing: every fallback writes `exogenous_snapshot.pv_source` (`sour
 
 The applied k moves at most `LWT_K_MAX_STEP_PCT` from the value at the START of the local day (`kv_state['lwt_k_day_anchor']`, so many solves a day cannot compound; no row = the 0.0333 default) and is clamped to [0.03, 0.10]. With `LWT_K_CALIBRATION_ENABLED` on, `physics.get_kw_per_degc_lwt` clamps continuously to the same range; off keeps the legacy 0.015-0.075 bounds + snap to the default.
 
+Enable order (enforced): live (ENABLED and not SHADOW) is `blocked` (reason `floor_slope_unset`, WARNING once, nothing written) while `LP_W3_SPACE_FLOOR_ENABLED` is on and `LP_W3_SPACE_FLOOR_KW_PER_K`=0; set s first. Daily rows are used only if `fetched_at` >= local midnight ending that date (the 02:35 weekly batch also writes the partial current day).
+
 Modes: `ENABLED=false, SHADOW=true` (DEFAULT) computes and stores the candidate only. A write needs `ENABLED=true` AND `SHADOW=false`. `ENABLED=false, SHADOW=false` = frozen. `kv_state['lwt_k_calibration_last']` (JSON: outcome, mode, k_prev/k_raw/k_candidate/k_applied, ci, b, days) is written on EVERY call; INFO is logged only when the outcome signature changes; every exception path logs at WARNING with its stage (`[fit]`, `[bound]`, `[write]`, `[record]`, `[optimizer call site]`).
 
 | Key | Default | Meaning |
@@ -348,4 +350,4 @@ Modes: `ENABLED=false, SHADOW=true` (DEFAULT) computes and stores the candidate 
 | `LWT_K_CALIBRATION_SHADOW` | true | Compute + store the candidate, never write. |
 | `LWT_K_MAX_STEP_PCT` | 15 (0-100) | Max change of k per local day, % of the day-start value. |
 | `LWT_K_MIN_DAYS` | 14 (3-30) | Min usable measured days. |
-| `LP_W3_SPACE_FLOOR_KW_PER_K` | 0 (0-0.2) | s. 0 = legacy (floor reads k). s > 0: floor = F*s*max(0, X+min_off)*slot_h and the energy->offset inversion uses the same s, so k only moves the ceiling, lift segments and h0. s = current k gives an identical plan (golden test). |
+| `LP_W3_SPACE_FLOOR_KW_PER_K` | 0 (0-0.2) | s. With s > 0 the space ceiling, lift-segment widths and emitter h0 use the capacity slope `max(k, F*s)` (k is the average draw, not the capacity at max lift), so ceiling >= floor. 0 = legacy (floor reads k). s > 0: floor = F*s*max(0, X+min_off)*slot_h and the energy->offset inversion uses the same s, so k only moves the ceiling, lift segments and h0. s = current k gives an identical plan (golden test). |

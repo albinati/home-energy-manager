@@ -57,7 +57,7 @@ def _seed(n_days: int = 20, *, end: date = AS_OF, k: float = TRUE_K, b: float = 
                 y = max(0.0, k * sx + b * so + rnd.gauss(0.0, noise))
                 conn.execute(
                     "INSERT OR REPLACE INTO daikin_consumption_daily (date,kwh_total,kwh_heating,kwh_dhw,source,fetched_at)"
-                    " VALUES (?,?,?,?,?,?)", (ds, y + 2, y, 2.0, source, "2026-11-02T00:00:00Z"))
+                    " VALUES (?,?,?,?,?,?)", (ds, y + 2, y, 2.0, source, (d + timedelta(days=2)).isoformat() + "T03:00:00+00:00"))
             conn.commit()
         finally:
             conn.close()
@@ -282,6 +282,7 @@ def _plan_sig(p):
 
 def test_golden_s_equal_current_k_is_identical_to_s_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     _w3_env(monkeypatch)
+    monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_FACTOR", 1.0, raising=False)  # F*s == k: capacity slope == k
     db.upsert_daikin_lwt_kw_calibration(k_per_degc=0.0581, samples=7, window_days=30)
     monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_KW_PER_K", 0.0, raising=False)
     legacy = _solve()
@@ -380,3 +381,76 @@ def test_wire_run_optimizer_refreshes_before_solve_and_lp_sees_the_bounded_k(mon
     optimizer.run_optimizer(fox=None, daikin=None, trigger_reason="plan_push")
     assert seen[-1] == pytest.approx(0.069) and seen[-2] == pytest.approx(0.069)
     assert _kv()["outcome"] == "applied" and _kv()["k_raw"] > 0.085
+
+
+# ------------------------------------------------ enable order, ceiling capacity, partial days ---------------------------
+
+def test_live_is_blocked_while_floor_is_on_and_slope_unset(monkeypatch: pytest.MonkeyPatch,
+                                                           caplog: pytest.LogCaptureFixture) -> None:
+    _seed(20)
+    db.upsert_daikin_lwt_kw_calibration(k_per_degc=0.0581, samples=7, window_days=30)
+    monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_ENABLED", True, raising=False)
+    monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_KW_PER_K", 0.0, raising=False)
+    with caplog.at_level(logging.INFO, logger="src.db"):
+        for _ in range(3):
+            out = db.refresh_daikin_lwt_kw_calibration(as_of=AS_OF)
+    assert out["outcome"] == "blocked" and out["reason_code"] == "floor_slope_unset"
+    assert db.get_daikin_lwt_kw_calibration()["k_per_degc"] == pytest.approx(0.0581)
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING and "BLOCKED" in r.getMessage()]
+    assert len(warns) == 1  # only on the signature change
+    assert _kv()["outcome"] == "blocked"
+    # with s set (or the floor off) it proceeds
+    monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_KW_PER_K", 0.0581, raising=False)
+    assert db.refresh_daikin_lwt_kw_calibration(as_of=AS_OF)["outcome"] == "applied"
+    # shadow is never blocked: it only observes
+    monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_KW_PER_K", 0.0, raising=False)
+    monkeypatch.setattr(app_config, "LWT_K_CALIBRATION_SHADOW", True)
+    assert db.refresh_daikin_lwt_kw_calibration(as_of=AS_OF)["outcome"] == "shadow"
+
+
+def test_partial_current_day_rows_are_excluded() -> None:
+    days = _seed(20)
+    last = days[-1]
+    # the weekly batch wrote the last day's row DURING that day (partial total)
+    with db._lock:
+        conn = db.get_connection()
+        conn.execute("UPDATE daikin_consumption_daily SET fetched_at=?, kwh_heating=0.3 WHERE date=?",
+                     (last + "T02:35:00+00:00", last))
+        conn.commit()
+        conn.close()
+    r = db.fit_lwt_kw_daily(as_of=AS_OF)
+    assert r["excluded_partial_days"] == 1 and r["n_days"] == 19
+    assert r["k_per_degc"] == pytest.approx(TRUE_K, abs=1e-3)
+
+
+def test_ceiling_capacity_does_not_follow_a_lower_k_when_s_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    _w3_env(monkeypatch)
+    monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_KW_PER_K", 0.0581, raising=False)
+    from src.physics import get_lwt_base_c
+
+    for k in (0.0581, 0.038):
+        db.upsert_daikin_lwt_kw_calibration(k_per_degc=k, samples=7, window_days=30)
+        p = _solve(outdoor=-5.0)
+        assert p.ok
+        # capacity at the written max lift is >= F*s at the same lift (hence >= the floor)
+        for i, c in enumerate(p.space_ceil_kwh):
+            lift = float(app_config.OPTIMIZATION_LWT_OFFSET_MAX)
+            lwt = min(50.0, get_lwt_base_c(-5.0) + lift)
+            assert c >= min(1.0, 1.25 * 0.0581 * (lwt - 18.0) * 0.5) - 1e-6 or c >= 1.0 - 1e-6, (k, i, c)
+            assert c >= p.w3_space_floor_kwh[i] - 1e-9
+
+
+def test_cold_weather_floor_is_not_clipped_by_the_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    _w3_env(monkeypatch)
+    monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_KW_PER_K", 0.0581, raising=False)
+    db.upsert_daikin_lwt_kw_calibration(k_per_degc=0.038, samples=7, window_days=30)
+    from src.physics import get_lwt_base_c
+
+    p = _solve(outdoor=-10.0)
+    assert p.ok
+    min_off = min(0.0, max(float(app_config.OPTIMIZATION_LWT_OFFSET_MIN), float(app_config.DAIKIN_LWT_LP_OFFSET_MIN)))
+    unclipped = 1.25 * 0.0581 * max(0.0, (min(50.0, get_lwt_base_c(-10.0)) - 18.0) + min_off) * 0.5
+    hp_cap = 1.0
+    want = min(unclipped, hp_cap)
+    n_clipped = sum(1 for i, f in enumerate(p.w3_space_floor_kwh) if f < want - 1e-6)
+    assert n_clipped == 0, (want, p.w3_space_floor_kwh[:3], p.space_ceil_kwh[:3])

@@ -154,7 +154,7 @@ def get_lwt_base_c(temp_outdoor_c: float) -> float:
     return min(50.0, max(18.0, lwt))
 
 
-def get_daikin_heating_kw(temp_outdoor_c: float, lwt_offset_delta: float = 0.0) -> float:
+def get_daikin_heating_kw(temp_outdoor_c: float, lwt_offset_delta: float = 0.0, slope: float | None = None) -> float:
     """Estimate continuous space-heating electrical draw from outdoor temperature.
 
     Uses the physical climate (weather-compensation) curve configured on the Daikin panel
@@ -176,7 +176,7 @@ def get_daikin_heating_kw(temp_outdoor_c: float, lwt_offset_delta: float = 0.0) 
     lwt = get_lwt_base_c(temp_outdoor_c) + lwt_offset_delta
     lwt = min(50.0, max(18.0, lwt))
 
-    return (lwt - 18.0) * get_kw_per_degc_lwt()
+    return (lwt - 18.0) * (float(slope) if slope else get_kw_per_degc_lwt())
 
 
 def apply_cop_lift_multiplier(
@@ -346,6 +346,20 @@ def space_floor_slope_override() -> float:
         return max(0.0, float(getattr(config, "LP_W3_SPACE_FLOOR_KW_PER_K", 0.0) or 0.0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def space_capacity_slope() -> float:
+    """#928: capacity slope (kW per K of LWT) for the space CEILING, lift-segment widths and emitter
+    h0. 0.0 = legacy (they read the calibrated k, bit for bit). With ``LP_W3_SPACE_FLOOR_KW_PER_K``
+    s > 0 it is ``max(k, F*s)``: the calibrated k is the AVERAGE draw, not the capacity at max lift,
+    and the ceiling must never fall below the floor ``F*s*(X+off)`` at the same lift."""
+    from .config import config
+
+    s = space_floor_slope_override()
+    if s <= 0.0:
+        return 0.0
+    f = max(0.0, float(getattr(config, "LP_W3_SPACE_FLOOR_FACTOR", 1.0)))
+    return max(float(get_kw_per_degc_lwt()), f * s)
 
 
 def space_floor_curve_kw(temp_outdoor_c: float, slope: float) -> float:

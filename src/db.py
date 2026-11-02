@@ -10802,7 +10802,7 @@ def fit_lwt_kw_daily(
         conn = get_connection()
         try:
             daily = conn.execute(
-                """SELECT date, kwh_heating FROM daikin_consumption_daily
+                """SELECT date, kwh_heating, fetched_at FROM daikin_consumption_daily
                    WHERE source = 'onecta_cache' AND date >= ? AND date < ?
                      AND kwh_heating IS NOT NULL""",
                 (start_s, end_s),
@@ -10831,11 +10831,24 @@ def fit_lwt_kw_daily(
         acc[2] += 1.0
 
     rows: list[tuple[str, float, float, float]] = []  # date, y_kwh, sumX, sumOff
-    n_away = n_cov = n_nolog = 0
+    n_away = n_cov = n_nolog = n_partial = 0
     for r in daily:
         d = str(r["date"])
         if d in excluded_days:
             n_away += 1
+            continue
+        # The weekly 02:35 batch also writes the PARTIAL current day: only rows fetched at/after
+        # local midnight at the END of the date are complete.
+        try:
+            end_of_day = datetime.combine(date.fromisoformat(d) + timedelta(days=1), datetime.min.time(), tzinfo=tz)
+            fa = datetime.fromisoformat(str(r["fetched_at"]).replace("Z", "+00:00"))
+            if fa.tzinfo is None:
+                fa = fa.replace(tzinfo=UTC)
+            if fa < end_of_day:
+                n_partial += 1
+                continue
+        except (ValueError, TypeError):
+            n_partial += 1
             continue
         acc = per_day.get(d)
         if acc is None:
@@ -10853,6 +10866,7 @@ def fit_lwt_kw_daily(
     base = {
         "as_of": today.isoformat(), "window_days": window_days, "n_days": len(rows),
         "excluded_away_days": n_away, "excluded_low_coverage_days": n_cov, "excluded_no_log_days": n_nolog,
+        "excluded_partial_days": n_partial,
     }
     if len(rows) < min_days:
         return {**base, "status": "skipped",
@@ -10896,7 +10910,7 @@ def _fmt(v: Any, nd: int = 4) -> str:
     return "-" if v is None else f"{float(v):.{nd}f}"
 
 
-def _record_lwt_k_outcome(outcome: dict[str, Any]) -> None:
+def _record_lwt_k_outcome(outcome: dict[str, Any]) -> bool:
     """Always store the outcome in ``kv_state``; INFO-log only on a change / state transition
     (the refresh runs on every solve, ~20-45x a day)."""
     outcome["at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -10911,7 +10925,10 @@ def _record_lwt_k_outcome(outcome: dict[str, Any]) -> None:
         prev_sig = json.loads(get_kv(LWT_K_OUTCOME_KV) or "{}").get("sig")
     except Exception:  # noqa: BLE001
         logger.warning("lwt k calibration [record]: previous outcome unreadable", exc_info=True)
-    if sig != prev_sig:
+    changed = sig != prev_sig
+    if changed and outcome.get("outcome") == "blocked":
+        logger.warning("daikin_lwt_calibration: BLOCKED (%s): %s", outcome.get("reason_code"), outcome.get("reason"))
+    elif changed:
         logger.info(
             "daikin_lwt_calibration: %s%s k_prev=%s k_raw=%s k_candidate=%s k_applied=%s ci=[%s,%s] "
             "b=%s days=%s r2=%s step_limited=%s clamped=%s",
@@ -10926,6 +10943,7 @@ def _record_lwt_k_outcome(outcome: dict[str, Any]) -> None:
         set_kv(LWT_K_OUTCOME_KV, json.dumps(outcome, default=str))
     except Exception:  # noqa: BLE001 — observability must not break the solve
         logger.warning("lwt k calibration [record]: kv write failed", exc_info=True)
+    return changed
 
 
 def _lwt_k_day_anchor(prev_k: float | None, local_today: date) -> float:
@@ -10969,6 +10987,15 @@ def refresh_daikin_lwt_kw_calibration(*, as_of: date | None = None) -> dict[str,
         if out["mode"] == "frozen":
             out.update(outcome="frozen", reason="calibration disabled and shadow off", reason_code="frozen",
                        k_applied=prev_k)
+            _record_lwt_k_outcome(out)
+            return out
+        if (out["mode"] == "live" and bool(getattr(config, "LP_W3_SPACE_FLOOR_ENABLED", False))
+                and float(getattr(config, "LP_W3_SPACE_FLOOR_KW_PER_K", 0.0) or 0.0) <= 0.0):
+            # Enable order: with the #921 floor on and s unset the floor follows k, and a lower k
+            # under-plans space heat (replay: -22 %). Set LP_W3_SPACE_FLOOR_KW_PER_K first.
+            out.update(outcome="blocked", reason_code="floor_slope_unset", k_applied=prev_k,
+                       reason="LP_W3_SPACE_FLOOR_ENABLED is on and LP_W3_SPACE_FLOOR_KW_PER_K=0: "
+                              "set the floor slope before letting k write")
             _record_lwt_k_outcome(out)
             return out
         min_days = int(getattr(config, "LWT_K_MIN_DAYS", 14))
