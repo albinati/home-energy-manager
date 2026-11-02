@@ -2700,6 +2700,30 @@ class Config:
         self._rt_set("LP_W3_EMITTER_TAU_MIN", float(value))
 
     @property
+    def LP_W3_SPACE_FLOOR_ENABLED(self) -> bool:
+        return str(self._rt_get("LP_W3_SPACE_FLOOR_ENABLED")).strip().lower() in ("true", "1", "yes", "on")
+
+    @LP_W3_SPACE_FLOOR_ENABLED.setter
+    def LP_W3_SPACE_FLOOR_ENABLED(self, value: bool) -> None:
+        self._rt_set("LP_W3_SPACE_FLOOR_ENABLED", "true" if value in (True, "true", "True", 1, "1") else "false")
+
+    @property
+    def LP_W3_SPACE_FLOOR_FACTOR(self) -> float:
+        return float(self._rt_get("LP_W3_SPACE_FLOOR_FACTOR"))
+
+    @LP_W3_SPACE_FLOOR_FACTOR.setter
+    def LP_W3_SPACE_FLOOR_FACTOR(self, value: float) -> None:
+        self._rt_set("LP_W3_SPACE_FLOOR_FACTOR", float(value))
+
+    @property
+    def LP_W3_SPACE_FLOOR_TRIM_KW_PER_K(self) -> float:
+        return float(self._rt_get("LP_W3_SPACE_FLOOR_TRIM_KW_PER_K"))
+
+    @LP_W3_SPACE_FLOOR_TRIM_KW_PER_K.setter
+    def LP_W3_SPACE_FLOOR_TRIM_KW_PER_K(self, value: float) -> None:
+        self._rt_set("LP_W3_SPACE_FLOOR_TRIM_KW_PER_K", float(value))
+
+    @property
     def LP_COP_LWT_OFFSET_PENALTY_PER_K(self) -> float:
         return float(self._rt_get("LP_COP_LWT_OFFSET_PENALTY_PER_K"))
 

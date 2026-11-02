@@ -263,6 +263,44 @@ SCHEMA: dict[str, SettingSpec] = {
             "bit-for-bit)."
         ),
     ),
+    "LP_W3_SPACE_FLOOR_ENABLED": SettingSpec(
+        key="LP_W3_SPACE_FLOOR_ENABLED",
+        type_name="str",
+        env_default=_str_env("LP_W3_SPACE_FLOOR_ENABLED", "false"),
+        enum=("true", "false"),
+        description=(
+            "Aquecimento (#921): piso de aquecimento no plano W3. O firmware da Daikin "
+            "segue a curva climática e os offsets de LWT só reduzem o consumo, nunca o "
+            "zeram; ligado, o plano não programa 'descansos' que o aparelho não faz: "
+            "e_space >= fator x consumo da curva no offset mais fundo que o despachante "
+            "escreve (max(OPTIMIZATION_LWT_OFFSET_MIN, DAIKIN_LWT_LP_OFFSET_MIN)). "
+            "Desligado = comportamento antigo, bit a bit."
+        ),
+    ),
+    "LP_W3_SPACE_FLOOR_FACTOR": SettingSpec(
+        key="LP_W3_SPACE_FLOOR_FACTOR",
+        type_name="float",
+        env_default=_float_env("LP_W3_SPACE_FLOOR_FACTOR", "1.0"),
+        min_value=0.0,
+        max_value=1.5,
+        description=(
+            "Aquecimento (#921): multiplica o consumo mínimo do piso (curva no offset "
+            "mais fundo). 1.0 = o que o aparelho consome com o corte máximo; >1 aperta "
+            "o piso (menos descanso). Só vale com LP_W3_SPACE_FLOOR_ENABLED."
+        ),
+    ),
+    "LP_W3_SPACE_FLOOR_TRIM_KW_PER_K": SettingSpec(
+        key="LP_W3_SPACE_FLOOR_TRIM_KW_PER_K",
+        type_name="float",
+        env_default=_float_env("LP_W3_SPACE_FLOOR_TRIM_KW_PER_K", "0.0"),
+        min_value=0.0,
+        max_value=0.2,
+        description=(
+            "Aquecimento (#921): kW cortados por K de offset negativo no piso. 0 = usa a "
+            "calibração do modelo (get_kw_per_degc_lwt, a mesma que converte plano em "
+            "offset). Medido em buckets Onecta: ~0,043 kW/K (IC95 0,020-0,070)."
+        ),
+    ),
     "LP_COP_LWT_OFFSET_PENALTY_PER_K": SettingSpec(
         key="LP_COP_LWT_OFFSET_PENALTY_PER_K",
         type_name="float",
