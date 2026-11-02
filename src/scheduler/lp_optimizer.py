@@ -29,6 +29,9 @@ from ..physics import (
     get_daikin_heating_kw,
     get_lwt_base_c,
     lwt_offset_from_space_kw,
+    lwt_offset_from_space_kw_device,
+    space_floor_device_draw_kw,
+    space_floor_device_params,
     predict_passive_daikin_load,
 )
 from ..weather import WeatherLpSeries
@@ -54,8 +57,10 @@ def w3_space_floor_kwh_slot(
     exactly ``min_offset_k``). ``factor`` scales it; ``cap_kwh`` (ceiling / HP cap) keeps the
     constraint satisfiable. No gains: the firmware curve ignores sun and internal heat.
     """
-    draw_kw = max(0.0, float(curve_kw) + max(0.0, float(k_kw_per_k)) * min(0.0, float(min_offset_k)))
-    return max(0.0, min(float(cap_kwh), max(0.0, float(factor)) * draw_kw * float(slot_h)))
+    draw_kw = space_floor_device_draw_kw(
+        curve_kw, min(0.0, float(min_offset_k)), factor=factor, k_t=k_kw_per_k,
+    )
+    return max(0.0, min(float(cap_kwh), draw_kw * float(slot_h)))
 
 
 def dhw_block_ambient_c(initial: Any) -> float | None:
@@ -785,12 +790,10 @@ def solve_lp(
     # (lp_dispatch._lp_offsets: clamp to max(OPTIMIZATION_LWT_OFFSET_MIN, DAIKIN_LWT_LP_OFFSET_MIN)).
     w3_sf_on = bool(w3) and bool(getattr(config, "LP_W3_SPACE_FLOOR_ENABLED", False)) and not off_climate
     w3_sf_floor: list[float] = [0.0] * n
+    _fac, _k = 1.0, 0.0
     if w3_sf_on:
-        from ..physics import get_kw_per_degc_lwt as _k_lwt
         _min_off = min(0.0, max(float(config.OPTIMIZATION_LWT_OFFSET_MIN), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
-        _trim = float(getattr(config, "LP_W3_SPACE_FLOOR_TRIM_KW_PER_K", 0.0) or 0.0)
-        _k = _trim if _trim > 0 else float(_k_lwt())
-        _fac = float(getattr(config, "LP_W3_SPACE_FLOOR_FACTOR", 1.0))
+        _fac, _k = space_floor_device_params()
         for _i in range(n):
             w3_sf_floor[_i] = w3_space_floor_kwh_slot(
                 curve_kw=get_daikin_heating_kw(float(t_out[_i])), k_kw_per_k=_k,
@@ -2137,9 +2140,15 @@ def solve_lp(
         else:
             plan.cop_space_effective.append(cop_space[i])
         # Back-compute the LWT offset the Daikin must apply to deliver this energy draw.
-        plan.lwt_offset_c.append(lwt_offset_from_space_kw(
-            es_val / slot_h, t_out[i], lo=_lwt_inv_lo, hi=_lwt_inv_hi,
-        ))
+        if w3_sf_on and _fac > 0.0 and _k > 0.0:
+            # #921 — invert the SAME device model the floor uses (a slot at the floor = deepest offset).
+            plan.lwt_offset_c.append(lwt_offset_from_space_kw_device(
+                es_val / slot_h, t_out[i], factor=_fac, k_t=_k, lo=_lwt_inv_lo, hi=_lwt_inv_hi,
+            ))
+        else:
+            plan.lwt_offset_c.append(lwt_offset_from_space_kw(
+                es_val / slot_h, t_out[i], lo=_lwt_inv_lo, hi=_lwt_inv_hi,
+            ))
     for i in range(n + 1):
         plan.soc_kwh.append(_v(soc[i]))
         plan.tank_temp_c.append(

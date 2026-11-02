@@ -20,6 +20,9 @@ ENV = {
     "LP_INVERTER_STRESS_COST_PENCE": 0.0, "LP_W3_TIN_ENABLED": True,
     "BUILDING_UA_W_PER_K": 200.0, "DAIKIN_HOLIDAY_DETECT_ENABLED": True,
     "DAIKIN_LWT_SOURCE": "lp",
+    # hermetic vs a dev .env found by load_dotenv() in a parent dir (the golden is CI/no-.env)
+    "BATTERY_CAPACITY_KWH": 10.0,
+    "LP_SOC_FINAL_KWH": 2.5,
 }
 
 
@@ -48,8 +51,8 @@ def _solve(outdoor=8.0, indoor=21.0, n=24, prices=None, start=None, **init_kw):
     )
 
 
-# Golden OFF plan: values computed with the PRE-PR code (origin/main f72db76) on this exact scenario.
-GOLDEN_OFF_SPACE = [0.2968, 0.2968, 0.2968, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.0073, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.2968, 0.2968, 0.2968, 0.2968, 0.0]
+# Golden OFF plan: values computed with the PRE-PR code (origin/main f72db76) on this exact scenario under pytest.
+GOLDEN_OFF = {"space": [0.2968, 0.2968, 0.2968, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.0073, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.3164, 0.2968, 0.2968, 0.2968, 0.2968, 0.0], "dhw": [0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.45, 0.45, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06], "imp": [0.6268, 0.6268, 0.6268, 0.6463, 0.6463, 0.6463, 0.6463, 0.6463, 0.6463, 0.6463, 1.0663, 1.0663, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6764, 0.6568, 0.6568, 0.6568, 0.6568, 0.786], "soc": [6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 5.6171, 4.9119, 4.2068, 3.5017, 2.7965, 2.0914, 2.0914, 2.0914, 2.0914, 2.0914, 2.0914, 2.5], "tin": [21.0, 21.0, 21.0, 21.0, 21.0071, 21.0142, 21.0212, 21.0282, 21.0351, 21.0419, 21.0487, 21.0554, 21.0621, 20.9559, 20.9634, 20.9709, 20.9782, 20.9856, 20.9928, 21.0, 21.0, 21.0, 21.0, 21.0, 20.8917], "off": [3.826, 3.826, 3.826, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, -10.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 3.826, 3.826, 3.826, 3.826, -10.0], "obj": 115.397}
 
 
 def test_formula_and_caps():
@@ -70,7 +73,14 @@ def test_formula_and_caps():
 def test_off_matches_golden_pre_pr_plan():
     p = _solve()
     assert p.ok and p.w3_space_floor_kwh == []
-    assert [round(x, 4) for x in p.space_electric_kwh] == GOLDEN_OFF_SPACE
+    r = lambda xs: [round(float(x), 4) for x in xs]
+    assert r(p.space_electric_kwh) == GOLDEN_OFF["space"]
+    assert r(p.dhw_electric_kwh) == GOLDEN_OFF["dhw"]
+    assert r(p.import_kwh) == GOLDEN_OFF["imp"]
+    assert r(p.soc_kwh) == GOLDEN_OFF["soc"]
+    assert r(p.indoor_temp_c) == GOLDEN_OFF["tin"]
+    assert r(p.lwt_offset_c) == GOLDEN_OFF["off"]
+    assert round(p.objective_pence, 3) == GOLDEN_OFF["obj"]
 
 
 def test_floor_binds_and_trim_stays_representable(monkeypatch):
@@ -90,25 +100,38 @@ def test_floor_binds_and_trim_stays_representable(monkeypatch):
     assert curve0 is None or True
 
 
-def test_wire_floored_slot_is_written_at_deepest_offset(monkeypatch):
+@pytest.mark.parametrize("outdoor", [-2.0, 8.0])
+@pytest.mark.parametrize("trim", [0.0, 0.043])
+@pytest.mark.parametrize("factor", [1.0, 1.25, 1.5])
+def test_wire_floored_slot_is_written_at_deepest_offset(monkeypatch, factor, trim, outdoor):
     """lp_dispatch._lp_offsets: a slot planned AT the floor is written at the deepest writable
-    offset (not 0), and the plan still contains deeper-than-zero coast rows."""
+    offset for every factor/trim (the inversion is the floor's own device model), and a slot above
+    the floor never gets a positive offset unless it draws more than F * curve."""
+    from src.physics import get_daikin_heating_kw
     from src.scheduler import lp_dispatch
 
     monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_ENABLED", True, raising=False)
-    plan = _solve(outdoor=8.0)
+    monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_FACTOR", factor, raising=False)
+    monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_TRIM_KW_PER_K", trim, raising=False)
+    # cold point: a smaller UA keeps the W3 trajectory plausible (the dispatcher gate) at -2 C
+    monkeypatch.setattr(app_config, "BUILDING_UA_W_PER_K", 90.0 if outdoor < 0 else 200.0, raising=False)
+    plan = _solve(outdoor=outdoor, indoor=21.0)
     assert plan.ok
-    offs = lp_dispatch._lp_offsets(plan, live_indoor_c=21.0, now_utc=plan.slot_starts_utc[0] - timedelta(hours=6))
+    offs = lp_dispatch._lp_offsets(plan, live_indoor_c=None, now_utc=plan.slot_starts_utc[0] - timedelta(hours=6))
     assert offs is not None
     deepest = int(max(float(app_config.OPTIMIZATION_LWT_OFFSET_MIN), float(app_config.DAIKIN_LWT_LP_OFFSET_MIN)))
-    at_floor = [
-        i for i, f in enumerate(plan.w3_space_floor_kwh)
-        if f > 1e-6 and abs(plan.space_electric_kwh[i] + (f / HP_KWH) * plan.dhw_electric_kwh[i] - f) < 1e-4
-    ]
-    assert at_floor, "scenario must have slots planned exactly at the floor"
-    for i in at_floor:
-        assert offs[i] == deepest, (i, offs[i], deepest)
-    assert min(o for o in offs if o is not None) == deepest
+    curve_kwh = get_daikin_heating_kw(outdoor) * 0.5
+    n_floor = 0
+    for i, f in enumerate(plan.w3_space_floor_kwh):
+        es = plan.space_electric_kwh[i]
+        eff = es + (f / HP_KWH) * plan.dhw_electric_kwh[i]
+        if f > 1e-6 and abs(eff - f) < 1e-4:
+            n_floor += 1
+            assert offs[i] == deepest, (i, offs[i], deepest, es, f)
+        if offs[i] is not None and offs[i] > 0:
+            assert es > factor * curve_kwh - 1e-6, (i, offs[i], es, factor * curve_kwh)
+    if factor <= 1.25:
+        assert n_floor > 0, "mild scenario must have floored slots"
 
 
 def test_factor_zero_equals_off(monkeypatch):
@@ -191,3 +214,23 @@ def test_pessimistic_scenario_is_feasible_with_floor(monkeypatch):
     )
     assert res["pessimistic"].plan is not None and res["pessimistic"].plan.ok
     assert res["optimistic"].plan is not None and res["optimistic"].plan.ok
+
+
+@pytest.mark.parametrize("factor,trim", [(1.0, 0.0), (1.25, 0.0), (1.5, 0.043), (1.25, 0.043)])
+@pytest.mark.parametrize("t_out", [-2.0, 5.0, 10.0])
+def test_device_inversion_maps_floor_to_deepest_offset(monkeypatch, factor, trim, t_out):
+    from src.physics import (
+        get_daikin_heating_kw,
+        lwt_offset_from_space_kw_device,
+        space_floor_device_draw_kw,
+        space_floor_device_params,
+    )
+
+    monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_FACTOR", factor, raising=False)
+    monkeypatch.setattr(app_config, "LP_W3_SPACE_FLOOR_TRIM_KW_PER_K", trim, raising=False)
+    f, k = space_floor_device_params()
+    c = get_daikin_heating_kw(t_out)
+    for m in (-5.0, -3.0, 0.0, 2.0):
+        kw = space_floor_device_draw_kw(c, m, factor=f, k_t=k)
+        got = lwt_offset_from_space_kw_device(kw, t_out, factor=f, k_t=k, lo=-10.0, hi=10.0)
+        assert got == pytest.approx(m, abs=1e-6)

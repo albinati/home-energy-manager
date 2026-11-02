@@ -309,6 +309,54 @@ def lwt_offset_from_space_kw(
     return max(lo_b, min(hi_b, offset))
 
 
+
+# ---------------------------------------------------------------------------
+# #921 — W3 space-floor device model (ONE definition shared by the LP floor and
+# the plan's energy -> offset inversion, so they cannot drift apart).
+#   draw_kw(c, off) = factor * max(0, c + k_t * off)      c = curve_kw(T_out)
+# ---------------------------------------------------------------------------
+
+def space_floor_device_params() -> tuple[float, float]:
+    """``(factor, k_t)``: LP_W3_SPACE_FLOOR_FACTOR and the trim slope (kW per K of offset;
+    LP_W3_SPACE_FLOOR_TRIM_KW_PER_K, 0 = the calibrated model k)."""
+    from .config import config
+
+    factor = max(0.0, float(getattr(config, "LP_W3_SPACE_FLOOR_FACTOR", 1.0)))
+    trim = float(getattr(config, "LP_W3_SPACE_FLOOR_TRIM_KW_PER_K", 0.0) or 0.0)
+    return factor, (trim if trim > 0 else float(get_kw_per_degc_lwt()))
+
+
+def space_floor_device_draw_kw(curve_kw: float, offset_k: float, *, factor: float, k_t: float) -> float:
+    """Electric kW the device draws at ``offset_k`` under the floor's device model."""
+    return max(0.0, float(factor)) * max(0.0, float(curve_kw) + max(0.0, float(k_t)) * float(offset_k))
+
+
+def lwt_offset_from_space_kw_device(
+    space_kw: float,
+    temp_outdoor_c: float,
+    *,
+    factor: float,
+    k_t: float,
+    lo: float | None = None,
+    hi: float | None = None,
+) -> float:
+    """Inverse of :func:`space_floor_device_draw_kw` (used instead of
+    :func:`lwt_offset_from_space_kw` when the W3 space floor is on): a slot planned exactly at
+    the floor maps to the deepest offset. Falls back to the legacy inversion where the device
+    model is degenerate (no curve draw, factor or k_t <= 0)."""
+    from .config import config
+
+    c = get_daikin_heating_kw(temp_outdoor_c)
+    if c <= 0.0 or factor <= 0.0 or k_t <= 0.0:
+        return lwt_offset_from_space_kw(space_kw, temp_outdoor_c, lo=lo, hi=hi)
+    lo_b = float(config.OPTIMIZATION_LWT_OFFSET_MIN) if lo is None else float(lo)
+    hi_b = float(config.OPTIMIZATION_LWT_OFFSET_MAX) if hi is None else float(hi)
+    if space_kw <= 0.0:
+        return lo_b
+    off = (space_kw / factor - c) / k_t
+    return max(lo_b, min(hi_b, off))
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
