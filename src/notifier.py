@@ -1090,7 +1090,7 @@ def notify_morning_tank_cold(
         "target_c": round(float(target_c), 1) if target_c is not None else None,
         "next_warmup_local": next_warmup_local,
     }
-    _dispatch(AlertType.MORNING_TANK_COLD, body="\n".join(lines), urgent=False, extra=extra)
+    _dispatch(AlertType.MORNING_TANK_COLD, message="\n".join(lines), urgent=False, extra=extra)
 
 
 def notify_lp_health_regression(issues: list[str]) -> None:

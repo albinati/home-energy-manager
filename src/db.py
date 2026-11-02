@@ -596,7 +596,6 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         # user has to decide something), so they must not land in the muted
         # FYI bucket alongside the digests.
         ("tank_target_divergence", "critical", 0),
-        ("morning_tank_cold",      "critical", 0),
         # 2026-08-08 (#784) — actuation wedged. CRITICAL by construction: this is
         # the alert whose absence let two multi-day outages run unnoticed.
         ("actuation_stale",        "critical", 0),
@@ -611,6 +610,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                VALUES (?, 1, ?, ?)""",
             (_at, _sev, _sil),
         )
+    # #939 -- morning_tank_cold is record-only by default (owner: no push). Seeded
+    # DISABLED; INSERT OR IGNORE so an existing row (any prod override) is never touched.
+    conn.execute(
+        """INSERT OR IGNORE INTO notification_routes
+           (alert_type, enabled, severity, silent)
+           VALUES ('morning_tank_cold', 0, 'critical', 0)"""
+    )
 
     # V7: plan_consent — holds proposed plans until the user approves/rejects via MCP
     conn.execute(
