@@ -961,6 +961,14 @@ def bulletproof_load_error_log_job() -> None:
         logger.info("load_error_log rebuild: date_utc=%s rows=%d", target_day.isoformat(), rows)
     except Exception as e:
         logger.warning("load_error_log rebuild failed (non-fatal): %s", e)
+    # #923 — backfill the peak-band margin window and cache the margin (off the
+    # solve path; always computed so the admin view shows the would-be margin).
+    try:
+        from ..analytics import peak_margin as _pm
+
+        _pm.warm()
+    except Exception as e:
+        logger.warning("peak margin warm failed (non-fatal): %s", e)
     # Phase 2 — refresh the adaptive load-bias table from the just-rebuilt error
     # log. Cheap + observable; NO LP effect unless LOAD_RECENT_BIAS_ENABLED.
     try:

@@ -273,11 +273,18 @@ What v3 changes:
 
 ## Peak-band conformal margin (#923, epic #920)
 
-Summing per-slot p75 spreads over the expensive band covers the band SUM on only 57-72% of days (slot errors are correlated; quantiles do not add). With `LP_PEAK_MARGIN_ENABLED=true` the pessimistic scenario sizes the expensive band (Cosy peak 16-19; Agile `expensive`/`severe_peak` windows) as `nominal + margin`, the margin being the q-quantile of the last N days of `measured band load - committed total forecast` (band sum, from `load_error_log`; days missing there are rebuilt from the same committed stitch + load integrator). The margin is spread over the band slots in proportion to the nominal shape and REPLACES the summed slot spread on those slots; other slots keep the spread. The peak-entry charge floor is read from that pessimistic SoC trajectory, so the re-solve sees it. Away / holiday / return / non-normal-preset days are excluded (`_hard_away_dates`, #922). Fewer than 10 usable days = legacy behaviour. Cached per hour; each solve logs it under `exogenous_snapshot["peak_band_margin"]`; `GET /api/v1/load/expected` returns it as `peak_margin` (`margin_kwh`, `coverage_pct` = share of window days with error <= margin, `n_days`, `fallback`).
+Summing per-slot p75 spreads over the expensive band covers the band SUM on only 57-72% of days (slot errors are correlated; quantiles do not add). With `LP_PEAK_MARGIN_ENABLED=true` the pessimistic scenario floors the expensive band (Cosy peak 16-19; Agile `expensive`/`severe_peak` windows) at `nominal + margin`.
+
+- **Residual basis.** Daily error = sum over band slots of (measured load - measured heat pump) minus the committed BASE forecast (`load_error_log.forecast_base_kwh`). The measured HP is #922's hybrid split (`db.measured_residual_by_local_slot`: Onecta buckets + daily remainder + water-fill, never `telemetry_integral`; days without a measured split are skipped). So the margin does not move when the LP's heat-pump model changes.
+- **Conformal.** Margin = the `ceil((n+1)q)`-th smallest of the last N days' errors (capped at n), clamped to `[0, LP_PEAK_MARGIN_MAX_KWH]`. `coverage_oos_pct` is rolling OUT-OF-SAMPLE (each day against the margin from the days before it, at least 14 prior), `n_oos` its sample size.
+- **Same forecaster only.** Each run stores `exogenous_snapshot["base_forecaster_key"]` (`v3|<statistic>|<dow shrink>|away=<0/1>|bias=<0/1>` or `v2|bias=<0/1>`). Only history days whose latest run (within 36 h before 16:00 local) has the CURRENT key are used; runs with no key count as `v2|bias=0`. After changing any base-forecaster setting the history restarts (margin off, legacy spread, until 14 matching days).
+- **Never lowers the pessimistic band.** Per local-day group the band sum is `max(sum of the spread-perturbed band, sum(nominal) + margin)`; when the margin wins it is spread by the nominal shape. Continuous at margin 0. Other slots keep the spread. A band only partly inside the horizon gets the margin scaled by slots / typical band slots. On Agile the band length varies by day.
+- **Off the solve path.** Complete days are cached per process. The nightly `bulletproof_load_error_log_job` runs `peak_margin.warm()` (backfills `load_error_log` for window days missing band rows via `rebuild_load_error_log_for_date`, then caches the margin); a solve only repairs yesterday. The first solve after a restart computes the window once.
+- **Audit/endpoint.** Each solve logs `exogenous_snapshot["peak_band_margin"]`. `GET /api/v1/load/expected` returns `peak_margin` from the cache only (`fallback="not_computed"` when none; it describes TODAY regardless of `date`): `margin_kwh`, `coverage_oos_pct`, `n_oos`, `n_days` (usable), `min_days` (14), `enabled`, `fallback`.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `LP_PEAK_MARGIN_ENABLED` | false | Kill switch. false = summed slot spread, byte-identical. |
-| `LP_PEAK_MARGIN_QUANTILE` | 0.75 | 0.5..0.95, quantile of the band-sum errors. |
-| `LP_PEAK_MARGIN_WINDOW_DAYS` | 42 | 14..90 days of history. |
+| `LP_PEAK_MARGIN_QUANTILE` | 0.75 | 0.5..0.95. |
+| `LP_PEAK_MARGIN_WINDOW_DAYS` | 42 | 14..90 days of history. Fewer than 14 usable days = legacy. |
 | `LP_PEAK_MARGIN_MAX_KWH` | 2.0 | Cap on the margin (also clamped >= 0). |

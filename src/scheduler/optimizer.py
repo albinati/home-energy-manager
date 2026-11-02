@@ -2106,25 +2106,25 @@ def _run_optimizer_lp(
     # #923 — expensive-band conformal margin for the pessimistic scenario (and so
     # the peak-entry charge floor). OFF by default: band_extra stays None and
     # every downstream call is byte-identical to the legacy path.
-    peak_band_extra: list[float | None] | None = None
+    peak_band_margins: list[tuple[list[int], float]] | None = None
     peak_margin_info: dict[str, Any] | None = None
     if getattr(config, "LP_PEAK_MARGIN_ENABLED", False):
         try:
             from ..analytics import peak_margin as _pm
 
             peak_margin_info = _pm.peak_band_margin()
-            peak_band_extra = _pm.band_extra_by_slot(
-                starts, prices, base_load,
+            peak_band_margins = _pm.band_margin_groups(
+                starts, prices,
                 float(peak_margin_info.get("margin_kwh") or 0.0),
                 band_slots=int(peak_margin_info.get("band_slots") or 0),
             )
             peak_margin_info["applied_slots"] = (
-                sum(1 for x in peak_band_extra if x is not None) if peak_band_extra else 0
+                sum(len(g) for g, _m in peak_band_margins) if peak_band_margins else 0
             )
             logger.info("LP peak-band margin: %s", peak_margin_info)
         except Exception:  # noqa: BLE001 - never break a solve over a diagnostic
             logger.warning("peak-band margin failed — legacy summed spread", exc_info=True)
-            peak_band_extra = None
+            peak_band_margins = None
 
     forecast_fetch = fetch_forecast_snapshot(hours=max(48, int(config.LP_HORIZON_HOURS) + 24))
     forecast = forecast_fetch.forecast
@@ -2532,6 +2532,12 @@ def _run_optimizer_lp(
     # charge floor needs them on every scenario-bearing trigger — the measured
     # empty-battery evenings happen on plain self-use days.
     # ------------------------------------------------------------------
+    try:  # #923 — which base forecaster produced this run's base_load (margin history match)
+        from ..analytics import peak_margin as _pmk
+
+        exogenous_snapshot["base_forecaster_key"] = _pmk.current_forecaster_key()
+    except Exception:  # noqa: BLE001
+        pass
     if peak_margin_info is not None:
         exogenous_snapshot["peak_band_margin"] = peak_margin_info  # #923 audit
     scenarios_dict: dict[str, Any] | None = None
@@ -2570,7 +2576,7 @@ def _run_optimizer_lp(
                         micro_climate_offset_by_hour_c=micro_climate_offset_by_hour,
                         export_price_pence=export_prices,
                         base_load_spread=base_load_spread,  # #477 Stage 2 — per-slot p75 spread
-                        pessimistic_band_extra_kwh=peak_band_extra,  # #923
+                        pessimistic_band_margins=peak_band_margins,  # #923
                     )
                 )
             except Exception as e:
