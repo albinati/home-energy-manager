@@ -112,6 +112,13 @@ def get_refresh_stats_extended() -> dict:
     }
 
 
+def get_cached_realtime_age_seconds() -> float | None:
+    """Age (s) of the cached realtime reading, or None when nothing is cached."""
+    if _last_realtime is None or _last_realtime_updated_monotonic is None:
+        return None
+    return max(0.0, time.monotonic() - _last_realtime_updated_monotonic)
+
+
 def get_cached_realtime(max_age_seconds: int | None = None) -> RealTimeData:
     """Return realtime data from cache if fresh, else fetch from Fox ESS.
 

@@ -7423,6 +7423,21 @@ def get_daikin_telemetry_range(start_epoch: float, end_epoch: float, *, source: 
             conn.close()
 
 
+def get_recent_daikin_telemetry(*, source: str = "live", limit: int = 2) -> list[dict[str, Any]]:
+    """Newest-first daikin_telemetry rows for ``source`` (#929 tank roll-forward)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM daikin_telemetry WHERE source = ? "
+                "ORDER BY fetched_at DESC LIMIT ?",
+                (source, int(limit)),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def get_latest_daikin_telemetry(
     *, source: str | None = None
 ) -> dict[str, Any] | None:

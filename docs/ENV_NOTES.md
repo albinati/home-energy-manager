@@ -308,3 +308,14 @@ as exactly that offset. No gains term (the curve ignores sun).
 | `LP_W3_SPACE_FLOOR_TRIM_KW_PER_K` | 0 (0-0.2) | k. 0 = model calibration `get_kw_per_degc_lwt()`. Measured on Onecta-only 2h buckets: 0.043 kW/K (95% CI 0.020-0.070, n=46). |
 
 The DHW term is a linear time-share, so the floor is always satisfiable (legionella at full compressor included).
+
+## LP initial state rolled forward to slot 0 (#929)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `LP_INITIAL_STATE_ROLL_FORWARD_ENABLED` | true | Kill switch (runtime setting). false = SoC and tank seeded with the values read at run time, exactly as before. |
+
+Slot 0 is the next half-hour boundary, so the readings are up to ~29 min (+ cache age) stale. Oct 2026 audit over 782 runs: SoC |err| mean 0.43 kWh, p95 1.86, max 3.32; tank |err| mean 0.61 C, p95 4.0, max 15.3.
+- SoC: measured Fox battery power (`batChargePower - batDischargePower`) held over reading -> slot 0, clamped to the inverter limit and [reserve, capacity]. No roll when the power is older than 5 min or absent. A ForceCharge/ForceDischarge group of the latest uploaded schedule that STARTS between the reading and slot 0 contributes its `fdPwr` from its start (stops at `fdSoc`), because the measured power cannot show it yet (the cheap-band start is the biggest residual).
+- Tank: when the last two live samples show a rise >= 0.4 C the rate is extrapolated, capped at the setpoint (or `DHW_TEMP_MAX_C` when the telemetry setpoint is below the reading, i.e. Powerful/boost). Standing loss (tank params #819) is applied only when it exceeds 0.5 C: the sensor is quantised to 1 C and applying the raw loss made the audit error worse.
+- The roll is recorded in the snapshot (`exogenous_snapshot.initial_roll_forward`). When W3 is enabled but there is no fresh indoor reading, a warning is logged and `exogenous_snapshot.w3_disabled_reason` = `no_fresh_indoor_reading`.

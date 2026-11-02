@@ -1072,6 +1072,20 @@ SCHEMA: dict[str, SettingSpec] = {
             "byte-identical to legacy (soc_floor_pct never set)."
         ),
     ),
+    # --- #929 roll the LP initial state forward to slot 0 --------------------
+    "LP_INITIAL_STATE_ROLL_FORWARD_ENABLED": SettingSpec(
+        key="LP_INITIAL_STATE_ROLL_FORWARD_ENABLED",
+        type_name="str",  # "true" / "false" - kill switch, false = state read at run time exactly
+        env_default=_str_env("LP_INITIAL_STATE_ROLL_FORWARD_ENABLED", "true"),
+        enum=("true", "false"),
+        description=(
+            "#929: slot 0 of the LP is the next half-hour boundary, up to 29 min "
+            "after the SoC / tank readings. true = roll SoC forward with the "
+            "measured battery power (and a Force* schedule group that starts in "
+            "the gap) and the tank with the recent reheat rate. false = seed the "
+            "LP with the values read at run time (legacy)."
+        ),
+    ),
     "LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE": SettingSpec(
         key="LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE",
         type_name="float",
