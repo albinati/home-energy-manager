@@ -2715,6 +2715,16 @@ def residual_load_profile_v2(
     # physics, no away exclusion) so the LP plan can be rolled back live (#477).
     _v2 = bool(getattr(config, "LP_RESIDUAL_PROFILE_V2", True))
     away_fraction = float(getattr(config, "LP_AWAY_DAY_FRACTION", 0.4) or 0.0) if _v2 else 0.0
+    # #922 — v3 builder (per-slot HP subtraction from measured Onecta energy,
+    # mean/median statistic, weekday shrinkage, hard away exclusion). Kill switch
+    # off → the v2 code path below, untouched.
+    _v3 = _v2 and bool(getattr(config, "LP_RESIDUAL_PROFILE_V3", False))
+    _v3_stat = str(getattr(config, "LP_RESIDUAL_STATISTIC", "mean") or "mean").strip().lower()
+    if _v3_stat not in ("mean", "median"):
+        _v3_stat = "mean"
+    _v3_shrink = min(1.0, max(0.0, float(getattr(config, "LP_RESIDUAL_DOW_SHRINK", 0.5))))
+    _v3_hard_away = bool(getattr(config, "LP_RESIDUAL_AWAY_HARD_EXCLUDE", True))
+    _v3_key = (_v3_stat, round(_v3_shrink, 4), _v3_hard_away) if _v3 else None
     # During negative-price windows the system DELIBERATELY boosts consumption
     # (battery charge, appliance dispatch, tank to 65 °C). Those slots aren't the
     # household's organic at-home pattern — including them biases the load profile
@@ -2733,7 +2743,7 @@ def residual_load_profile_v2(
     # as new telemetry / the nightly Daikin sync land, so a 4-min TTL is safe and
     # collapses the per-solve cost to one rebuild. Keyed by DB_PATH so isolated
     # test DBs never share an entry.
-    cache_key = (config.DB_PATH, window_days, end_date, min_samples_per_bucket, _v2, exclude_neg, exclude_lwt)
+    cache_key = (config.DB_PATH, window_days, end_date, min_samples_per_bucket, _v2, exclude_neg, exclude_lwt, _v3_key)
     if use_cache:
         ent = _RESIDUAL_V2_CACHE.get(cache_key)
         if ent is not None and ent[0] > time.monotonic():
@@ -2870,6 +2880,7 @@ def residual_load_profile_v2(
     # accumulate physics totals per (local_date, 2h-bucket) for calibration.
     from datetime import datetime as _dt
     samples: list[tuple[datetime, str, int, float, float]] = []  # (local, date_iso, bucket_idx, load_slot_kwh, physics_slot_kwh)
+    v3_samples: list[tuple[datetime, float, float, bool]] = []  # (utc ts, load_slot_kwh, physics_slot_kwh, excluded) — v3 only
     physics_bucket: dict[tuple[str, int], float] = {}
     physics_day: dict[str, float] = {}
     dropped_no_meteo = 0
@@ -2893,23 +2904,40 @@ def residual_load_profile_v2(
             local = ts.astimezone(tz)
         except (ValueError, TypeError):
             continue
+        _excluded = False
         if (exclude_neg and neg_slots) or lwt_offset_slots:
             sm = (ts.minute // 30) * 30
             skey = (ts.replace(minute=sm, second=0, microsecond=0)
                     .astimezone(UTC).isoformat().replace("+00:00", "Z"))
             if exclude_neg and skey in neg_slots:
                 dropped_negative += 1
-                continue
-            if skey in lwt_offset_slots:
+                _excluded = True
+            elif skey in lwt_offset_slots:
                 dropped_lwt_offset += 1
-                continue
+                _excluded = True
+        # v3 keeps excluded slots in the per-slot load (the HP split of a 2h
+        # bucket needs all 4 slots) and drops them from the tiers later.
+        if _excluded and not _v3:
+            continue
         load_slot = float(row["load_power_kw"]) * 0.5
         physics_slot = _physics_daikin_slot_kwh(float(outdoor), cop_curve)
+        if _v3:
+            v3_samples.append((ts.astimezone(UTC), load_slot, physics_slot, _excluded))
+            continue
         date_iso = local.date().isoformat()
         b = local.hour // 2
         samples.append((local, date_iso, b, load_slot, physics_slot))
         physics_bucket[(date_iso, b)] = physics_bucket.get((date_iso, b), 0.0) + physics_slot
         physics_day[date_iso] = physics_day.get(date_iso, 0.0) + physics_slot
+
+    if _v3 and v3_samples:
+        return _finish(_residual_profile_v3_build(
+            v3_samples, tz=tz, window_days=window_days, min_samples=min_samples_per_bucket,
+            statistic=_v3_stat, dow_shrink=_v3_shrink, hard_away=_v3_hard_away,
+            away_fraction=away_fraction, cutoff_iso=cutoff_iso, anchor_utc=anchor_utc,
+            outdoor_from_daikin=outdoor_from_daikin, dropped_no_meteo=dropped_no_meteo,
+            dropped_negative=dropped_negative, dropped_lwt_offset=dropped_lwt_offset,
+        ))
 
     if not samples:
         flat = mean_fox_load_kwh_per_slot(limit=60)
@@ -3148,6 +3176,474 @@ def residual_load_profile_v2(
         "calibrated_days": calibrated_days,
         "physics_only_days": physics_only_days,
     })
+
+
+def _hard_away_dates(cutoff_iso: str, tz: ZoneInfo) -> tuple[set[str], set[str], set[str]]:
+    """#922 — local dates the household was away, from hard signals.
+
+    Returns ``(away, return_days, non_representative)``. ``away`` = days with a
+    vacation/away/travel preset in ``lp_inputs_snapshot`` (plan_date or run
+    date) or a Daikin holiday flag on >= 50 % of that day's
+    ``daikin_telemetry`` rows. ``return_days`` = the first day after each away
+    run (heat-pump recovery pollutes it) that is not itself away.
+    ``non_representative`` = days under any OTHER non-normal preset (guests):
+    excluded from the history because the optimizer re-applies the preset's
+    own scale (``_guests_scale``), but they are not "away" and have no return
+    day. All three are excluded by the v3 builder.
+    """
+    away: set[str] = set()
+    non_rep: set[str] = set()
+    vacation_like: set[str] = set()
+    cutoff_epoch = datetime.fromisoformat(cutoff_iso.replace("Z", "+00:00")).timestamp()
+    with _lock:
+        conn = get_connection()
+        try:
+            try:
+                for r in conn.execute(
+                    "SELECT run_at_utc, plan_date, optimization_preset FROM lp_inputs_snapshot "
+                    "WHERE run_at_utc > ? AND optimization_preset IS NOT NULL",
+                    (cutoff_iso,),
+                ).fetchall():
+                    preset = str(r["optimization_preset"] or "").strip().lower()
+                    if preset in ("", "normal"):
+                        continue
+                    days: set[str] = set()
+                    if r["plan_date"]:
+                        days.add(str(r["plan_date"])[:10])
+                    try:
+                        ra = datetime.fromisoformat(str(r["run_at_utc"]).replace("Z", "+00:00"))
+                        days.add(ra.astimezone(tz).date().isoformat())
+                    except (ValueError, TypeError):
+                        pass
+                    if preset in ("vacation", "away", "travel"):
+                        away |= days
+                        vacation_like |= days
+                    else:
+                        non_rep |= days
+            except Exception:  # noqa: BLE001 — a missing signal must not break the profile
+                logger.warning("hard away: lp_inputs_snapshot read failed", exc_info=True)
+            try:
+                tot: dict[str, int] = {}
+                hol: dict[str, int] = {}
+                for r in conn.execute(
+                    "SELECT fetched_at, holiday_active FROM daikin_telemetry "
+                    "WHERE fetched_at > ? AND holiday_active IS NOT NULL",
+                    (cutoff_epoch,),
+                ).fetchall():
+                    d_ = datetime.fromtimestamp(float(r["fetched_at"]), UTC).astimezone(tz).date().isoformat()
+                    tot[d_] = tot.get(d_, 0) + 1
+                    if int(r["holiday_active"] or 0):
+                        hol[d_] = hol.get(d_, 0) + 1
+                for d_, n_h in hol.items():
+                    if n_h >= 2 and n_h >= 0.5 * tot.get(d_, 1):
+                        away.add(d_)
+                        vacation_like.add(d_)
+            except Exception:  # noqa: BLE001
+                logger.warning("hard away: daikin_telemetry read failed", exc_info=True)
+        finally:
+            conn.close()
+    return_days: set[str] = set()
+    for d_ in vacation_like:
+        nxt = (date.fromisoformat(d_) + timedelta(days=1)).isoformat()
+        if nxt not in away:
+            return_days.add(nxt)
+    return away, return_days, non_rep - away
+
+
+def _appliance_overlay_by_slot(cutoff_iso: str) -> dict[datetime, float]:
+    """#922 — measured energy of completed appliance runs per 30-min UTC slot.
+
+    The LP adds scheduled appliance runs on top of the residual profile, so a
+    completed run's ``actual_kwh`` must not stay inside the history. Spread over
+    [actual_start_utc, completed_at_utc] by overlap.
+    """
+    out: dict[datetime, float] = {}
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT actual_start_utc, completed_at_utc, actual_kwh, duration_minutes FROM appliance_jobs "
+                "WHERE actual_kwh IS NOT NULL AND actual_kwh > 0 "
+                "AND actual_start_utc IS NOT NULL AND completed_at_utc IS NOT NULL "
+                "AND completed_at_utc > ?",
+                (cutoff_iso,),
+            ).fetchall()
+        except Exception:  # noqa: BLE001 — optional signal
+            logger.warning("appliance overlay read failed", exc_info=True)
+            rows = []
+        finally:
+            conn.close()
+    for r in rows:
+        try:
+            a = datetime.fromisoformat(str(r["actual_start_utc"]).replace("Z", "+00:00")).astimezone(UTC)
+            b = datetime.fromisoformat(str(r["completed_at_utc"]).replace("Z", "+00:00")).astimezone(UTC)
+        except (ValueError, TypeError):
+            continue
+        # completed_at is when HEM NOTICED the end (hours late on average):
+        # cap the window at start + the job's own duration.
+        try:
+            b = min(b, a + timedelta(minutes=float(r["duration_minutes"])))
+        except (TypeError, ValueError):
+            pass
+        if b <= a:
+            continue
+        total_s = (b - a).total_seconds()
+        t = a.replace(minute=(a.minute // 30) * 30, second=0, microsecond=0)
+        while t < b:
+            ov = (min(b, t + timedelta(minutes=30)) - max(a, t)).total_seconds()
+            if ov > 0:
+                out[t] = out.get(t, 0.0) + float(r["actual_kwh"]) * ov / total_s
+            t += timedelta(minutes=30)
+    return out
+
+
+def _waterfill_hp(loads: list[float], hp: float) -> tuple[list[float], float]:
+    """Allocate ``hp`` kWh over slot ``loads`` as the part of the load ABOVE a
+    common level L (the base load is flat, the heat pump is what sticks out):
+    sum(max(0, load_i - L)) = min(hp, sum(load)). Returns (hp_i, leftover) where
+    leftover = hp - sum(load) when the meter says more than the house drew
+    (Onecta integer quantisation) and 0 otherwise."""
+    tot = sum(loads)
+    if hp <= 0 or tot <= 0:
+        return [0.0] * len(loads), max(0.0, hp - tot) if hp > 0 else 0.0
+    if hp >= tot:
+        return list(loads), hp - tot
+    srt = sorted(loads, reverse=True)
+    n = len(srt)
+    cum = 0.0
+    level = 0.0
+    for k in range(1, n + 1):
+        cum += srt[k - 1]
+        level = (cum - hp) / k
+        nxt = srt[k] if k < n else 0.0
+        if level >= nxt:
+            break
+    level = max(0.0, level)
+    return [max(0.0, l_ - level) for l_ in loads], 0.0
+
+
+def _residual_profile_v3_build(
+    v3_samples: list[tuple[datetime, float, float, bool]],
+    *,
+    tz: ZoneInfo,
+    window_days: int,
+    min_samples: int,
+    statistic: str,
+    dow_shrink: float,
+    hard_away: bool,
+    away_fraction: float,
+    cutoff_iso: str,
+    anchor_utc: datetime,
+    outdoor_from_daikin: int,
+    dropped_no_meteo: int,
+    dropped_negative: int,
+    dropped_lwt_offset: int,
+) -> dict[str, Any]:
+    """#922 residual-load profile v3 — same return shape as the v2 builder.
+
+    Differences from v2 (see the story / the ``loadbt`` backtest):
+
+    * Samples are first aggregated to 30-min UTC slots (mean of the sampled
+      power x 0.5 h), so every number below is a per-SLOT energy and the tier
+      counts are slot-days (not ~10 samples per slot).
+    * Heat-pump energy per local 2h bucket: measured Onecta buckets only
+      (``telemetry_integral`` rows are a weather-curve model, not a meter). Model
+      / missing buckets get ``daily measured - sum(Onecta buckets)`` spread over
+      them by model weight; no (complete) daily row -> the physics estimate.
+      Bucket HP is placed in its slots by water-filling (the part of the load
+      above a common level), so a steady HP draw is not clipped into phantom
+      residual.
+    * Central statistic ``mean`` | ``median``; weekday tiers shrunk toward the
+      all-days profile: ``w * dow + (1 - w) * all``.
+    * Hard away exclusion (preset / holiday / return day) + the 0.4 heuristic.
+    """
+    from statistics import mean as _mean, median as _median, quantiles as _quantiles
+
+    stat_fn = _mean if statistic == "mean" else _median
+
+    # 1. slot aggregation (UTC slot start -> sums)
+    acc: dict[datetime, list[Any]] = {}
+    for ts, load_slot, phys_slot, excl in v3_samples:
+        k = ts.replace(minute=(ts.minute // 30) * 30, second=0, microsecond=0)
+        a = acc.get(k)
+        if a is None:
+            acc[k] = [load_slot, phys_slot, 1, excl]
+        else:
+            a[0] += load_slot
+            a[1] += phys_slot
+            a[2] += 1
+            a[3] = a[3] or excl
+    # (date, bucket) -> list of (local, load, phys, excluded)
+    overlay = _appliance_overlay_by_slot(cutoff_iso)
+    by_bucket: dict[tuple[str, int], list[tuple[datetime, float, float, bool]]] = {}
+    for k, (sl, sp, n, ex) in acc.items():
+        if n < 2:
+            continue  # a single stray sample is not a slot measurement
+        local = k.astimezone(tz)
+        load = max(0.0, sl / n - overlay.get(k, 0.0))
+        by_bucket.setdefault((local.date().isoformat(), local.hour // 2), []).append(
+            (local, load, sp / n, bool(ex))
+        )
+    dates = sorted({d for d, _b in by_bucket})
+    today_iso = datetime.now(tz).date().isoformat()
+
+    # 2. measured Daikin energy
+    rows2h: dict[tuple[str, int], dict[str, Any]] = {}
+    if dates:
+        for r in get_daikin_consumption_2hourly_range(dates[0], dates[-1]):
+            rows2h[(str(r["date"]), int(r["bucket_idx"]))] = r
+    day_total: dict[str, float] = {}
+    day_dhw_frac: dict[str, float] = {}
+    partial_daily: set[str] = set()
+    if dates:
+        for r in get_daikin_consumption_daily_range(dates[0], dates[-1]):
+            t2 = float(r.get("kwh_heating") or 0.0) + float(r.get("kwh_dhw") or 0.0)
+            tot = float(r.get("kwh_total") or 0.0) or t2
+            d_key = str(r["date"])
+            # A daily row fetched BEFORE its local day ended is a partial total
+            # (the row is rewritten by the nightly sync): never trust it.
+            try:
+                fa = datetime.fromisoformat(str(r.get("fetched_at")).replace("Z", "+00:00"))
+                if fa.tzinfo is None:
+                    fa = fa.replace(tzinfo=UTC)
+                day_end = datetime.combine(
+                    date.fromisoformat(d_key) + timedelta(days=1), datetime.min.time(), tzinfo=tz
+                )
+                if fa < day_end:
+                    partial_daily.add(d_key)
+                    continue
+            except (ValueError, TypeError):
+                pass
+            day_total[d_key] = tot
+            if t2 > 1e-6:
+                day_dhw_frac[d_key] = float(r.get("kwh_dhw") or 0.0) / t2
+
+    # 3. per-slot-day residual + HP split
+    # (local, date, residual, hp, hp_dhw, hp_space, excluded)
+    recs: list[tuple[datetime, str, float, float, float, float, bool]] = []
+    calibrated_dates: set[str] = set()
+    scaled_days: set[str] = set()
+    for date_iso in dates:
+        meas: dict[int, float] = {}
+        meas_frac: dict[int, float] = {}
+        model_w: dict[int, float] = {}
+        model_frac: dict[int, float] = {}
+        for b in range(12):
+            r = rows2h.get((date_iso, b))
+            if r is None:
+                continue
+            h_ = float(r.get("kwh_heating") or 0.0)
+            d_ = float(r.get("kwh_dhw") or 0.0)
+            tot_ = h_ + d_ if (h_ + d_) > 0 else float(r.get("kwh_total") or 0.0)
+            frac_ = (d_ / (h_ + d_)) if (h_ + d_) > 1e-6 else 0.0
+            if str(r.get("source") or "") != "telemetry_integral":
+                meas[b] = tot_
+                meas_frac[b] = frac_
+            else:
+                model_w[b] = tot_
+                model_frac[b] = frac_
+        others = [b for b in range(12) if b not in meas]
+        phys_b = {b: sum(x[2] for x in by_bucket.get((date_iso, b), [])) for b in range(12)}
+        daily = day_total.get(date_iso)
+        use_daily = daily is not None and date_iso != today_iso
+        if use_daily and meas and sum(meas.values()) > float(daily) + 1.0:
+            # Onecta 2h buckets overshoot the day meter (integer rounding):
+            # trust the day total and scale the metered buckets down.
+            sc = float(daily) / sum(meas.values())
+            meas = {b: v * sc for b, v in meas.items()}
+            scaled_days.add(date_iso)
+        hp_b: dict[int, float] = dict(meas)
+        shaped: set[int] = set(meas)
+        if use_daily and others:
+            rem = max(0.0, float(daily) - sum(meas.values()))
+            w = {b: (model_w[b] if model_w.get(b, 0.0) > 0 else phys_b.get(b, 0.0)) for b in others}
+            sw = sum(w.values())
+            for b in others:
+                hp_b[b] = rem * (w[b] / sw if sw > 1e-9 else 1.0 / len(others))
+                shaped.add(b)
+        if meas or use_daily:
+            calibrated_dates.add(date_iso)
+        carry = 0.0  # metered HP above what the house drew in a bucket -> next bucket
+        for b in range(12):
+            slots = sorted(by_bucket.get((date_iso, b), []), key=lambda x: x[0])
+            if len(slots) != 4:
+                # incomplete (backtest rule) or a DST-transition bucket (2, 6 or 8
+                # slots): no honest split, skip the bucket
+                continue
+            loads = [x[1] for x in slots]
+            if b in shaped:
+                hps, carry = _waterfill_hp(loads, hp_b[b] + carry)
+                frac = meas_frac[b] if b in meas else day_dhw_frac.get(date_iso, model_frac.get(b, 0.0))
+            else:
+                hps = [min(x[2], x[1]) for x in slots]  # physics fallback, per slot
+                frac = day_dhw_frac.get(date_iso, 0.0)
+            for (local, load, _ph, excl), hp in zip(slots, hps):
+                hp_dhw = hp * frac
+                recs.append((local, date_iso, max(0.0, load - hp), hp, hp_dhw, hp - hp_dhw, excl))
+
+    # 4. away days: hard signals + the 0.4 x median heuristic as fallback
+    by_date_daytime: dict[str, list[float]] = {}
+    for local, d_, res, *_rest in recs:
+        if 9 <= local.hour < 21:
+            by_date_daytime.setdefault(d_, []).append(res)
+    away_hard: set[str] = set()
+    return_days: set[str] = set()
+    non_rep: set[str] = set()
+    if hard_away:
+        away_hard, return_days, non_rep = _hard_away_dates(cutoff_iso, tz)
+    heuristic: set[str] = set()
+    sigs = {d_: _median(vs) for d_, vs in by_date_daytime.items() if len(vs) >= 4}
+    if sigs and away_fraction > 0:
+        thr = away_fraction * _median(list(sigs.values()))
+        heuristic = {d_ for d_, sg in sigs.items() if sg < thr}
+    away_all = (away_hard | return_days | heuristic) & set(dates)
+    non_rep = non_rep & set(dates) - away_all
+    excluded_days = away_all | non_rep
+
+    # 5. tiers
+    tiers: dict[Any, list[float]] = {}
+    hp_tiers: dict[Any, list[float]] = {}
+    hp_dhw_tiers: dict[Any, list[float]] = {}
+    hp_space_tiers: dict[Any, list[float]] = {}
+    weekday_days: set[str] = set()
+    weekend_days: set[str] = set()
+    retained: list[float] = []
+    for local, d_, res, hp, hp_d, hp_s, excl in recs:
+        if d_ in excluded_days or excl:
+            continue
+        dow = local.weekday()
+        group = "weekend" if dow >= 5 else "weekday"
+        (weekend_days if dow >= 5 else weekday_days).add(d_)
+        m = 30 if local.minute >= 30 else 0
+        h = local.hour
+        retained.append(res)
+        for key in ((dow, h, m), (group, h, m), (h, m)):
+            tiers.setdefault(key, []).append(res)
+            hp_tiers.setdefault(key, []).append(hp)
+            hp_dhw_tiers.setdefault(key, []).append(hp_d)
+            hp_space_tiers.setdefault(key, []).append(hp_s)
+
+    def _p75(vs: list[float]) -> float:
+        if len(vs) < 2:
+            return vs[0] if vs else 0.0
+        return _quantiles(vs, n=4)[2]
+
+    def _p90(vs: list[float]) -> float | None:
+        if len(vs) < 8:
+            return None
+        return min(max(vs), _quantiles(vs, n=10)[8])
+
+    flat = stat_fn(retained) if retained else (
+        mean_fox_load_kwh_per_slot(limit=60) or mean_consumption_kwh_from_execution_logs(limit=2016)
+    )
+
+    w_dow = dow_shrink
+    profile: dict[Any, float] = {}
+    spread: dict[Any, float] = {}
+    spread_p90: dict[Any, float] = {}
+    # Spread = centre + (quantile - MEDIAN of the same tier): the scenario gap
+    # stays continuous when the centre is the mean (a slot whose mean >= p75 no
+    # longer collapses to "no spread" and the flat factor).
+    def _gaps(vs: list[float]) -> tuple[float, float | None]:
+        med = _median(vs)
+        q90 = _p90(vs)
+        return max(0.0, _p75(vs) - med), (None if q90 is None else max(0.0, q90 - med))
+
+    all_stat: dict[Any, float] = {}
+    all_gap: dict[Any, tuple[float, float | None]] = {}
+    for key, vs in tiers.items():
+        if len(key) == 2 and len(vs) >= min_samples:
+            all_stat[key] = stat_fn(vs)
+            all_gap[key] = _gaps(vs)
+    for key, vs in tiers.items():
+        if len(vs) < min_samples:
+            continue
+        g75, g90 = _gaps(vs)
+        if len(key) == 2:
+            profile[key] = all_stat[key]
+        else:
+            base = (key[1], key[2])
+            if base in all_stat:
+                profile[key] = w_dow * stat_fn(vs) + (1.0 - w_dow) * all_stat[base]
+                a75, a90 = all_gap[base]
+                g75 = w_dow * g75 + (1.0 - w_dow) * a75
+                if g90 is not None and a90 is not None:
+                    g90 = w_dow * g90 + (1.0 - w_dow) * a90
+                else:
+                    g90 = None
+            else:
+                profile[key] = stat_fn(vs)
+        spread[key] = profile[key] + g75
+        if g90 is not None:
+            spread_p90[key] = profile[key] + max(g90, g75)
+
+    def _stat_profile(tier_map: dict[Any, list[float]]) -> dict[Any, float]:
+        return {k: stat_fn(vs) for k, vs in tier_map.items() if len(vs) >= min_samples}
+
+    hp_profile = _stat_profile(hp_tiers)
+    hp_dhw_profile = _stat_profile(hp_dhw_tiers)
+    hp_space_profile = _stat_profile(hp_space_tiers)
+
+    hm_stats = {k: v for k, v in profile.items() if len(k) == 2}
+
+    def _hour_aware(h: int, m: int) -> float:
+        other = hm_stats.get((h, 30 if m == 0 else 0))
+        if other is not None:
+            return other
+        neigh = [
+            hm_stats[((h + dh) % 24, nm)]
+            for dh in (-2, -1, 1, 2) for nm in (0, 30)
+            if ((h + dh) % 24, nm) in hm_stats
+        ]
+        return _median(neigh) if neigh else float(flat)
+
+    for h in range(24):
+        for m in (0, 30):
+            if (h, m) not in profile:
+                profile[(h, m)] = _hour_aware(h, m)
+                spread.setdefault((h, m), profile[(h, m)])
+            spread_p90.setdefault((h, m), spread[(h, m)])
+
+    calibrated_days = len(calibrated_dates - excluded_days)
+    physics_only_days = len(set(dates) - calibrated_dates - excluded_days)
+    logger.info(
+        "residual_profile_v3: %d slots, window=%dd, stat=%s shrink=%.2f; %d weekday / %d weekend days, "
+        "%d excluded (%d hard-away, %d return, %d heuristic); %d measured-HP / %d physics-only days",
+        len(recs), window_days, statistic, dow_shrink, len(weekday_days), len(weekend_days),
+        len(excluded_days), len(away_hard), len(return_days), len(heuristic),
+        calibrated_days, physics_only_days,
+    )
+    return {
+        "profile": profile,
+        "hp_profile": hp_profile,
+        "hp_dhw_profile": hp_dhw_profile,
+        "hp_space_profile": hp_space_profile,
+        "spread": spread,
+        "spread_p90": spread_p90,
+        "outdoor_from_daikin_samples": outdoor_from_daikin,
+        "no_outdoor_dropped_samples": dropped_no_meteo,
+        "flat": float(flat),
+        "away_days": sorted(away_all),
+        "non_representative_days": sorted(non_rep),
+        "daily_partial_days": sorted(partial_daily & set(dates)),
+        "daily_scaled_days": sorted(scaled_days),
+        "away_hard_days": sorted(away_hard & set(dates)),
+        "return_days": sorted(return_days & set(dates)),
+        "version": 3,
+        "statistic": statistic,
+        "dow_shrink": dow_shrink,
+        "day_counts": {
+            "weekday": len(weekday_days),
+            "weekend": len(weekend_days),
+            "away_excluded": len(away_all),
+            "non_representative_excluded": len(non_rep),
+            "negative_excluded": dropped_negative,
+            "lwt_offset_excluded": dropped_lwt_offset,
+            "total": len(set(dates)),
+        },
+        "calibrated_days": calibrated_days,
+        "physics_only_days": physics_only_days,
+    }
 
 
 def lookup_residual_kwh(profile_obj: dict[str, Any], dow: int, h: int, m: int) -> float:

@@ -684,6 +684,60 @@ SCHEMA: dict[str, SettingSpec] = {
             "by the weekly tuning review (#832)."
         ),
     ),
+    # --- #922 residual-load profile v3 (load-forecast epic #920) -------------
+    "LP_RESIDUAL_PROFILE_V3": SettingSpec(
+        key="LP_RESIDUAL_PROFILE_V3",
+        type_name="str",  # "true" / "false" — kill switch, false = v2 exactly
+        env_default=_str_env("LP_RESIDUAL_PROFILE_V3", "false"),
+        enum=("true", "false"),
+        description=(
+            "Residual-load profile v3 (#922). true = heat-pump energy subtracted "
+            "per 30-min SLOT from measured Onecta 2h buckets (telemetry_integral "
+            "model rows replaced by daily minus Onecta, water-filled over the "
+            "bucket's slots), requires LP_RESIDUAL_PROFILE_V2=true, "
+            "statistic/shrink/away settings below apply. false = the v2 builder "
+            "unchanged (per-sample physics x calibration factor)."
+        ),
+    ),
+    "LP_RESIDUAL_STATISTIC": SettingSpec(
+        key="LP_RESIDUAL_STATISTIC",
+        type_name="str",
+        env_default=_str_env("LP_RESIDUAL_STATISTIC", "mean"),
+        enum=("mean", "median"),
+        description=(
+            "Central statistic of the v3 residual profile (#922). mean (default) "
+            "cuts the 16-19 under-forecast bias; median = the v2 statistic. The "
+            "scenario spread is centre + (tier p75 - tier median), so the "
+            "pessimistic gap is the same whichever statistic is picked."
+        ),
+    ),
+    "LP_RESIDUAL_DOW_SHRINK": SettingSpec(
+        key="LP_RESIDUAL_DOW_SHRINK",
+        type_name="float",
+        env_default=_float_env("LP_RESIDUAL_DOW_SHRINK", "0.5"),
+        min_value=0.0,
+        max_value=1.0,
+        description=(
+            "Weekday shrinkage of the v3 residual profile (#922): value = w x "
+            "weekday-specific + (1-w) x all-days profile per (hour, minute). "
+            "1 = fully weekday-specific (v2 behaviour), 0 = all days only, "
+            "0.5 = backtest best."
+        ),
+    ),
+    "LP_RESIDUAL_AWAY_HARD_EXCLUDE": SettingSpec(
+        key="LP_RESIDUAL_AWAY_HARD_EXCLUDE",
+        type_name="str",
+        env_default=_str_env("LP_RESIDUAL_AWAY_HARD_EXCLUDE", "true"),
+        enum=("true", "false"),
+        description=(
+            "v3 residual profile (#922): drop from the load history every day with "
+            "a vacation preset, an active Daikin holiday mode (>= 50% of the day's "
+            "telemetry rows), and the first day back (heat-pump recovery); other "
+            "non-normal presets (guests) are dropped too but reported separately "
+            "(the optimizer re-applies their own scale). The 0.4 x median "
+            "heuristic stays on as a fallback either way."
+        ),
+    ),
     # --- #876 closed-loop auto-tune (story 1: ledger + kill switch) ----------
     "AUTO_TUNE_ENABLED": SettingSpec(
         key="AUTO_TUNE_ENABLED",

@@ -2791,6 +2791,45 @@ class Config:
     def LP_LOAD_EXPENSIVE_BAND_QUANTILE(self, value: str) -> None:
         self._rt_set("LP_LOAD_EXPENSIVE_BAND_QUANTILE", str(value).strip().lower())
 
+    # -- #922 residual-load profile v3 (runtime settings) ----------------------
+    @property
+    def LP_RESIDUAL_PROFILE_V3(self) -> bool:
+        return str(self._rt_get("LP_RESIDUAL_PROFILE_V3")).strip().lower() in ("1", "true", "yes", "on")
+
+    @LP_RESIDUAL_PROFILE_V3.setter
+    def LP_RESIDUAL_PROFILE_V3(self, value: Any) -> None:
+        self._rt_set(
+            "LP_RESIDUAL_PROFILE_V3",
+            "true" if (value is True or str(value).strip().lower() in ("1", "true", "yes", "on")) else "false",
+        )
+
+    @property
+    def LP_RESIDUAL_STATISTIC(self) -> str:
+        return str(self._rt_get("LP_RESIDUAL_STATISTIC"))
+
+    @LP_RESIDUAL_STATISTIC.setter
+    def LP_RESIDUAL_STATISTIC(self, value: str) -> None:
+        self._rt_set("LP_RESIDUAL_STATISTIC", str(value).strip().lower())
+
+    @property
+    def LP_RESIDUAL_DOW_SHRINK(self) -> float:
+        return float(self._rt_get("LP_RESIDUAL_DOW_SHRINK"))
+
+    @LP_RESIDUAL_DOW_SHRINK.setter
+    def LP_RESIDUAL_DOW_SHRINK(self, value: float) -> None:
+        self._rt_set("LP_RESIDUAL_DOW_SHRINK", float(value))
+
+    @property
+    def LP_RESIDUAL_AWAY_HARD_EXCLUDE(self) -> bool:
+        return str(self._rt_get("LP_RESIDUAL_AWAY_HARD_EXCLUDE")).strip().lower() in ("1", "true", "yes", "on")
+
+    @LP_RESIDUAL_AWAY_HARD_EXCLUDE.setter
+    def LP_RESIDUAL_AWAY_HARD_EXCLUDE(self, value: Any) -> None:
+        self._rt_set(
+            "LP_RESIDUAL_AWAY_HARD_EXCLUDE",
+            "true" if (value is True or str(value).strip().lower() in ("1", "true", "yes", "on")) else "false",
+        )
+
     @property
     def LP_SOC_FINAL_KWH(self) -> float:
         return float(self._rt_get("LP_SOC_FINAL_KWH"))
