@@ -193,7 +193,13 @@ export const ADVANCED_GROUPS: GroupSpec[] = [
     id: "calibration",
     title: "Calibração e local",
     subtitle: "Janela de calibração do solar e coordenadas para a previsão do tempo.",
-    keys: ["PV_CALIBRATION_WINDOW_DAYS", "WEATHER_LAT", "WEATHER_LON"],
+    keys: [
+      "PV_CALIBRATION_WINDOW_DAYS",
+      "PV_FORECAST_LASTGOOD_ENABLED",
+      "PV_FORECAST_LASTGOOD_MAX_AGE_HOURS",
+      "WEATHER_LAT",
+      "WEATHER_LON",
+    ],
   },
   {
     id: "safety",
@@ -297,6 +303,8 @@ export const KEY_LABELS: Record<string, string> = {
   MPC_FORECAST_REFRESH_INTERVAL_MINUTES: "Atualização da previsão",
   PV_TELEMETRY_INTERVAL_MINUTES: "Intervalo da telemetria solar",
   PV_CALIBRATION_WINDOW_DAYS: "Janela de calibração solar",
+  PV_FORECAST_LASTGOOD_ENABLED: "Reusar a última previsão solar boa se a fonte falhar",
+  PV_FORECAST_LASTGOOD_MAX_AGE_HOURS: "Idade máxima da última previsão solar boa (h)",
   WEATHER_LAT: "Latitude do local",
   WEATHER_LON: "Longitude do local",
   LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH: "Valor da bateria no fim do plano",

@@ -600,6 +600,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         # 2026-08-08 (#784) — actuation wedged. CRITICAL by construction: this is
         # the alert whose absence let two multi-day outages run unnoticed.
         ("actuation_stale",        "critical", 0),
+        # #931 -- solve ran with no PV source at all. Own route, enabled (the
+        # generic risk_alert route is muted on prod by owner choice).
+        ("pv_forecast_degraded",   "critical", 0),
     ]
     for _at, _sev, _sil in _NOTIFICATION_DEFAULTS:
         conn.execute(
@@ -4867,6 +4870,81 @@ def save_meteo_forecast_snapshot(
     return n
 
 
+def get_last_good_forecast_snapshots(
+    *,
+    max_age_hours: float,
+    source: str | None = None,
+    now_utc: datetime | None = None,
+    limit: int = 12,
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """#931: recent persisted forecast fetches younger than ``max_age_hours``, newest first.
+
+    ``source`` restricts to one provider label (``"quartz"`` / ``"open-meteo"``)
+    so a degraded Open-Meteo fallback snapshot is never mistaken for the
+    last-good Quartz one. Each item is ``(forecast_fetch_at_utc, rows)`` (rows
+    carry ``slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw``); the
+    caller picks the first PLAUSIBLE one. ``now_utc`` is injected so the age
+    uses the same clock as the caller.
+    """
+    now = now_utc or datetime.now(UTC)
+    cutoff = (now - timedelta(hours=float(max_age_hours))).isoformat()
+    out: list[tuple[str, list[dict[str, Any]]]] = []
+    with _lock:
+        conn = get_connection()
+        try:
+            sql = (
+                "SELECT forecast_fetch_at_utc FROM meteo_forecast_snapshot "
+                "WHERE forecast_fetch_at_utc >= ? AND forecast_fetch_at_utc <= ?"
+            )
+            args: list[Any] = [cutoff, now.isoformat()]
+            if source:
+                sql += " AND source = ?"
+                args.append(source)
+            sql += " ORDER BY forecast_fetch_at_utc DESC LIMIT ?"
+            args.append(int(limit))
+            for (fetch_at,) in conn.execute(sql, args).fetchall():
+                cur = conn.execute(
+                    """SELECT slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw
+                         FROM meteo_forecast_value
+                        WHERE forecast_fetch_at_utc = ?
+                        ORDER BY slot_time""",
+                    (str(fetch_at),),
+                )
+                rows = [dict(x) for x in cur.fetchall()]
+                if rows:
+                    out.append((str(fetch_at), rows))
+        except sqlite3.OperationalError:
+            return []
+        finally:
+            conn.close()
+    return out
+
+
+def get_latest_pv_source() -> dict[str, Any] | None:
+    """#931: ``exogenous_snapshot.pv_source`` of the most recent LP run (status chip)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            r = conn.execute(
+                "SELECT exogenous_snapshot_json FROM lp_inputs_snapshot "
+                "ORDER BY run_id DESC LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        finally:
+            conn.close()
+    if not r or not r[0]:
+        return None
+    try:
+        info = json.loads(r[0]).get("pv_source")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(info, dict):
+        return None
+    info.pop("pv_kwh_per_slot", None)  # audit array, not for the status payload
+    return info
+
+
 def _get_latest_meteo_forecast_fetch_at(conn: sqlite3.Connection) -> str | None:
     cur = conn.execute(
         "SELECT forecast_fetch_at_utc FROM meteo_forecast_latest_state WHERE id = 1"
@@ -4881,6 +4959,38 @@ def _get_latest_meteo_forecast_fetch_at(conn: sqlite3.Connection) -> str | None:
     return str(row[0]) if row and row[0] else None
 
 
+def _get_latest_meteo_forecast_rows_for_slot_range(
+    conn: sqlite3.Connection,
+    start_date: str,
+    end_date: str,
+) -> list[dict[str, Any]]:
+    """Latest canonical forecast row per slot for ``start_date <= slot day < end_date``.
+
+    Range predicate on ``slot_time`` (uses ``idx_meteo_forecast_value_slot``);
+    ``substr(slot_time, 1, 10) = ?`` defeated the index (0.84 s cold per day).
+    ``slot_time`` is ISO text, so ``>= 'YYYY-MM-DD'`` / ``< 'YYYY-MM-DD'`` bounds
+    exactly the day(s).
+    """
+    cur = conn.execute(
+        """SELECT substr(mv.slot_time, 1, 10) AS forecast_date,
+                  mv.slot_time, mv.temp_c, mv.solar_w_m2, mv.cloud_cover_pct,
+                  mv.direct_pv_kw
+             FROM meteo_forecast_value mv
+             JOIN (
+                 SELECT slot_time, MAX(forecast_fetch_at_utc) AS forecast_fetch_at_utc
+                   FROM meteo_forecast_value
+                  WHERE slot_time >= ? AND slot_time < ?
+                  GROUP BY slot_time
+             ) latest
+               ON latest.slot_time = mv.slot_time
+              AND latest.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
+            WHERE mv.slot_time >= ? AND mv.slot_time < ?
+            ORDER BY mv.slot_time""",
+        (start_date, end_date, start_date, end_date),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
 def _get_latest_meteo_forecast_rows_for_slot_date(
     conn: sqlite3.Connection,
     slot_date: str,
@@ -4891,24 +5001,19 @@ def _get_latest_meteo_forecast_rows_for_slot_date(
     rows. For replay and live diagnostics we want the most recent row for each
     slot_time, not just the most recent fetch as a whole.
     """
-    cur = conn.execute(
-        """SELECT substr(mv.slot_time, 1, 10) AS forecast_date,
-                  mv.slot_time, mv.temp_c, mv.solar_w_m2, mv.cloud_cover_pct,
-                  mv.direct_pv_kw
-             FROM meteo_forecast_value mv
-             JOIN (
-                 SELECT slot_time, MAX(forecast_fetch_at_utc) AS forecast_fetch_at_utc
-                   FROM meteo_forecast_value
-                  WHERE substr(slot_time, 1, 10) = ?
-                  GROUP BY slot_time
-             ) latest
-               ON latest.slot_time = mv.slot_time
-              AND latest.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
-            WHERE substr(mv.slot_time, 1, 10) = ?
-            ORDER BY mv.slot_time""",
-        (slot_date, slot_date),
-    )
-    return [dict(r) for r in cur.fetchall()]
+    nxt = (date.fromisoformat(slot_date) + timedelta(days=1)).isoformat()
+    return _get_latest_meteo_forecast_rows_for_slot_range(conn, slot_date, nxt)
+
+
+def get_meteo_forecast_for_slot_range(start_date: str, end_date: str) -> list[dict[str, Any]]:
+    """Latest stored forecast row per slot over ``[start_date, end_date)`` -- one
+    query / one lock acquisition (the cockpit's ``/pv/today`` asks for two days)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            return _get_latest_meteo_forecast_rows_for_slot_range(conn, start_date, end_date)
+        finally:
+            conn.close()
 
 
 def save_meteo_forecast(rows: list[dict[str, Any]], forecast_date: str) -> int:

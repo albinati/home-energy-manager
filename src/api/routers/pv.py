@@ -117,10 +117,25 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     try:
         from ... import weather
 
-        # Open-Meteo HTTP — offload so it doesn't block the event loop and
-        # serialize the other dashboard requests behind it. TTL-cached so the
-        # cockpit's /weather + /pv/today share one fetch.
-        fc = await asyncio.to_thread(weather.fetch_forecast_cached, hours=48)
+        # #931: the live fetch is FORWARD-ONLY (it drops every hour before
+        # "now"), so after sunset it holds only night rows and the whole day
+        # rendered 0; it is also empty during a provider outage / right after
+        # a restart (cold TTL cache). Build the day from the persisted
+        # canonical store instead -- the latest stored row per slot, which
+        # stitches elapsed slots from the fetches that covered them -- and only
+        # use the live fetch when the store has nothing for the day.
+        def _stored_day_forecast() -> list:
+            rows = db.get_meteo_forecast_for_slot_range(
+                d.isoformat(), (d + timedelta(days=2)).isoformat()
+            )
+            return weather._rows_to_hourly(rows)
+
+        fc = await asyncio.to_thread(_stored_day_forecast)
+        if not any(f.time_utc.date() == d for f in fc):
+            # Open-Meteo HTTP — offload so it doesn't block the event loop and
+            # serialize the other dashboard requests behind it. TTL-cached so the
+            # cockpit's /weather + /pv/today share one fetch.
+            fc = await asyncio.to_thread(weather.fetch_forecast_cached, hours=48)
         series = weather.forecast_to_lp_inputs(fc, slot_starts, pv_scale=1.0)
         pv = series.pv_kwh_per_slot
         for i in range(min(_SLOTS_PER_DAY, len(pv))):
@@ -221,7 +236,7 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     # the stitch back-fills each elapsed slot with the forecast that was current
     # when it began, and resolves future slots to the latest plan. This is what
     # gives the accuracy block a real "expected by now" baseline (the live
-    # forecast above is forward-only → 0 for elapsed slots). slot_time_utc is
+    # forecast above was forward-only → 0 for elapsed slots before #931). slot_time_utc is
     # stored in +00:00 form, so normalise to the ...Z key via _norm_z.
     planned_by: dict[str, float] = {}
     plan_committed_at: str | None = None
@@ -287,7 +302,7 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         if elapsed and a is not None:
             # Compare against the COMMITTED plan (frozen at solve time, stitched
             # so elapsed slots have a real value). The live forecast `f` is
-            # forward-only → 0 for elapsed slots, which is why "expected by now"
+            # forward-only (before #931) → 0 for elapsed slots, which is why "expected by now"
             # used to collapse to 0 by evening (#462). Fall back to `f` only if a
             # slot has no committed forecast at all.
             base = planned_by.get(key)

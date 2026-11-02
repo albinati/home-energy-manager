@@ -1750,10 +1750,17 @@ def bulletproof_forecast_refresh_job() -> None:
         lookahead_h = int(config.MPC_FORECAST_DRIFT_LOOKAHEAD_HOURS)
         # Pull a forecast at least as long as the lookahead window we'll compare on,
         # but cap reasonable: Open-Meteo gives 48h easily.
-        forecast_fetch = fetch_forecast_snapshot(hours=max(lookahead_h, 24))
+        # 48 h so the stored fetch (the future last-good, #931) covers the full LP horizon.
+        forecast_fetch = fetch_forecast_snapshot(hours=max(lookahead_h, 48))
         new_fcst = forecast_fetch.forecast
         if not new_fcst:
             logger.debug("forecast refresh: empty fetch, skipping")
+            return
+        if not forecast_fetch.persist:
+            # #931: a reused last-good fetch is already stored; saving it again
+            # would fake a fresh fetch time and a zero forecast drift.
+            logger.debug("forecast refresh: provider degraded (%s), reusing last-good",
+                         forecast_fetch.fallback_reason)
             return
         now_utc = datetime.now(UTC)
         new_rows = [

@@ -5,7 +5,7 @@
 // ------------------------------------------------------------ response types
 export interface PvSlot {
   slot_utc: string;
-  pv_forecast_kwh: number | null;     // live forecast (forward-only: 0 for elapsed slots)
+  pv_forecast_kwh: number | null;     // live forecast (latest stored row per slot; 0.0 only if no provider data)
   pv_planned_kwh: number | null;      // committed plan, stitched across the day's solves
   pv_actual_kwh: number | null;       // measured, null for future / no-telemetry slots
   load_forecast_kwh: number | null;   // committed total household load
@@ -120,8 +120,8 @@ export function buildDaySeries(inp: SeriesInput): DaySeries {
   for (const { s, t } of pvSlots) {
     const elapsed = t + SLOT_MS <= nowMs;
     const mid = t + SLOT_MS / 2;
-    // The committed plan wins when present. The live forecast is forward-only (0 for elapsed
-    // slots) and the backend fills 0.0 when the provider fails, so it is only the fallback.
+    // The committed plan wins when present. The live forecast is the latest stored row per slot
+    // (#931) and the backend fills 0.0 when no provider data exists, so it is only the fallback.
     const fc = s.pv_planned_kwh ?? (elapsed ? null : s.pv_forecast_kwh);
     if (isNum(fc)) { out.pvFc.push({ t: mid, v: fc * 2 }); fcSum += fc; fcN++; }
     if (elapsed && isNum(s.pv_actual_kwh)) {

@@ -2165,12 +2165,22 @@ def _run_optimizer_lp(
             logger.warning("peak-band margin failed — legacy summed spread", exc_info=True)
             peak_band_margins = None
 
-    forecast_fetch = fetch_forecast_snapshot(hours=max(48, int(config.LP_HORIZON_HOURS) + 24))
+    forecast_fetch = fetch_forecast_snapshot(
+        hours=max(48, int(config.LP_HORIZON_HOURS) + 24), report=True,
+    )
     forecast = forecast_fetch.forecast
     forecast_fetch_at_utc = datetime.now(UTC).isoformat()
+    # #931: the PV source actually used (provider, or the degraded fallback and
+    # why) goes into exogenous_snapshot["pv_source"] below.
+    pv_source_info = forecast_fetch.pv_source_info()
+    if not forecast_fetch.persist and forecast_fetch.reused_fetch_at_utc:
+        # Reused last-good fetch: it is already persisted; reference IT (replay
+        # resolves the PV inputs through this timestamp) instead of faking a
+        # fresh fetch time or duplicating the rows.
+        forecast_fetch_at_utc = forecast_fetch.reused_fetch_at_utc
     # Persist the canonical forecast snapshot once so heartbeat + replay can
     # both reference the same fetch instead of duplicating latest/history rows.
-    if forecast:
+    if forecast and forecast_fetch.persist:
         forecast_rows = [
             {
                 "slot_time": f.time_utc.isoformat(),
@@ -2314,7 +2324,13 @@ def _run_optimizer_lp(
     # tariff configured / not yet fetched), the LP falls back to the flat
     # EXPORT_RATE_PENCE constant, preserving legacy behaviour.
     export_prices = _build_export_price_line(starts)
+    if pv_source_info.get("status") != "ok":
+        # #931 replay fidelity: a degraded solve's PV is NOT recoverable from the
+        # stored fetch (last-good reuse + Open-Meteo tail + zero pad), so keep the
+        # per-slot PV (kWh, after calibration) the solve was actually given.
+        pv_source_info["pv_kwh_per_slot"] = [round(float(x), 4) for x in weather.pv_kwh_per_slot]
     exogenous_snapshot = {
+        "pv_source": pv_source_info,
         "base_load_components": {
             "residual_profile_kwh": [round(float(x), 4) for x in residual_base_load],
             "appliance_profile_kwh": [round(float(x), 4) for x in appliance_profile_kwh],
