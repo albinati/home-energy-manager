@@ -242,7 +242,7 @@ def test_survival_mode_persists_scheduler_off(monkeypatch, _tmp_db):
     now_local = datetime(2026, 7, 8, 13, 34, tzinfo=TZ)
     assert derive_fox_mode_from_schedule(now_local) == "schedule:ForceDischarge"
 
-    monkeypatch.setattr(of, "notify_critical", lambda *a, **k: None)
+    monkeypatch.setattr(of, "report_command_failure", lambda *a, **k: None)
     fox = _RecordingFox()
     now_utc = datetime(2026, 7, 8, 12, 34, tzinfo=UTC)
     streak_start = (now_utc - timedelta(hours=25)).isoformat()

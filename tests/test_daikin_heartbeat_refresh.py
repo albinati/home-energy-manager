@@ -126,7 +126,7 @@ def test_verify_logs_matched_on_fresh_read(monkeypatch):
     logged: list[dict] = []
     monkeypatch.setattr(dbp.db, "log_action", lambda **kw: logged.append(kw))
     alerts: list = []
-    monkeypatch.setattr("src.notifier.notify_risk", lambda msg, extra=None: alerts.append(msg))
+    monkeypatch.setattr("src.notifier.report_command_failure", lambda *a, **k: alerts.append(a))
     out = dbp.post_write_verify_job(expected={"lwt_offset": 3}, trigger="test", written_at="2026-10-07T12:00:00Z")
     assert out["matched"] is True and out["fresh"] is True
     assert any(c.get("allow_refresh") and c.get("max_age_seconds") == 0 for c in calls)
@@ -157,7 +157,10 @@ def test_verify_mismatch_retries_once_then_alerts_once(monkeypatch):
     logged: list[dict] = []
     monkeypatch.setattr(dbp.db, "log_action", lambda **kw: logged.append(kw))
     alerts: list = []
-    monkeypatch.setattr("src.notifier.notify_risk", lambda msg, extra=None: alerts.append((msg, extra)))
+    def _rcf(kind, msg, *, recovered, device, extra=None):
+        assert recovered is False and device == "daikin" and kind == "daikin_write_verify:lwt_offset"
+        alerts.append((msg, extra))
+    monkeypatch.setattr("src.notifier.report_command_failure", _rcf)
     rescheduled: list[dict] = []
     monkeypatch.setattr(dbp, "schedule_post_write_verify", lambda w, **kw: rescheduled.append({"written": w, **kw}))
     key = "2026-10-07T12:02:00Z"

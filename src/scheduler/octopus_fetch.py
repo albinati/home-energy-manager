@@ -9,7 +9,7 @@ from typing import Any
 from .. import db
 from ..config import config
 from ..foxess.client import FoxESSClient, FoxESSError
-from ..notifier import notify_critical
+from ..notifier import report_command_failure
 from .agile import fetch_agile_export_rates, fetch_agile_rates
 
 logger = logging.getLogger(__name__)
@@ -189,30 +189,55 @@ def _maybe_survival_mode(
         return
 
     db.update_octopus_fetch_state(survival_mode_since=now.isoformat())
-    notify_critical(
-        "Survival mode: no Octopus Agile rates for 24h in this failure streak. "
-        "Fox ESS Scheduler V3 disabled; inverter set to Self Use until the next successful fetch."
-    )
-    if not fox or config.OPENCLAW_READ_ONLY:
-        return
-    try:
-        if fox.api_key:
-            fox.set_scheduler_flag(False)
-            # Persist the scheduler-off state so local derivations (e.g. the
-            # heartbeat's execution_log fox_mode, #669) stop walking the last
-            # uploaded groups — they are no longer in force on the inverter.
-            db.save_fox_schedule_state([], enabled=False)
-        fox.set_work_mode("Self Use")
-        fox.set_min_soc(10)
-        db.log_action(
-            device="foxess",
-            action="survival_mode",
-            params={"scheduler_flag": False},
-            result="success",
-            trigger="scheduler",
+    fallback_failed: str | None = None
+    did_fallback = False
+    if fox and not config.OPENCLAW_READ_ONLY:
+        try:
+            if fox.api_key:
+                fox.set_scheduler_flag(False)
+                # Persist the scheduler-off state so local derivations (e.g. the
+                # heartbeat's execution_log fox_mode, #669) stop walking the last
+                # uploaded groups — they are no longer in force on the inverter.
+                db.save_fox_schedule_state([], enabled=False)
+            fox.set_work_mode("Self Use")
+            fox.set_min_soc(10)
+            db.log_action(
+                device="foxess",
+                action="survival_mode",
+                params={"scheduler_flag": False},
+                result="success",
+                trigger="scheduler",
+            )
+            did_fallback = True
+        except FoxESSError as e:
+            logger.warning("Survival mode Fox fallback failed: %s", e)
+            fallback_failed = str(e)
+    # #941: report AFTER the fallback (the helper never raises, so it cannot skip it).
+    # A successful Self Use fallback is an auto-recovery: record-only. Push only when
+    # the fallback write itself failed.
+    if fallback_failed is not None:
+        report_command_failure(
+            "octopus_survival_fox_fallback",
+            "Sem tarifas Octopus há 24h e a escrita Self Use no Fox falhou "
+            f"({fallback_failed}); a bateria segue o último agendamento. "
+            "Coloque o inversor em Self Use no app Fox.",
+            recovered=False, device="foxess",
         )
-    except FoxESSError as e:
-        logger.warning("Survival mode Fox fallback failed: %s", e)
+    elif did_fallback:
+        report_command_failure(
+            "octopus_survival_mode",
+            "Sem tarifas Octopus há 24h: HEM desligou o Scheduler V3 do Fox e colocou o inversor "
+            "em Self Use até a próxima busca bem-sucedida.",
+            recovered=True, device="foxess",
+        )
+    else:
+        report_command_failure(
+            "octopus_survival_mode",
+            "Sem tarifas Octopus há 24h, mas HEM em somente-leitura (ou sem Fox): nada foi "
+            "alterado no inversor.",
+            recovered=False, device="foxess",
+            record_only_reason="somente-leitura/sem Fox; HEM não alterou o inversor",
+        )
 
 
 # #691 export-gap retry state (in-process; a restart re-solves on boot anyway).

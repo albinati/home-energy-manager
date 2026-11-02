@@ -124,9 +124,10 @@ def test_notification_fires_once_per_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     notify_calls: list[tuple[str, dict]] = []
-    def fake_notify(msg, extra=None):
+    def fake_notify(kind, msg, *, recovered, device, extra=None):
+        assert recovered is False and device == "daikin" and kind == "daikin_auth_circuit"
         notify_calls.append((msg, extra or {}))
-    monkeypatch.setattr("src.notifier.notify_risk", fake_notify)
+    monkeypatch.setattr("src.notifier.report_command_failure", fake_notify)
 
     tokens = auth.load_tokens()
     # Three consecutive failures; first two pre-trip, third is post-trip
@@ -139,4 +140,4 @@ def test_notification_fires_once_per_trip(tmp_path, monkeypatch):
 
     # Exactly one notification.
     assert len(notify_calls) == 1
-    assert "refresh_token likely expired" in notify_calls[0][0]
+    assert "refresh_token provavelmente expirou" in notify_calls[0][0]

@@ -334,10 +334,8 @@ def test_drift_check_disabled_in_vacation_mode(monkeypatch):
     client = MagicMock()
     apply_restore = MagicMock()
     notify_risk = MagicMock()
-    notify_critical = MagicMock()
     monkeypatch.setattr(sm, "apply_comfort_restore", apply_restore)
-    monkeypatch.setattr(sm, "notify_risk", notify_risk)
-    monkeypatch.setattr(sm, "notify_critical", notify_critical)
+    monkeypatch.setattr("src.notifier.report_command_failure", notify_risk)
 
     sm._check_tank_power_drift(
         [], client, dev, datetime(2026, 6, 1, 19, 0, tzinfo=UTC), trigger="hb",
@@ -345,7 +343,6 @@ def test_drift_check_disabled_in_vacation_mode(monkeypatch):
 
     apply_restore.assert_not_called()
     notify_risk.assert_not_called()
-    notify_critical.assert_not_called()
     assert sm._TANK_DRIFT_NOTIFIED is False
 
 
@@ -363,8 +360,7 @@ def test_drift_check_still_fires_in_normal_mode(monkeypatch):
     apply_restore = MagicMock()
     notify_risk = MagicMock()
     monkeypatch.setattr(sm, "apply_comfort_restore", apply_restore)
-    monkeypatch.setattr(sm, "notify_risk", notify_risk)
-    monkeypatch.setattr(sm, "notify_critical", MagicMock())
+    monkeypatch.setattr("src.notifier.report_command_failure", notify_risk)
 
     sm._check_tank_power_drift(
         [], client, dev, datetime(2026, 6, 1, 19, 0, tzinfo=UTC), trigger="hb",

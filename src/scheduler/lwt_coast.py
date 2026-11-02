@@ -300,8 +300,15 @@ def _holiday_climate(dev: Any = None) -> bool:
         return False
 
 
+# #941 -- consecutive cold-backstop WRITE failures before the owner is pushed
+# (command_failed). A single failed write is retried next tick and is not paged.
+BACKSTOP_WRITE_FAIL_PUSH_TICKS = 3
+_backstop_write_fails = 0
+
+
 def reset_backstop() -> None:
-    global _backstop_ticks, _warm_ticks, _emergency_ticks
+    global _backstop_ticks, _warm_ticks, _emergency_ticks, _backstop_write_fails
+    _backstop_write_fails = 0
     _backstop_ticks = 0
     _warm_ticks = 0
     _emergency_ticks = 0
@@ -317,7 +324,7 @@ def backstop_tick(
     replan_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """One heartbeat evaluation of the comfort backstop. Never raises."""
-    global _backstop_ticks
+    global _backstop_ticks, _backstop_write_fails
     out: dict[str, Any] = {"active_row": None, "ticks": 0, "fired": False}
     try:
         if not bool(getattr(config, "LWT_COMFORT_BACKSTOP_ENABLED", True)):
@@ -328,10 +335,12 @@ def backstop_tick(
             getattr(config, "OPENCLAW_READ_ONLY", False)
         ):
             _backstop_ticks = 0
+            _backstop_write_fails = 0
             return out
         row = _active_negative_row(plan_date, now_utc)
         if row is None:
             _backstop_ticks = 0
+            _backstop_write_fails = 0
             return out
         out["active_row"] = int(row["id"])
         reading = db.get_latest_indoor_reading(
@@ -345,6 +354,7 @@ def backstop_tick(
         out.update(indoor=indoor, floor=floor, margin=margin)
         if indoor >= floor - margin:
             _backstop_ticks = 0
+            _backstop_write_fails = 0
             return out
         _backstop_ticks += 1
         out["ticks"] = _backstop_ticks
@@ -372,7 +382,23 @@ def backstop_tick(
                         "offset_was": offset_was, "row_id": int(row["id"])},
                 result="failure", trigger="heartbeat", error_msg=str(e),
             )
+            _backstop_write_fails += 1
+            if _backstop_write_fails >= BACKSTOP_WRITE_FAIL_PUSH_TICKS:
+                try:
+                    from ..notifier import report_command_failure
+
+                    report_command_failure(
+                        "lwt_cold_backstop_write",
+                        f"Casa a {indoor:.1f} C, abaixo do piso de conforto ({floor:.1f} C), e a "
+                        f"escrita do offset 0 no Daikin falhou {_backstop_write_fails} ticks seguidos "
+                        f"({e}). HEM segue tentando; zere o offset no app Onecta.",
+                        recovered=False, device="daikin",
+                        extra={"consecutive_failures": _backstop_write_fails},
+                    )
+                except Exception as _ne:
+                    logger.debug("lwt backstop failure report failed: %s", _ne)
             return out  # ticks stay armed → retried next tick
+        _backstop_write_fails = 0
         if not wrote:
             # passive / read-only / nothing sent: do NOT claim the offset was
             # cancelled — keep the counter armed and retry next tick.
@@ -384,6 +410,7 @@ def backstop_tick(
             return out
         db.mark_action(int(row["id"]), "completed", error_msg="comfort_backstop")
         _backstop_ticks = 0
+        _backstop_write_fails = 0
         out["fired"] = True
         hold_minutes = max(0, int(getattr(config, "LWT_COMFORT_BACKSTOP_HOLD_MINUTES", 90)))
         hold_until = now_utc + timedelta(minutes=hold_minutes)
@@ -398,12 +425,14 @@ def backstop_tick(
         try:
             key = f"lwt_backstop_{now_utc.astimezone(_tz()):%Y-%m-%d_%H%M}"  # hold start
             if not db.is_warning_acknowledged(key):
-                from ..notifier import notify_risk
+                from ..notifier import report_command_failure
 
-                notify_risk(
-                    f"House at {indoor:.1f} C, under the {floor:.1f} C comfort floor "
-                    f"(margin {margin:.1f}): LWT offset {offset_was:+.0f} cancelled, "
-                    "heating restored and plan re-solved.",
+                report_command_failure(
+                    "lwt_cold_backstop",
+                    f"Casa a {indoor:.1f} C, abaixo do piso de {floor:.1f} C "
+                    f"(margem {margin:.1f}): offset LWT {offset_was:+.0f} cancelado, "
+                    "aquecimento restaurado e plano recalculado.",
+                    recovered=True, device="daikin",
                     extra={"warning_key": key},
                 )
                 db.acknowledge_warning(key)

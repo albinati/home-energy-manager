@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 from .. import db
 from ..config import config
-from ..notifier import notify_risk
+from ..notifier import notify_risk, report_command_failure
 from ..smartthings.client import SmartThingsError
 from ..smartthings.service import get_client as _get_st_client
 
@@ -67,20 +67,31 @@ def _record_reconcile_error(appliance_id: int, err: Exception) -> None:
         isinstance(err, SmartThingsError) and err.code == "pat_invalid"
     )
     if is_pat_invalid:
-        if not _pat_invalid_notified:
-            notify_risk(
-                f"SmartThings PAT rejected (HTTP 401). Appliance dispatch is paused. "
-                f"Re-set the token via /api/v1/integrations/smartthings/credentials.",
-                extra={"appliance_id": appliance_id, "code": "pat_invalid"},
-            )
-            _pat_invalid_notified = True
-        # PAT-invalid is a single-ping condition — skip the threshold path.
+        # No in-process latch (#941): the helper dedupes per day, so a PAT that stays
+        # invalid reminds once a day instead of once per process.
+        report_command_failure(
+            "smartthings_pat_invalid",
+            "O token SmartThings (PAT) foi rejeitado (HTTP 401): o despacho de "
+            "eletrodomésticos está parado. Gere um novo PAT e grave em "
+            "/api/v1/integrations/smartthings/credentials.",
+            recovered=False, device="smartthings",
+            extra={"appliance_id": appliance_id, "code": "pat_invalid"},
+        )
         return
 
     if n == threshold:
-        notify_risk(
-            f"SmartThings reconcile failed {n} times in a row for appliance #{appliance_id}: {err}",
-            extra={"appliance_id": appliance_id, "consecutive_errors": n},
+        # Only worth a push when a cycle is actually armed/scheduled for this appliance.
+        try:
+            has_job = db.get_active_appliance_job(appliance_id) is not None
+        except Exception:  # noqa: BLE001
+            has_job = True
+        report_command_failure(
+            "smartthings_reconcile_errors",
+            f"A reconciliação SmartThings do eletrodoméstico #{appliance_id} falhou {n} vezes "
+            f"seguidas ({err}). HEM segue tentando; confira a conexão/PAT do SmartThings.",
+            recovered=False, device="smartthings",
+            extra={"appliance_id": appliance_id, "consecutive_errors": n, "armed_job": has_job},
+            record_only_reason=None if has_job else "sem ciclo armado/agendado",
         )
 
 
@@ -2308,8 +2319,11 @@ def _fire_cron(job_id: int) -> None:
             actual_start_utc=actual_start,
         )
         db.set_appliance_rearm_block(int(job["appliance_id"]), True)
-        notify_risk(
-            f"Wash didn't fire — SmartThings PAT unavailable ({e.code}).",
+        report_command_failure(
+            "smartthings_fire_pat_unavailable",
+            f"A lavagem não iniciou: PAT do SmartThings indisponível ({e.code}). "
+            "Regrave o PAT e arme a máquina de novo.",
+            recovered=False, device="smartthings",
             extra={"job_id": int(job_id), "code": e.code},
         )
         return
@@ -2320,8 +2334,11 @@ def _fire_cron(job_id: int) -> None:
                 error_msg="remote_mode_dropped_at_fire",
                 actual_start_utc=actual_start,
             )
-            notify_risk(
-                "Wash didn't fire — washer left remote-start mode just before the planned start.",
+            report_command_failure(
+                "smartthings_remote_mode_dropped",
+                "Lavagem não iniciada: a máquina saiu do modo remoto pouco antes do horário. "
+                "Cancelado limpo; ative o modo remoto para rearmar.",
+                recovered=True, device="smartthings",
                 extra={"job_id": int(job_id)},
             )
             return
@@ -2332,8 +2349,11 @@ def _fire_cron(job_id: int) -> None:
             actual_start_utc=actual_start,
         )
         db.set_appliance_rearm_block(int(job["appliance_id"]), True)
-        notify_risk(
-            f"Wash didn't fire — couldn't verify remote-start state ({e.code}).",
+        report_command_failure(
+            "smartthings_fire_verify_failed",
+            f"A lavagem não iniciou: não foi possível confirmar o modo remoto ({e.code}). "
+            "Confira o SmartThings e arme a máquina de novo.",
+            recovered=False, device="smartthings",
             extra={"job_id": int(job_id), "code": e.code},
         )
         return
@@ -2374,8 +2394,11 @@ def _fire_cron(job_id: int) -> None:
         except Exception:  # pragma: no cover
             pass
         try:
-            notify_risk(
-                f"Lavagem NAO iniciada ({abort_reason}): a máquina mudou desde o agendamento.",
+            report_command_failure(
+                "smartthings_fire_aborted",
+                f"Lavagem NAO iniciada ({abort_reason}): a máquina mudou desde o agendamento. "
+                "Cancelado limpo, nada foi enviado.",
+                recovered=True, device="smartthings",
                 extra={"job_id": int(job_id), "reason": abort_reason},
             )
         except Exception:  # noqa: BLE001
@@ -2391,8 +2414,11 @@ def _fire_cron(job_id: int) -> None:
             actual_start_utc=actual_start,
         )
         db.set_appliance_rearm_block(int(job["appliance_id"]), True)
-        notify_risk(
-            f"Wash failed to start: {e}.",
+        report_command_failure(
+            "smartthings_start_cycle",
+            f"O comando de iniciar a lavagem falhou: {e}. A máquina não começou; "
+            "inicie manualmente ou rearme.",
+            recovered=False, device="smartthings",
             extra={"job_id": int(job_id), "code": e.code},
         )
         return

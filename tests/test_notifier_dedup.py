@@ -31,7 +31,7 @@ def test_fox_flag_warning_fires_once_per_day(monkeypatch):
     from src import db, state_machine
 
     notifies: list[str] = []
-    monkeypatch.setattr(state_machine, "notify_risk", lambda msg, **k: notifies.append(msg))
+    monkeypatch.setattr("src.notifier.report_command_failure", lambda kind, msg, **k: notifies.append(msg))
 
     from unittest.mock import MagicMock
     fox = MagicMock()
@@ -62,7 +62,7 @@ def test_fox_flag_warning_re_fires_after_recovery(monkeypatch):
     from src import state_machine
 
     notifies: list[str] = []
-    monkeypatch.setattr(state_machine, "notify_risk", lambda msg, **k: notifies.append(msg))
+    monkeypatch.setattr("src.notifier.report_command_failure", lambda kind, msg, **k: notifies.append(msg))
 
     from unittest.mock import MagicMock
     fox = MagicMock()

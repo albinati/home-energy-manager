@@ -22,7 +22,7 @@ from .daikin_bulletproof import (
 )
 from .foxess.client import FoxESSClient, FoxESSError, scheduler_groups_from_stored_json
 from .foxess.models import _group_fingerprint, fingerprints_match
-from .notifier import notify_critical, notify_risk, notify_user_override
+from .notifier import notify_risk, notify_user_override
 
 logger = logging.getLogger(__name__)
 
@@ -857,7 +857,43 @@ def apply_safe_defaults(
     *,
     trigger: str = "recovery",
 ) -> None:
-    """Force safe house state after arbitrage windows or on fault."""
+    """Force safe house state after arbitrage windows or on fault.
+
+    #941: failed WRITE legs are collected and reported ONCE per call. Boot triggers
+    (``boot_*``) push after HEM already retried the failed leg once; any other
+    trigger (e.g. ``shutdown``) is record-only. A failed Daikin READ is not a leg.
+    """
+    failed_legs: list[str] = []
+    try:
+        _apply_safe_defaults_impl(fox, daikin, trigger=trigger, failed_legs=failed_legs)
+    finally:
+        if failed_legs:
+            try:
+                from .notifier import report_command_failure
+
+                is_boot = str(trigger).startswith("boot_")
+                report_command_failure(
+                    f"apply_safe_defaults:{trigger}",
+                    "Os padrões seguros não foram aplicados por completo "
+                    f"(trigger={trigger}). Falharam: " + "; ".join(failed_legs) + ". "
+                    + ("HEM já repetiu cada etapa uma vez; confira o inversor/Daikin nos apps e reaplique."
+                       if is_boot else "Encerramento/rotina: nada a fazer agora."),
+                    recovered=False,
+                    device="foxess" if any(x.startswith("fox") for x in failed_legs) else "daikin",
+                    extra={"failed_legs": list(failed_legs), "trigger": trigger},
+                    record_only_reason=None if is_boot else f"trigger {trigger}: sem push",
+                )
+            except Exception as exc:
+                logger.warning("apply_safe_defaults failure report failed: %s", exc)
+
+
+def _apply_safe_defaults_impl(
+    fox: FoxESSClient | None,
+    daikin: DaikinClient | None,
+    *,
+    trigger: str,
+    failed_legs: list[str],
+) -> None:
     if fox and not config.OPENCLAW_READ_ONLY:
         # Isolate each set_* call so action_log + logs identify exactly which
         # endpoint Fox rejects. Historically the bundled try/except masked this:
@@ -881,6 +917,20 @@ def apply_safe_defaults(
             except (FoxESSError, ValueError) as e:
                 failures[name] = str(e)
                 logger.warning("Fox safe-default step %s failed: %s", name, e)
+        if failures and str(trigger).startswith("boot_"):
+            # one retry of each failed leg (boot only; shutdown must not linger)
+            for name, call in steps:
+                if name not in failures:
+                    continue
+                try:
+                    call()
+                    applied[name] = step_value[name]
+                    del failures[name]
+                except (FoxESSError, ValueError) as e:
+                    failures[name] = str(e)
+                    logger.warning("Fox safe-default step %s retry failed: %s", name, e)
+        for name, err in failures.items():
+            failed_legs.append(f"fox {name}: {err}")
 
         if fox.api_key and "scheduler_flag" in applied:
             # Persist the scheduler-off state so local derivations (e.g. the
@@ -920,6 +970,7 @@ def apply_safe_defaults(
 
     if not daikin:
         return
+    write_started = False
     try:
         devices = daikin.get_devices()
         if not devices:
@@ -967,18 +1018,25 @@ def apply_safe_defaults(
                     error_msg="covering tank row is user-overridden",
                 )
                 return
-            apply_scheduled_daikin_params(
-                dev,
-                daikin,
-                tank_params
-                or {
-                    "tank_powerful": False,
-                    "tank_temp": float(config.DHW_TEMP_NORMAL_C),
-                    "tank_power": True,
-                },
-                trigger=trigger,
-                skip_if_matches=tank_params is not None,
-            )
+            write_started = True
+            _tank_leg = tank_params or {
+                "tank_powerful": False,
+                "tank_temp": float(config.DHW_TEMP_NORMAL_C),
+                "tank_power": True,
+            }
+            try:
+                apply_scheduled_daikin_params(
+                    dev, daikin, _tank_leg, trigger=trigger,
+                    skip_if_matches=tank_params is not None,
+                )
+            except (DaikinError, ValueError):
+                if not str(trigger).startswith("boot_"):
+                    raise
+                logger.warning("Daikin safe-default tank leg failed; retrying once")
+                apply_scheduled_daikin_params(
+                    dev, daikin, _tank_leg, trigger=trigger,
+                    skip_if_matches=tank_params is not None,
+                )
     except (DaikinError, ValueError, IndexError) as e:
         db.log_action(
             device="daikin",
@@ -988,6 +1046,8 @@ def apply_safe_defaults(
             trigger=trigger,
             error_msg=str(e),
         )
+        if write_started:  # a failed read/device lookup is not a failed leg
+            failed_legs.append(f"daikin: {e}")
         logger.warning("Daikin safe defaults failed: %s", e)
 
 
@@ -1995,6 +2055,39 @@ def _check_warmup_lift_settle(
         logger.debug("lift-settle log failed (non-fatal): %s", _exc)
 
 
+def _report_drift_outcome(
+    kind: str, what: str, *, recovered: bool, attempted: bool, auto_recover_flag: bool,
+    fixed_text: str, hint: str, trigger: str, extra: dict[str, Any] | None = None,
+) -> None:
+    """#941 three-way drift outcome: recovered / attempted_failed / not_attempted.
+    Only attempted_failed pushes; not_attempted is record-only with honest text."""
+    from .notifier import report_command_failure
+
+    ex = {"trigger": trigger, **(extra or {})}
+    if recovered:
+        report_command_failure(
+            kind, f"{what} — {fixed_text} (trigger={trigger})",
+            recovered=True, device="daikin", extra={**ex, "outcome": "recovered"},
+        )
+    elif attempted:
+        report_command_failure(
+            kind, f"{what} — HEM tentou corrigir e não conseguiu; {hint} (trigger={trigger})",
+            recovered=False, device="daikin", extra={**ex, "outcome": "attempted_failed"},
+        )
+    else:
+        if config.OPENCLAW_READ_ONLY or config.DAIKIN_CONTROL_MODE != "active":
+            why = "HEM em modo passivo/somente-leitura; não corrigiu"
+        elif not auto_recover_flag:
+            why = "auto-recover desligado; HEM não corrigiu"
+        else:
+            why = "HEM não corrigiu"
+        report_command_failure(
+            kind, f"{what} — {why} (trigger={trigger})",
+            recovered=False, device="daikin", record_only_reason=why,
+            extra={**ex, "outcome": "not_attempted"},
+        )
+
+
 def _check_tank_power_drift(
     actions: list[dict[str, Any]],
     client: DaikinClient,
@@ -2103,11 +2196,13 @@ def _check_tank_power_drift(
         trigger=trigger,
     )
     recovered = False
+    attempted = False
     if (
         config.TANK_DRIFT_AUTO_RECOVER
         and not config.OPENCLAW_READ_ONLY
         and config.DAIKIN_CONTROL_MODE == "active"
     ):
+        attempted = True
         try:
             apply_comfort_restore(dev, client, trigger=f"tank_drift_recover:{trigger}")
             recovered = True
@@ -2117,12 +2212,13 @@ def _check_tank_power_drift(
     if not _TANK_DRIFT_NOTIFIED:
         _TANK_DRIFT_NOTIFIED = True
         try:
-            msg = (
-                "Tank power=OFF and no plan slot scheduled it off — "
-                f"{'force-restored to NORMAL' if recovered else 'manual recovery may be needed'} "
-                f"(trigger={trigger})"
+            _report_drift_outcome(
+                "tank_power_drift", "Tanque DESLIGADO sem nenhum slot do plano pedindo isso",
+                recovered=recovered, attempted=attempted,
+                auto_recover_flag=bool(config.TANK_DRIFT_AUTO_RECOVER),
+                fixed_text="HEM religou e restaurou o alvo normal",
+                hint="ligue o tanque no app Onecta", trigger=trigger,
             )
-            notify_critical(msg) if not recovered else notify_risk(msg)
         except Exception as _exc:
             logger.debug("tank-drift notify failed (non-fatal): %s", _exc)
 
@@ -2785,11 +2881,13 @@ def _check_lwt_offset_drift(
         trigger=trigger,
     )
     recovered = False
+    attempted = False
     if (
         config.LWT_OFFSET_DRIFT_AUTO_RECOVER
         and not config.OPENCLAW_READ_ONLY
         and config.DAIKIN_CONTROL_MODE == "active"
     ):
+        attempted = True
         try:
             apply_scheduled_daikin_params(
                 dev, client, {"lwt_offset": 0, "lp_optimizer": True},
@@ -2802,12 +2900,15 @@ def _check_lwt_offset_drift(
     if not _LWT_DRIFT_NOTIFIED:
         _LWT_DRIFT_NOTIFIED = True
         try:
-            msg = (
-                f"LWT offset = {off:+.0f}°C with no plan slot justifying it — "
-                f"{'reset to 0' if recovered else 'manual reset may be needed'} "
-                f"(trigger={trigger})"
+            _report_drift_outcome(
+                "lwt_offset_drift",
+                f"LWT offset = {off:+.0f}°C sem nenhum slot do plano justificando",
+                recovered=recovered, attempted=attempted,
+                auto_recover_flag=bool(config.LWT_OFFSET_DRIFT_AUTO_RECOVER),
+                fixed_text="HEM zerou o offset",
+                hint="zere o offset no app Onecta", trigger=trigger,
+                extra={"lwt_offset": float(off)},
             )
-            notify_risk(msg)
         except Exception as _exc:
             logger.debug("lwt-drift notify failed (non-fatal): %s", _exc)
 
@@ -2868,13 +2969,20 @@ def reconcile_daikin_schedule_for_date(
 def heartbeat_repair_fox_scheduler(fox: FoxESSClient) -> None:
     """Re-enable Fox time-scheduler and re-upload V3 if SQLite plan differs.
 
-    V12: gates the "Fox scheduler flag disabled" warning behind a per-day
-    ``acknowledged_warnings`` row so a stuck-False flag doesn't ping every
+    V12: gates the "Fox scheduler flag disabled" record behind a per-day
+    ``acknowledged_warnings`` row so a stuck-False flag doesn't log every
     2-min heartbeat. The warning auto-clears when the flag recovers, so a
-    fresh failure on the same day re-pings exactly once.
+    fresh failure on the same day re-records exactly once.
+
+    #941: the disabled flag is record-only (this repair re-enables it); a failing
+    repair pushes on the 2nd consecutive failed heartbeat, and never while survival
+    mode is active (survival deliberately turns the flag off).
     """
     if not fox.api_key:
         return
+    from .notifier import bump_failure_counter, report_command_failure
+
+    repair_started = False
     try:
         from datetime import date as _date
         flag_on = fox.get_scheduler_flag()
@@ -2883,13 +2991,26 @@ def heartbeat_repair_fox_scheduler(fox: FoxESSClient) -> None:
         warning_key = f"fox_scheduler_disabled_{plan_date}"
         if not flag_on or not hw.enabled:
             if not db.is_warning_acknowledged(warning_key):
-                notify_risk("Fox ESS scheduler flag disabled — check inverter app.")
+                if config.OPENCLAW_READ_ONLY:
+                    report_command_failure(
+                        "fox_scheduler_flag_disabled",
+                        "O flag do agendador Fox está desligado; HEM em somente-leitura, não religou.",
+                        recovered=False, device="foxess",
+                        record_only_reason="somente-leitura",
+                    )
+                else:
+                    report_command_failure(
+                        "fox_scheduler_flag_disabled",
+                        "O flag do agendador Fox estava desligado; o heartbeat do HEM religa.",
+                        recovered=True, device="foxess",
+                    )
                 db.acknowledge_warning(warning_key)
         else:
             # Flag is healthy — drop any prior ack so a fresh failure today
-            # re-pings exactly once.
+            # re-records exactly once.
             db.clear_warning(warning_key)
         if not config.OPENCLAW_READ_ONLY:
+            repair_started = True
             if not flag_on or not hw.enabled:
                 fox.set_scheduler_flag(True)
             latest = db.get_latest_fox_schedule_state()
@@ -2907,8 +3028,25 @@ def heartbeat_repair_fox_scheduler(fox: FoxESSClient) -> None:
                         result="success",
                         trigger="heartbeat",
                     )
+            bump_failure_counter("fox_repair_consecutive_failures", False)
     except FoxESSError as e:
         logger.warning("Heartbeat Fox Scheduler V3 repair failed: %s", e)
+        if repair_started:
+            n = bump_failure_counter("fox_repair_consecutive_failures", True)
+            survival = False
+            try:
+                survival = bool(db.get_octopus_fetch_state().survival_mode_since)
+            except Exception:  # noqa: BLE001
+                pass
+            if n >= 2 and not survival:
+                report_command_failure(
+                    "fox_scheduler_repair_failed",
+                    f"O reparo do agendador Fox (religar o flag / reenviar o plano) falhou {n} "
+                    f"heartbeats seguidos: {e}. HEM tenta de novo a cada heartbeat; confira o "
+                    "app Fox e religue o agendador.",
+                    recovered=False, device="foxess",
+                    extra={"consecutive_failures": n},
+                )
 
 
 def _recover_missed_restores(

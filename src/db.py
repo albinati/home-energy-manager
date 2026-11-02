@@ -602,6 +602,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         # #931 -- solve ran with no PV source at all. Own route, enabled (the
         # generic risk_alert route is muted on prod by owner choice).
         ("pv_forecast_degraded",   "critical", 0),
+        # #941 -- hardware command still failing after HEM's retry/recovery.
+        ("command_failed",         "critical", 0),
     ]
     for _at, _sev, _sil in _NOTIFICATION_DEFAULTS:
         conn.execute(

@@ -343,11 +343,14 @@ class TestReconcile:
         patch_st.get_remote_control_enabled.side_effect = SmartThingsError(
             "transport", "boom"
         )
-        with patch.object(appliance_dispatch, "notify_risk") as ping:
+        with patch.object(appliance_dispatch, "report_command_failure") as ping:
             for _ in range(5):
                 appliance_dispatch.reconcile()
-            # notify_risk fires exactly once (at the threshold).
+            # fires exactly once (at the threshold), as a still-failing command.
             assert ping.call_count == 1
+            assert ping.call_args.kwargs["recovered"] is False
+            # no armed/scheduled job for this appliance: record-only
+            assert ping.call_args.kwargs["record_only_reason"]
 
     def test_pat_invalid_pings_once(
         self, monkeypatch, appliance_id, fake_scheduler, patch_st
@@ -357,10 +360,13 @@ class TestReconcile:
         patch_st.get_remote_control_enabled.side_effect = SmartThingsError(
             "pat_invalid", "401", http_status=401
         )
-        with patch.object(appliance_dispatch, "notify_risk") as ping:
+        with patch.object(appliance_dispatch, "report_command_failure") as ping:
             for _ in range(3):
                 appliance_dispatch.reconcile()
-            assert ping.call_count == 1
+            # no in-process latch: every failing tick reports, the helper dedupes per day
+            assert ping.call_count == 3
+            assert all(c.args[0] == "smartthings_pat_invalid" for c in ping.call_args_list)
+            assert all(c.kwargs["recovered"] is False for c in ping.call_args_list)
 
 
 # ---------------------------------------------------------------------------
@@ -404,13 +410,14 @@ class TestFireCron:
         monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
         patch_st.get_remote_control_enabled.return_value = False
         job_id = self._make_armed_job(appliance_id, datetime.now(UTC))
-        with patch.object(appliance_dispatch, "notify_risk") as ping:
+        with patch.object(appliance_dispatch, "report_command_failure") as ping:
             appliance_dispatch._fire_cron(job_id)
         row = db.get_appliance_job(job_id)
         assert row["status"] == "cancelled"
         assert row["error_msg"] == "remote_mode_dropped_at_fire"
         patch_st.start_cycle.assert_not_called()
         assert ping.call_count == 1
+        assert ping.call_args.kwargs["recovered"] is True  # clean cancel: record-only
 
     def test_pre_fire_safety_check_fails(
         self, monkeypatch, appliance_id, patch_st
@@ -420,7 +427,7 @@ class TestFireCron:
             "transport", "down"
         )
         job_id = self._make_armed_job(appliance_id, datetime.now(UTC))
-        with patch.object(appliance_dispatch, "notify_risk"):
+        with patch.object(appliance_dispatch, "report_command_failure"):
             appliance_dispatch._fire_cron(job_id)
         row = db.get_appliance_job(job_id)
         assert row["status"] == "failed"
@@ -446,10 +453,13 @@ class TestFireCron:
         patch_st.get_remote_control_enabled.return_value = True
         patch_st.start_cycle.side_effect = SmartThingsError("http_error", "500")
         job_id = self._make_armed_job(appliance_id, datetime.now(UTC))
-        with patch.object(appliance_dispatch, "notify_risk"):
+        with patch.object(appliance_dispatch, "report_command_failure") as rcf:
             appliance_dispatch._fire_cron(job_id)
         row = db.get_appliance_job(job_id)
         assert row["status"] == "failed"
+        rcf.assert_called_once()
+        assert rcf.call_args.args[0] == "smartthings_start_cycle"
+        assert rcf.call_args.kwargs["recovered"] is False
 
     def test_starting_ping_muted_by_default(
         self, monkeypatch, appliance_id, patch_st
@@ -692,7 +702,7 @@ class TestRearmLatch:
             avg_price_pence=5.0,
             last_replan_at_utc=datetime.now(UTC).isoformat(),
         )
-        with patch.object(appliance_dispatch, "notify_risk"):
+        with patch.object(appliance_dispatch, "report_command_failure"):
             appliance_dispatch._fire_cron(job_id)
         assert db.get_appliance_job(job_id)["status"] == "failed"
         assert db.is_appliance_rearm_blocked(appliance_id) is True
@@ -789,7 +799,7 @@ class TestRehydrate:
             planned_start_utc=past.isoformat(),
             planned_end_utc=(past + timedelta(hours=2)).isoformat(),
         )
-        with patch.object(appliance_dispatch, "notify_risk"):
+        with patch.object(appliance_dispatch, "report_command_failure"):
             summary = appliance_dispatch.rehydrate_crons()
         assert summary["expired"] == 1
         row = db.get_appliance_job(job_id)
@@ -1033,7 +1043,7 @@ class TestFreshArmEvidence:
             avg_price_pence=5.0, last_replan_at_utc=_z(armed))
         patch_st.get_remote_control_enabled.return_value = True
         patch_st.get_full_status = MagicMock(return_value=status)
-        with patch.object(appliance_dispatch, "notify_risk") as nr:
+        with patch.object(appliance_dispatch, "report_command_failure") as nr:
             appliance_dispatch._fire_cron(jid)
         return jid, nr
 
@@ -1044,6 +1054,7 @@ class TestFreshArmEvidence:
         job = db.get_appliance_job(jid)
         assert job["status"] == "cancelled" and "since_armed" in job["error_msg"]
         assert nr.call_count == 1
+        assert nr.call_args.kwargs["recovered"] is True  # clean abort: record-only
         assert db.is_appliance_rearm_blocked(appliance_id)
 
     @pytest.mark.parametrize("machine,sw", [("run", "on"), ("pause", "on"), ("stop", "off")])

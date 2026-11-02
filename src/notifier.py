@@ -104,6 +104,11 @@ class AlertType(str, Enum):
     # enabled: ``risk_alert`` is muted on prod (pull-first owner) and must stay so.
     # Pushed once per UTC day, only for status ``none``.
     PV_FORECAST_DEGRADED = "pv_forecast_degraded"
+    # #941 -- a hardware command/actuation is STILL failing after HEM's own retry
+    # or auto-recovery. The only push channel for command failures (owner rule: no
+    # symptom alerts). Own route, seeded enabled: risk_alert/critical_error are muted
+    # on prod because they also carry informational items.
+    COMMAND_FAILED = "command_failed"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -132,6 +137,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "morning_tank_cold": "EnergyMorningTankCold",
     "actuation_stale": "EnergyActuationStale",
     "pv_forecast_degraded": "EnergyPvForecastDegraded",
+    "command_failed": "EnergyCommandFailed",
 }
 
 
@@ -159,6 +165,7 @@ _TELEGRAM_HEADERS: dict[str, str] = {
     "lp_failure": "🚨 LP solver failure",
     "tank_target_divergence": "🌡️ Tanque fora do plano",
     "morning_tank_cold": "🚿 Tanque frio pro banho",
+    "command_failed": "🛑 Comando não aplicado",
 }
 
 
@@ -582,12 +589,15 @@ def _dispatch(
     urgent: bool = False,
     extra: dict[str, Any] | None = None,
     telegram_header_override: str | None = None,
-) -> None:
+) -> bool:
+    """Record + deliver. Returns True only when a transport accepted the message
+    (Telegram 2xx, or a hook delivery enqueued); muted route / no transport /
+    failed send -> False. Existing callers ignore the value."""
     full_msg = _compose_delivery_body(kind, message, urgent=urgent, extra=extra)
     _record_notification(kind, message, urgent=urgent, extra=extra, full_msg=full_msg)
     route = _resolve_route(kind.value)
     if not route:
-        return
+        return False
     silent = bool(route.get("silent"))
 
     # Direct Telegram is preferred when configured — bypasses OpenClaw LLM.
@@ -597,7 +607,7 @@ def _dispatch(
             urgent=urgent, extra=extra,
             header_override=telegram_header_override,
         )
-        telegram_transport.send_message(body, silent=silent)
+        delivered = bool(telegram_transport.send_message(body, silent=silent))
         # Appliance lifecycle events fan out to optional secondary chats so
         # household members get the same message (washing-machine armed /
         # starting / finished / cancelled). Failures are swallowed by the
@@ -605,14 +615,14 @@ def _dispatch(
         if kind.value in _APPLIANCE_FANOUT_ALERT_KEYS:
             for cid in _appliance_fanout_chat_ids():
                 telegram_transport.send_message(body, silent=silent, chat_id_override=cid)
-        return
+        return delivered
 
     if not _hooks_credentials_configured():
         print(
             "[openclaw hooks] OPENCLAW_HOOKS_URL and OPENCLAW_HOOKS_TOKEN are required "
             f"for user delivery (alert={kind.value}; notification was logged above)."
         )
-        return
+        return False
     payload_name = _payload_name_for_key(kind.value)
     agent_msg = _build_generic_agent_message(
         kind.value,
@@ -622,6 +632,7 @@ def _dispatch(
         extra=extra,
     )
     _enqueue_hooks_delivery(kind.value, payload_name, agent_msg, route)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1128,6 +1139,79 @@ def notify_actuation_stale(issues: list[str]) -> None:
 
 def notify_risk(message: str, extra: dict[str, Any] | None = None) -> None:
     _dispatch(AlertType.RISK_ALERT, message, urgent=True, extra=extra)
+
+
+def bump_failure_counter(key: str, failed: bool) -> int:
+    """kv_state consecutive-failure counter: a failure increments, a success resets
+    to 0. Returns the new count. Never raises (returns 0 on storage errors)."""
+    try:
+        if not failed:
+            if db.get_kv(key):
+                db.set_kv(key, "0")
+            return 0
+        n = int(db.get_kv(key, "0") or 0) + 1
+        db.set_kv(key, str(n))
+        return n
+    except Exception as exc:
+        logger.warning("failure counter %s failed: %s", key, exc)
+        return 0
+
+
+def report_command_failure(
+    kind: str,
+    detail: str,
+    *,
+    recovered: bool,
+    device: str,
+    extra: dict[str, Any] | None = None,
+    record_only_reason: str | None = None,
+) -> None:
+    """#941: single entry point for hardware command/actuation failures.
+
+    Always recorded (action_log). Pushed via the ``command_failed`` route ONLY when
+    ``recovered`` is False AND ``record_only_reason`` is None, i.e. HEM actually tried
+    and it is still broken. ``record_only_reason`` marks "not attempted" / expected
+    cases (passive, read-only, shutdown): recorded with that reason, never pushed.
+    Pushes are deduped once per (kind, local day); the key is written only after a
+    transport really accepted the message. Never raises.
+    """
+    try:
+        payload = dict(extra or {})
+        payload.update({"kind": kind, "device": device, "recovered": bool(recovered)})
+        if recovered:
+            _record_notification(
+                AlertType.COMMAND_FAILED, f"[{device}/{kind}] recuperado: {detail}",
+                urgent=False, extra=payload,
+            )
+            return
+        if record_only_reason:
+            payload["record_only_reason"] = record_only_reason
+            _record_notification(
+                AlertType.COMMAND_FAILED,
+                f"[{device}/{kind}] sem push ({record_only_reason}): {detail}",
+                urgent=False, extra=payload,
+            )
+            return
+        key = None
+        try:
+            from datetime import datetime as _dt
+            from zoneinfo import ZoneInfo
+
+            tz = ZoneInfo(config.BULLETPROOF_TIMEZONE or "UTC")
+            key = f"command_failed_pushed:{kind}:{_dt.now(tz).date().isoformat()}"
+            if db.get_kv(key):
+                logger.debug("command_failed %s already pushed today", kind)
+                return
+        except Exception as exc:  # dedupe must never block the alert
+            logger.warning("command_failed dedupe lookup failed: %s", exc)
+        delivered = _dispatch(
+            AlertType.COMMAND_FAILED, f"Comando não aplicado ({device}/{kind}): {detail}",
+            urgent=True, extra=payload,
+        )
+        if delivered and key:
+            db.set_kv(key, "1")
+    except Exception as exc:
+        logger.warning("report_command_failure(%s) failed: %s", kind, exc)
 
 
 def notify_pv_forecast_degraded(message: str, extra: dict[str, Any] | None = None) -> None:
