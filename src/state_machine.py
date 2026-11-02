@@ -2486,7 +2486,7 @@ def _check_morning_tank_cold(
             next_warmup_local=next_warmup_local,
         )
     except Exception as _exc:  # noqa: BLE001 — notification is best-effort
-        logger.debug("morning-tank-cold notify failed (non-fatal): %s", _exc)
+        logger.warning("morning-tank-cold notify failed (non-fatal): %s", _exc)
     try:
         db.acknowledge_warning(warning_key)
     except Exception as _exc:  # noqa: BLE001
