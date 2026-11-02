@@ -3262,7 +3262,7 @@ def _appliance_overlay_by_slot(cutoff_iso: str) -> dict[datetime, float]:
         conn = get_connection()
         try:
             rows = conn.execute(
-                "SELECT actual_start_utc, completed_at_utc, actual_kwh FROM appliance_jobs "
+                "SELECT actual_start_utc, completed_at_utc, actual_kwh, duration_minutes FROM appliance_jobs "
                 "WHERE actual_kwh IS NOT NULL AND actual_kwh > 0 "
                 "AND actual_start_utc IS NOT NULL AND completed_at_utc IS NOT NULL "
                 "AND completed_at_utc > ?",
@@ -3279,6 +3279,12 @@ def _appliance_overlay_by_slot(cutoff_iso: str) -> dict[datetime, float]:
             b = datetime.fromisoformat(str(r["completed_at_utc"]).replace("Z", "+00:00")).astimezone(UTC)
         except (ValueError, TypeError):
             continue
+        # completed_at is when HEM NOTICED the end (hours late on average):
+        # cap the window at start + the job's own duration.
+        try:
+            b = min(b, a + timedelta(minutes=float(r["duration_minutes"])))
+        except (TypeError, ValueError):
+            pass
         if b <= a:
             continue
         total_s = (b - a).total_seconds()
@@ -3461,7 +3467,7 @@ def _residual_profile_v3_build(
         for b in range(12):
             slots = sorted(by_bucket.get((date_iso, b), []), key=lambda x: x[0])
             if len(slots) != 4:
-                # incomplete (backtest rule) or a DST-transition bucket (2 or 8
+                # incomplete (backtest rule) or a DST-transition bucket (2, 6 or 8
                 # slots): no honest split, skip the bucket
                 continue
             loads = [x[1] for x in slots]

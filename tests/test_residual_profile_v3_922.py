@@ -346,7 +346,7 @@ def test_completed_appliance_run_is_removed_from_the_history() -> None:
         conn = db.get_connection()
         try:
             conn.execute("UPDATE appliance_jobs SET actual_start_utc=?, completed_at_utc=?, actual_kwh=? WHERE appliance_id=?",
-                         (z(start), z(end), 1.0, aid))
+                         (z(start), z(start + timedelta(hours=5)), 1.0, aid))   # noticed 4 h late: capped at duration
             conn.commit()
         finally:
             conn.close()

@@ -256,7 +256,7 @@ Runtime settings (admin UI / `PUT /api/v1/settings`), read by `db.residual_load_
 | Key | Default | Meaning |
 |---|---|---|
 | `LP_RESIDUAL_PROFILE_V3` | false | Master kill switch. false = the v2 builder, byte-identical. |
-| `LP_RESIDUAL_STATISTIC` | mean | `mean` or `median` for the central value (p75/p90 spreads unchanged). |
+| `LP_RESIDUAL_STATISTIC` | mean | `mean` or `median` for the central value (the scenario spread is centre + tier p75/p90 minus tier median, whichever statistic). |
 | `LP_RESIDUAL_DOW_SHRINK` | 0.5 | 0..1. value = w x weekday profile + (1-w) x all-days profile per (hour, minute). |
 | `LP_RESIDUAL_AWAY_HARD_EXCLUDE` | true | Drop days with a vacation preset (`lp_inputs_snapshot`), Daikin holiday (`daikin_telemetry.holiday_active` on >= 50% of the day's rows) and the first day back. Other non-normal presets (guests) are dropped too but reported as `non_representative_days` (the optimizer already applies `_guests_scale`; no return day). The 0.4 x median heuristic stays as fallback. |
 
