@@ -10778,7 +10778,7 @@ def fit_lwt_kw_daily(
     days (:func:`_hard_away_dates`) are dropped. HEM offset days are INCLUDED: ``b`` absorbs
     the echo. CI = bootstrap over days. Returns ``status`` ``ok`` | ``skipped``.
     """
-    import numpy as np
+    import random
 
     from .physics import get_lwt_base_c
 
@@ -10872,31 +10872,48 @@ def fit_lwt_kw_daily(
         return {**base, "status": "skipped",
                 "reason": f"evidence too thin: {len(rows)} usable day(s); need >= {min_days}"}
 
-    y = np.array([r[1] for r in rows])
-    X = np.array([r[2] for r in rows])
-    O = np.array([r[3] for r in rows])  # noqa: E741
-    use_off = float(np.std(O)) > 0.5  # K*h per day; a flat-zero offset has no b to identify
-    A = np.c_[X, O] if use_off else X[:, None]
+    ys = [r[1] for r in rows]
+    xs = [r[2] for r in rows]
+    os_ = [r[3] for r in rows]
+    n = len(rows)
+    mo = sum(os_) / n
+    use_off = (sum((o - mo) ** 2 for o in os_) / n) ** 0.5 > 0.5  # K*h/day; flat offsets cannot identify b
 
-    def _fit(idx: Any) -> Any:
-        coef, *_ = np.linalg.lstsq(A[idx], y[idx], rcond=None)
-        return coef
+    def _fit(idx: list[int]) -> tuple[float, float]:
+        """No-intercept least squares via the 2x2 normal equations (pure Python, no numpy)."""
+        sxx = sum(xs[i] * xs[i] for i in idx)
+        sxy = sum(xs[i] * ys[i] for i in idx)
+        if not use_off:
+            return (sxy / sxx if sxx > 0 else 0.0), 0.0
+        soo = sum(os_[i] * os_[i] for i in idx)
+        sxo = sum(xs[i] * os_[i] for i in idx)
+        soy = sum(os_[i] * ys[i] for i in idx)
+        det = sxx * soo - sxo * sxo
+        if abs(det) <= 1e-12 * max(1.0, sxx * soo):
+            return (sxy / sxx if sxx > 0 else 0.0), 0.0
+        return (sxy * soo - soy * sxo) / det, (soy * sxx - sxy * sxo) / det
 
-    coef = _fit(np.arange(len(rows)))
-    k = float(coef[0])
-    b = float(coef[1]) if use_off else 0.0
-    resid = y - A @ coef
-    sst = float(np.sum((y - y.mean()) ** 2))
-    r2 = 1.0 - float(np.sum(resid ** 2)) / sst if sst > 0 else 0.0
-    rng = np.random.default_rng(0)
-    ks = [float(_fit(rng.integers(0, len(rows), len(rows)))[0]) for _ in range(boot_reps)]
-    ci_lo, ci_hi = float(np.percentile(ks, 2.5)), float(np.percentile(ks, 97.5))
+    k, b = _fit(list(range(n)))
+    resid = [ys[i] - k * xs[i] - b * os_[i] for i in range(n)]
+    my = sum(ys) / n
+    sst = sum((y_ - my) ** 2 for y_ in ys)
+    r2 = 1.0 - sum(e * e for e in resid) / sst if sst > 0 else 0.0
+    rng = random.Random(0)
+    ks = sorted(_fit([rng.randrange(n) for _ in range(n)])[0] for _ in range(boot_reps))
+
+    def _pct(q: float) -> float:  # linear interpolation, like numpy.percentile
+        pos = (len(ks) - 1) * q / 100.0
+        lo_i = int(pos)
+        hi_i = min(lo_i + 1, len(ks) - 1)
+        return ks[lo_i] + (ks[hi_i] - ks[lo_i]) * (pos - lo_i)
+
+    ci_lo, ci_hi = _pct(2.5), _pct(97.5)
     return {
         **base, "status": "ok", "k_per_degc": k, "b_kw_per_k": b, "offset_term": use_off,
         "ci_lo": ci_lo, "ci_hi": ci_hi, "rel_ci": (ci_hi - ci_lo) / k if k > 0 else float("inf"),
-        "r2": r2, "rmse_kwh": float(np.sqrt(np.mean(resid ** 2))), "bias_kwh": float(np.mean(resid)),
-        "y_sum_kwh": float(y.sum()),
-        "_X": X.tolist(), "_O": O.tolist(), "_y": y.tolist(),
+        "r2": r2, "rmse_kwh": (sum(e * e for e in resid) / n) ** 0.5, "bias_kwh": sum(resid) / n,
+        "y_sum_kwh": float(sum(ys)),
+        "_X": xs, "_O": os_, "_y": ys,
     }
 
 
