@@ -373,7 +373,7 @@ def weekly_job(now: datetime | None = None) -> dict[str, Any] | None:
                 cur = float(rs.get_setting(prop["key"]))
                 new = max(cur - STEP_C, min(cur + STEP_C, float(prop["suggested"])))
                 res = auto_tune.propose_change(prop["key"], new, "comfort_feedback",
-                                               note=str(prop.get("reason") or ""))
+                                               note=str(prop.get("reason") or ""), now=now)
                 db.log_action(device="comfort", action="auto_tune",
                               params={**prop, "applied": new if res.get("applied") else None,
                                       "ledger": res},
