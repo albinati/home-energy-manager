@@ -81,7 +81,11 @@ function buildChips(a: StatusAlertsResponse): Chip[] {
   const f = a.forecast;
   if (f?.degraded) {
     let label = "PV forecast degraded";
-    if (f.sidecar_ok === false) label = "Quartz sidecar down";
+    const ps = f.pv_source?.status;
+    if (ps === "none") label = "PV forecast: none (plan uses PV = 0)";
+    else if (ps === "lastgood") label = "PV forecast: reusing last good fetch";
+    else if (ps === "open_meteo_fallback") label = "PV forecast: open-meteo fallback";
+    else if (f.sidecar_ok === false) label = "Quartz sidecar down";
     else if (f.model_name !== "quartz-open-site") label = `PV forecast: ${f.model_name ?? "unknown"} fallback`;
     else if (f.age_s != null && f.age_s > 7200) label = `PV forecast ${Math.round(f.age_s / 3600)}h old`;
     chips.push({

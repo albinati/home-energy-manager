@@ -324,6 +324,8 @@ export interface StatusForecastBlock {
   age_s: number | null;
   sidecar_ok: boolean | null;
   degraded: boolean;
+  /** #931: what the last solve planned on (ok | lastgood | open_meteo_fallback | none). */
+  pv_source?: { status?: string | null; source?: string | null; fallback_reason?: string | null } | null;
 }
 
 export interface StatusFoxDriftBlock {

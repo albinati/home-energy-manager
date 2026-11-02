@@ -125,11 +125,9 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         # stitches elapsed slots from the fetches that covered them -- and only
         # use the live fetch when the store has nothing for the day.
         def _stored_day_forecast() -> list:
-            from ... import db as _db
-
-            rows: list[dict] = []
-            for dd in (d, d + timedelta(days=1)):
-                rows += _db.get_meteo_forecast_for_slot_date(dd.isoformat())
+            rows = db.get_meteo_forecast_for_slot_range(
+                d.isoformat(), (d + timedelta(days=2)).isoformat()
+            )
             return weather._rows_to_hourly(rows)
 
         fc = await asyncio.to_thread(_stored_day_forecast)
@@ -238,7 +236,7 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     # the stitch back-fills each elapsed slot with the forecast that was current
     # when it began, and resolves future slots to the latest plan. This is what
     # gives the accuracy block a real "expected by now" baseline (the live
-    # forecast above is forward-only → 0 for elapsed slots). slot_time_utc is
+    # forecast above was forward-only → 0 for elapsed slots before #931). slot_time_utc is
     # stored in +00:00 form, so normalise to the ...Z key via _norm_z.
     planned_by: dict[str, float] = {}
     plan_committed_at: str | None = None
@@ -304,7 +302,7 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         if elapsed and a is not None:
             # Compare against the COMMITTED plan (frozen at solve time, stitched
             # so elapsed slots have a real value). The live forecast `f` is
-            # forward-only → 0 for elapsed slots, which is why "expected by now"
+            # forward-only (before #931) → 0 for elapsed slots, which is why "expected by now"
             # used to collapse to 0 by evening (#462). Fall back to `f` only if a
             # slot has no committed forecast at all.
             base = planned_by.get(key)

@@ -99,6 +99,11 @@ class AlertType(str, Enum):
     # still time to react. The plan's own recovery is the afternoon warmup,
     # which is hours after the morning shower. ACTIONABLE; once per local day.
     MORNING_TANK_COLD = "morning_tank_cold"
+    # #931 -- the solve ran with NO PV source at all (Quartz and Open-Meteo both
+    # empty and no fresh last-good), so it planned PV = 0. Own route, seeded
+    # enabled: ``risk_alert`` is muted on prod (pull-first owner) and must stay so.
+    # Pushed once per UTC day, only for status ``none``.
+    PV_FORECAST_DEGRADED = "pv_forecast_degraded"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -126,6 +131,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "tank_target_divergence": "EnergyTankTargetDivergence",
     "morning_tank_cold": "EnergyMorningTankCold",
     "actuation_stale": "EnergyActuationStale",
+    "pv_forecast_degraded": "EnergyPvForecastDegraded",
 }
 
 
@@ -1122,6 +1128,14 @@ def notify_actuation_stale(issues: list[str]) -> None:
 
 def notify_risk(message: str, extra: dict[str, Any] | None = None) -> None:
     _dispatch(AlertType.RISK_ALERT, message, urgent=True, extra=extra)
+
+
+def notify_pv_forecast_degraded(message: str, extra: dict[str, Any] | None = None) -> None:
+    """#931: the solve planned with no PV source (pt-BR). Deduped once per UTC day by the caller."""
+    _dispatch(
+        AlertType.PV_FORECAST_DEGRADED, message, urgent=True, extra=extra,
+        telegram_header_override="Previsao solar indisponivel",
+    )
 
 
 def notify_user_override(message: str) -> None:

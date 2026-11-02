@@ -125,11 +125,13 @@ def _forecast_block(sidecar_ok: bool | None) -> dict[str, Any]:
             age_s = max(0.0, (datetime.now(UTC) - ts).total_seconds())
         except (ValueError, TypeError):
             age_s = None
+    pv_source = db.get_latest_pv_source()  # #931: what the LAST SOLVE actually planned on
     degraded = (
         model_name != "quartz-open-site"
         or age_s is None
         or age_s > 7200
         or sidecar_ok is False
+        or (pv_source is not None and pv_source.get("status") not in (None, "ok"))
     )
     return {
         "model_name": model_name,
@@ -138,6 +140,7 @@ def _forecast_block(sidecar_ok: bool | None) -> dict[str, Any]:
         "age_s": None if age_s is None else round(age_s),
         "sidecar_ok": sidecar_ok,
         "degraded": degraded,
+        "pv_source": pv_source,
     }
 
 

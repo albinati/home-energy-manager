@@ -293,7 +293,7 @@ class ForecastFetchResult:
         if self.reused_fetch_at_utc:
             info["reused_fetch_at_utc"] = self.reused_fetch_at_utc
             try:
-                age = datetime.now(UTC) - datetime.fromisoformat(self.reused_fetch_at_utc)
+                age = _now_utc() - datetime.fromisoformat(self.reused_fetch_at_utc)
                 info["reused_age_min"] = round(age.total_seconds() / 60.0, 1)
             except ValueError:
                 pass
@@ -497,7 +497,16 @@ def fetch_weather_panel_forecast_cached(
     return hit[1] if hit else fresh
 
 
-_PV_DEGRADED_ALERT_KEY = "pv_forecast_degraded_alert_day"
+_PV_DEGRADED_ALERT_KEY = "pv_forecast_none_alert_day"
+_DAYLIGHT_ELEV_DEG = 5.0          # sun above this = a daylight slot
+_IMPLAUSIBLE_RATIO = 0.10         # source kWh < 10 % of Open-Meteo physics = empty
+_MIN_DAYLIGHT_SLOTS = 3           # ... judged over at least 1.5 h of daylight
+_MIN_PHYSICS_SLOT_KWH = 0.03      # physics must itself show real PV in the slot
+
+
+def _now_utc() -> datetime:
+    """The module clock (one seam so tests freeze it together with the optimizer)."""
+    return datetime.now(UTC)
 
 
 def _fetch_open_meteo_with_retry(
@@ -519,23 +528,83 @@ def _fetch_open_meteo_with_retry(
     return _fetch_open_meteo_forecast(lat=lat, lon=lon, hours=hours)
 
 
-def _quartz_looks_empty(
-    quartz_rows: list[HourlyForecast], base: list[HourlyForecast],
-) -> bool:
-    """True when Quartz answered but its PV is implausibly zero (#931).
+def _daylight(centre: datetime) -> bool | None:
+    """Sun above ``_DAYLIGHT_ELEV_DEG`` at ``centre``; ``None`` if astral is missing."""
+    try:
+        return compute_solar_elevation_deg(centre) > _DAYLIGHT_ELEV_DEG
+    except ImportError:
+        return None
 
-    Distinguishes "source empty" from "legitimately small PV": the check only
-    fires while Open-Meteo itself shows real daylight irradiance (>= 150 W/m2) in
-    the next 6 h and Quartz gives ~0 kW for the whole window. A genuinely dark
-    day has low irradiance in BOTH, so it is never flagged.
+
+def _pv_kw_at(rows: list[HourlyForecast], centre: datetime, *, physics: bool) -> float:
+    if physics:
+        return estimate_pv_kw(_interp_hourly_scalar(rows, centre, "shortwave_radiation_wm2", 0.0))
+    return max(0.0, _interp_hourly_scalar(rows, centre, "estimated_pv_kw", 0.0))
+
+
+def _source_pv_implausible(
+    rows: list[HourlyForecast],
+    base: list[HourlyForecast],
+    *,
+    now: datetime | None = None,
+    hours: int = 48,
+) -> bool:
+    """True when a Quartz-style PV source is implausibly ~0 (#931).
+
+    Compares the source's daylight kWh with the Open-Meteo PHYSICS kWh over the
+    whole horizon (not a fixed few hours), on slots where the sun is above
+    ``_DAYLIGHT_ELEV_DEG`` AND physics itself predicts real PV. Flags when the
+    source is under ``_IMPLAUSIBLE_RATIO`` of physics across at least
+    ``_MIN_DAYLIGHT_SLOTS`` such slots. A genuinely dark day has low physics
+    too, so it never qualifies. Works at any time of day: an afternoon check
+    still sees tomorrow's daylight; a 22:00 check sees all of it.
+    Without ``base`` there is nothing to compare against -> not judged.
     """
-    now = datetime.now(UTC)
-    end = now + timedelta(hours=6)
-    daylight = [b for b in base if now <= b.time_utc <= end and b.shortwave_radiation_wm2 >= 150.0]
-    if len(daylight) < 2:
+    if not base:
         return False
-    window = [q for q in quartz_rows if q.pv_direct and now - timedelta(minutes=30) <= q.time_utc <= end]
-    return not any(q.estimated_pv_kw > 0.001 for q in window)
+    now = now or _now_utc()
+    direct = [r for r in rows if r.pv_direct]
+    if not direct:
+        return True
+    first_q, last_q = direct[0].time_utc, direct[-1].time_utc
+    end = min(now + timedelta(hours=hours), last_q)
+    slot = now.replace(minute=(now.minute // 30) * 30, second=0, microsecond=0)
+    n = 0
+    src_kwh = phys_kwh = 0.0
+    while slot < end:
+        centre = slot + timedelta(minutes=15)
+        slot += timedelta(minutes=30)
+        if centre < first_q or centre > last_q:
+            continue
+        phys = _pv_kw_at(base, centre, physics=True) * 0.5
+        if phys < _MIN_PHYSICS_SLOT_KWH:
+            continue
+        day = _daylight(centre)
+        if day is False:
+            continue
+        n += 1
+        phys_kwh += phys
+        src_kwh += _pv_kw_at(direct, centre, physics=False) * 0.5
+    return n >= _MIN_DAYLIGHT_SLOTS and src_kwh < _IMPLAUSIBLE_RATIO * phys_kwh
+
+
+def _lastgood_plausible(rows: list[HourlyForecast], *, now: datetime) -> bool:
+    """A last-good candidate must itself carry PV in its future daylight slots (#931)."""
+    direct = [r for r in rows if r.pv_direct]
+    if not direct:
+        return True  # Open-Meteo physics rows: nothing source-specific to judge
+    slot = now.replace(minute=(now.minute // 30) * 30, second=0, microsecond=0)
+    end = direct[-1].time_utc
+    n = 0
+    kwh = 0.0
+    while slot < end:
+        centre = slot + timedelta(minutes=15)
+        slot += timedelta(minutes=30)
+        if centre < direct[0].time_utc or _daylight(centre) is False:
+            continue
+        n += 1
+        kwh += _pv_kw_at(direct, centre, physics=False) * 0.5
+    return n < _MIN_DAYLIGHT_SLOTS or kwh >= 0.1
 
 
 def _rows_to_hourly(rows: list[dict[str, Any]]) -> list[HourlyForecast]:
@@ -566,34 +635,72 @@ def _rows_to_hourly(rows: list[dict[str, Any]]) -> list[HourlyForecast]:
     return out
 
 
-def _report_pv_degraded(result: ForecastFetchResult) -> None:
-    """WARNING log every time, ONE ``notify_risk`` per UTC day (#931)."""
-    logger.warning(
+def _pad_zero_pv(rows: list[HourlyForecast], horizon_end: datetime) -> list[HourlyForecast]:
+    """Extend ``rows`` to ``horizon_end`` with ZERO PV (#931).
+
+    ``_interp_hourly_scalar`` holds the last row flat, so a daylight last row
+    would plan constant PV all night (and the LP would skip grid charging).
+    Two terminal zero-PV rows make everything beyond coverage 0 kW; temperature
+    and cloud are held (a flat temp is the existing, harmless behaviour).
+    """
+    if not rows or rows[-1].time_utc >= horizon_end:
+        return rows
+    last = rows[-1]
+
+    def _zero(t: datetime) -> HourlyForecast:
+        return HourlyForecast(
+            time_utc=t, temperature_c=last.temperature_c,
+            cloud_cover_pct=last.cloud_cover_pct, shortwave_radiation_wm2=0.0,
+            estimated_pv_kw=0.0, heating_demand_factor=last.heating_demand_factor,
+            pv_direct=True,
+        )
+
+    return [*rows, _zero(last.time_utc + timedelta(minutes=30)), _zero(horizon_end)]
+
+
+def _notify_pv_none(result: ForecastFetchResult) -> None:
+    """ONE push per UTC day, only when the solve has no PV source at all (#931).
+
+    ``lastgood`` / ``open_meteo_fallback`` are pull-only (WARNING log, the
+    ``pv_source`` snapshot, the status chip): the owner prefers low push. The
+    dedup key is written only after the dispatch call returned; a concurrent
+    duplicate is tolerated (worst case two pushes in one day).
+    """
+    try:
+        from . import db as _db
+
+        today = _now_utc().date().isoformat()
+        if _db.get_kv(_PV_DEGRADED_ALERT_KEY) == today:
+            return
+        from .notifier import notify_pv_forecast_degraded
+
+        notify_pv_forecast_degraded(
+            f"Sem previsao solar ({result.fallback_reason}): o plano foi calculado "
+            "com PV = 0 ate a fonte voltar.",
+            extra={"pv_source": result.pv_source_info()},
+        )
+        _db.set_kv(_PV_DEGRADED_ALERT_KEY, today)
+    except Exception:  # noqa: BLE001 - an alert must never break a solve
+        logger.warning("PV forecast 'none' alert failed", exc_info=True)
+
+
+def _report_pv_degraded(result: ForecastFetchResult, *, report: bool) -> None:
+    """WARNING log (+ push for ``none``) from the optimizer path only (#931).
+
+    Other callers (appliance dispatch, simulation, MCP, heartbeat refresh) get a
+    debug line: they must not spam the log or the owner for the same incident.
+    """
+    msg = (
         "PV forecast degraded: status=%s source=%s reason=%s reused_fetch=%s rows=%d",
         result.status, result.source, result.fallback_reason,
         result.reused_fetch_at_utc, len(result.forecast),
     )
-    try:
-        from . import db as _db
-
-        today = datetime.now(UTC).date().isoformat()
-        if _db.get_kv(_PV_DEGRADED_ALERT_KEY) == today:
-            return
-        _db.set_kv(_PV_DEGRADED_ALERT_KEY, today)
-        what = {
-            "lastgood": "reutilizando a ultima previsao boa",
-            "open_meteo_fallback": "usando a fisica do Open-Meteo",
-            "none": "SEM previsao solar (o plano assume PV = 0)",
-        }.get(result.status, result.status)
-        from .notifier import notify_risk
-
-        notify_risk(
-            f"Previsao solar degradada ({result.fallback_reason}): {what}. "
-            "O plano segue, mas com menos precisao ate a fonte voltar.",
-            extra={"pv_source": result.pv_source_info()},
-        )
-    except Exception:  # noqa: BLE001 - an alert must never break a solve
-        logger.warning("PV degraded alert failed", exc_info=True)
+    if not report:
+        logger.debug(*msg)
+        return
+    logger.warning(*msg)
+    if result.status == "none":
+        _notify_pv_none(result)
 
 
 def _degraded_forecast(
@@ -602,44 +709,45 @@ def _degraded_forecast(
     *,
     want_source: str,
     hours: int,
+    report: bool,
 ) -> ForecastFetchResult:
     """Fallback chain when the configured provider is empty/implausible (#931).
 
     1. last persisted good fetch of the same provider younger than
-       ``PV_FORECAST_LASTGOOD_MAX_AGE_HOURS`` (tail beyond its coverage filled
-       from Open-Meteo), not re-persisted;
+       ``PV_FORECAST_LASTGOOD_MAX_AGE_HOURS`` that is itself plausible (tail
+       beyond its coverage from Open-Meteo, else ZERO PV), not re-persisted;
     2. Open-Meteo physics;
-    3. nothing (PV plans as 0) -- with an alert, never silently.
+    3. nothing (PV plans as 0) -- flagged ``none`` and pushed once per day.
     """
-    if not getattr(config, "PV_FORECAST_LASTGOOD_ENABLED", True):
-        # Kill switch: legacy behaviour (straight to Open-Meteo, no alert).
-        logger.warning("%s; falling back to Open-Meteo (last-good disabled)", reason)
-        return ForecastFetchResult(forecast=base, source="open-meteo")
+    now = _now_utc()
+    horizon_end = now + timedelta(hours=hours)
     result: ForecastFetchResult | None = None
-    try:
-        from . import db as _db
+    if getattr(config, "PV_FORECAST_LASTGOOD_ENABLED", True):
+        try:
+            from . import db as _db
 
-        good = _db.get_last_good_forecast_snapshot(
-            max_age_hours=float(getattr(config, "PV_FORECAST_LASTGOOD_MAX_AGE_HOURS", 6.0)),
-            source=want_source,
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("last-good forecast lookup failed", exc_info=True)
-        good = None
-    if good:
-        fetch_at, rows = good
-        good_rows = _rows_to_hourly(rows)
-        if good_rows:
+            cands = _db.get_last_good_forecast_snapshots(
+                max_age_hours=float(getattr(config, "PV_FORECAST_LASTGOOD_MAX_AGE_HOURS", 6.0)),
+                source=want_source, now_utc=now, limit=12,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("last-good forecast lookup failed", exc_info=True)
+            cands = []
+        for fetch_at, rows in cands:
+            good_rows = _rows_to_hourly(rows)
+            if not good_rows or not _lastgood_plausible(good_rows, now=now):
+                continue
             last_t = good_rows[-1].time_utc
             merged = good_rows + [b for b in base if b.time_utc > last_t]
             result = ForecastFetchResult(
-                forecast=merged,
+                forecast=_pad_zero_pv(merged, horizon_end),
                 source=f"{want_source}-lastgood",
                 status="lastgood",
                 fallback_reason=reason,
                 reused_fetch_at_utc=fetch_at,
                 persist=False,
             )
+            break
     if result is None and base:
         result = ForecastFetchResult(
             forecast=base, source="open-meteo",
@@ -649,7 +757,7 @@ def _degraded_forecast(
         result = ForecastFetchResult(
             forecast=[], source="none", status="none", fallback_reason=reason,
         )
-    _report_pv_degraded(result)
+    _report_pv_degraded(result, report=report)
     return result
 
 
@@ -657,14 +765,15 @@ def fetch_forecast_snapshot(
     lat: str | None = None,
     lon: str | None = None,
     hours: int = 48,
+    report: bool = False,
 ) -> ForecastFetchResult:
     """Fetch forecast rows plus source metadata for canonical persistence.
 
     #931: an empty provider answer is never silently planned as PV = 0. The
     fallback chain is last-good (< ``PV_FORECAST_LASTGOOD_MAX_AGE_HOURS``) ->
-    Open-Meteo physics -> none, and any fallback is logged, flagged in
-    ``ForecastFetchResult.status`` (-> ``exogenous_snapshot["pv_source"]``) and
-    alerted once per day.
+    Open-Meteo physics -> none, flagged in ``ForecastFetchResult.status``
+    (-> ``exogenous_snapshot["pv_source"]``). ``report=True`` (the optimizer)
+    additionally logs WARNING and pushes once per day when status is ``none``.
     """
     source = (getattr(config, "FORECAST_SOURCE", "open_meteo") or "open_meteo").strip().lower()
     if source in ("quartz", "quartz_solar"):
@@ -677,16 +786,18 @@ def fetch_forecast_snapshot(
         else:
             quartz = _fetch_quartz_forecast(hours=hours, base_weather=base)
         if quartz.forecast:
-            if not _quartz_looks_empty(quartz.forecast, base):
+            if not _source_pv_implausible(quartz.forecast, base, hours=hours):
                 return quartz
-            reason = "quartz_zero_in_daylight"
+            reason = "quartz_implausible_vs_physics"
         else:
             reason = "quartz_empty"
-        return _degraded_forecast(base, reason, want_source="quartz", hours=hours)
+        return _degraded_forecast(base, reason, want_source="quartz", hours=hours, report=report)
     base = _fetch_open_meteo_with_retry(lat, lon, hours)
     if base:
         return ForecastFetchResult(forecast=base, source="open-meteo")
-    return _degraded_forecast([], "open_meteo_empty", want_source="open-meteo", hours=hours)
+    return _degraded_forecast(
+        [], "open_meteo_empty", want_source="open-meteo", hours=hours, report=report,
+    )
 
 
 def _fetch_open_meteo_forecast(

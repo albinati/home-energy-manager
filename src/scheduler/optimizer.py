@@ -2165,7 +2165,9 @@ def _run_optimizer_lp(
             logger.warning("peak-band margin failed — legacy summed spread", exc_info=True)
             peak_band_margins = None
 
-    forecast_fetch = fetch_forecast_snapshot(hours=max(48, int(config.LP_HORIZON_HOURS) + 24))
+    forecast_fetch = fetch_forecast_snapshot(
+        hours=max(48, int(config.LP_HORIZON_HOURS) + 24), report=True,
+    )
     forecast = forecast_fetch.forecast
     forecast_fetch_at_utc = datetime.now(UTC).isoformat()
     # #931: the PV source actually used (provider, or the degraded fallback and
@@ -2322,6 +2324,11 @@ def _run_optimizer_lp(
     # tariff configured / not yet fetched), the LP falls back to the flat
     # EXPORT_RATE_PENCE constant, preserving legacy behaviour.
     export_prices = _build_export_price_line(starts)
+    if pv_source_info.get("status") != "ok":
+        # #931 replay fidelity: a degraded solve's PV is NOT recoverable from the
+        # stored fetch (last-good reuse + Open-Meteo tail + zero pad), so keep the
+        # per-slot PV (kWh, after calibration) the solve was actually given.
+        pv_source_info["pv_kwh_per_slot"] = [round(float(x), 4) for x in weather.pv_kwh_per_slot]
     exogenous_snapshot = {
         "pv_source": pv_source_info,
         "base_load_components": {
