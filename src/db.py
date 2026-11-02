@@ -10747,54 +10747,329 @@ def get_meteo_temps_range(start_day_iso: str, end_day_iso: str) -> list[tuple[st
             conn.close()
 
 
-def refresh_daikin_lwt_kw_calibration(*, log_min_delta_pct: float = 1.0) -> dict[str, Any]:
-    """Recompute and upsert the calibration; called from the LP solve path.
+LWT_K_CLAMP_MIN: float = 0.03
+LWT_K_CLAMP_MAX: float = 0.10
+LWT_K_OUTCOME_KV = "lwt_k_calibration_last"
+LWT_K_ANCHOR_KV = "lwt_k_day_anchor"
+LWT_K_MAX_REL_CI = 0.5  # reject when (ci_hi - ci_lo) / k exceeds this
 
-    Cheap enough to run on every LP solve (~30 daily rows, single regression).
-    Logging is gated to fires of substance: status changes (ok ↔ skipped) or
-    a >``log_min_delta_pct``% shift in ``k_per_degc`` from the prior row.
-    Other solves stay quiet so the journald stream isn't drowned in identical
-    "calibration unchanged" lines across 24+ daily solves.
+
+def fit_lwt_kw_daily(
+    *,
+    as_of: date | None = None,
+    window_days: int = 30,
+    min_days: int = 14,
+    min_coverage: float = 0.9,
+    boot_reps: int = 400,
+) -> dict[str, Any]:
+    """#928 — offset-aware fit of k (kW per degC of LWT above 18) on DAILY Onecta totals.
+
+    Per LOCAL day d (the unit is never selected: ``daikin_consumption_2hourly`` keeps
+    ``onecta_cache`` only where the meter disagreed with the k-based telemetry model, a
+    survivorship bias; the daily table has no such selection)::
+
+        kwh_heating(d) = k * sum_X(d) + b * sum_off(d)
+        sum_X   = sum over the day's 30-min slots of max(0, curve_LWT(T_out) - 18) * 0.5 h
+        sum_off = sum over the slots of the commanded/device offset * 0.5 h
+
+    ``kwh_heating`` is already the Onecta space-heating split (DHW excluded). Only
+    ``source='onecta_cache'`` days with >= ``min_coverage`` of the day's slots in
+    ``lwt_learning_log`` count; away / vacation / holiday / return / non-normal-preset
+    days (:func:`_hard_away_dates`) are dropped. HEM offset days are INCLUDED: ``b`` absorbs
+    the echo. CI = bootstrap over days. Returns ``status`` ``ok`` | ``skipped``.
     """
-    prev = get_daikin_lwt_kw_calibration()
-    result = compute_daikin_lwt_kw_calibration()
-    if result.get("status") != "ok":
-        if prev is None:
-            # First run, no data yet — log once at INFO so cold-start is visible
-            logger.info(
-                "daikin_lwt_calibration: %s (reason=%s, samples=%s) — "
-                "loader will use module default until enough data accumulates",
-                result.get("status"), result.get("reason"), result.get("samples"),
-            )
-        return result
-    new_k = float(result["k_per_degc"])
-    upsert_daikin_lwt_kw_calibration(
-        k_per_degc=new_k,
-        samples=int(result["samples"]),
-        window_days=int(result["window_days"]),
-        rmse_kwh=float(result.get("rmse_kwh") or 0.0),
-        bias_kwh=float(result.get("bias_kwh") or 0.0),
-    )
-    prev_k = float(prev["k_per_degc"]) if prev else None
-    if prev_k is None:
+    import random
+
+    from .physics import get_lwt_base_c
+
+    try:
+        tz = ZoneInfo(str(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")))
+    except Exception:  # noqa: BLE001
+        tz = ZoneInfo("UTC")
+    today = as_of or datetime.now(tz).date()
+    start = today - timedelta(days=window_days)
+    start_s, end_s = start.isoformat(), today.isoformat()  # the as-of day itself is incomplete
+    try:
+        away, return_days, non_rep = _hard_away_dates(f"{start_s}T00:00:00Z", tz)
+    except Exception:  # noqa: BLE001
+        logger.warning("lwt k fit [away-days]: lookup failed", exc_info=True)
+        away, return_days, non_rep = set(), set(), set()
+    excluded_days = away | return_days | non_rep
+
+    lo_utc = datetime.combine(start - timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+    hi_utc = datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+    with _lock:
+        conn = get_connection()
+        try:
+            daily = conn.execute(
+                """SELECT date, kwh_heating, fetched_at FROM daikin_consumption_daily
+                   WHERE source = 'onecta_cache' AND date >= ? AND date < ?
+                     AND kwh_heating IS NOT NULL""",
+                (start_s, end_s),
+            ).fetchall()
+            log_rows = conn.execute(
+                """SELECT slot_time_utc, device_offset, offset_written, outdoor_real_c
+                   FROM lwt_learning_log
+                   WHERE slot_time_utc >= ? AND slot_time_utc < ? AND outdoor_real_c IS NOT NULL""",
+                (lo_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), hi_utc.strftime("%Y-%m-%dT%H:%M:%SZ")),
+            ).fetchall()
+        finally:
+            conn.close()
+
+    per_day: dict[str, list[float]] = {}  # local date -> [sumX, sumOff, n_slots]
+    for r in log_rows:
+        off = r["device_offset"] if r["device_offset"] is not None else r["offset_written"]
+        if off is None:
+            continue
+        try:
+            t = datetime.fromisoformat(str(r["slot_time_utc"]).replace("Z", "+00:00")).astimezone(tz)
+        except ValueError:
+            continue
+        acc = per_day.setdefault(t.date().isoformat(), [0.0, 0.0, 0.0])
+        acc[0] += max(0.0, float(get_lwt_base_c(float(r["outdoor_real_c"]))) - 18.0) * 0.5
+        acc[1] += float(off) * 0.5
+        acc[2] += 1.0
+
+    rows: list[tuple[str, float, float, float]] = []  # date, y_kwh, sumX, sumOff
+    n_away = n_cov = n_nolog = n_partial = 0
+    for r in daily:
+        d = str(r["date"])
+        if d in excluded_days:
+            n_away += 1
+            continue
+        # The weekly 02:35 batch also writes the PARTIAL current day: only rows fetched at/after
+        # local midnight at the END of the date are complete.
+        try:
+            end_of_day = datetime.combine(date.fromisoformat(d) + timedelta(days=1), datetime.min.time(), tzinfo=tz)
+            fa = datetime.fromisoformat(str(r["fetched_at"]).replace("Z", "+00:00"))
+            if fa.tzinfo is None:
+                fa = fa.replace(tzinfo=UTC)
+            if fa < end_of_day:
+                n_partial += 1
+                continue
+        except (ValueError, TypeError):
+            n_partial += 1
+            continue
+        acc = per_day.get(d)
+        if acc is None:
+            n_nolog += 1
+            continue
+        dd = date.fromisoformat(d)
+        n_exp = round((datetime.combine(dd + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(UTC)
+                       - datetime.combine(dd, datetime.min.time(), tzinfo=tz).astimezone(UTC)).total_seconds() / 1800.0)
+        if acc[2] < min_coverage * n_exp:
+            n_cov += 1
+            continue
+        scale = n_exp / acc[2]  # fill the few missing slots at the day's mean
+        rows.append((d, float(r["kwh_heating"]), acc[0] * scale, acc[1] * scale))
+
+    base = {
+        "as_of": today.isoformat(), "window_days": window_days, "n_days": len(rows),
+        "excluded_away_days": n_away, "excluded_low_coverage_days": n_cov, "excluded_no_log_days": n_nolog,
+        "excluded_partial_days": n_partial,
+    }
+    if len(rows) < min_days:
+        return {**base, "status": "skipped",
+                "reason": f"evidence too thin: {len(rows)} usable day(s); need >= {min_days}"}
+
+    ys = [r[1] for r in rows]
+    xs = [r[2] for r in rows]
+    os_ = [r[3] for r in rows]
+    n = len(rows)
+    mo = sum(os_) / n
+    use_off = (sum((o - mo) ** 2 for o in os_) / n) ** 0.5 > 0.5  # K*h/day; flat offsets cannot identify b
+
+    def _fit(idx: list[int]) -> tuple[float, float]:
+        """No-intercept least squares via the 2x2 normal equations (pure Python, no numpy)."""
+        sxx = sum(xs[i] * xs[i] for i in idx)
+        sxy = sum(xs[i] * ys[i] for i in idx)
+        if not use_off:
+            return (sxy / sxx if sxx > 0 else 0.0), 0.0
+        soo = sum(os_[i] * os_[i] for i in idx)
+        sxo = sum(xs[i] * os_[i] for i in idx)
+        soy = sum(os_[i] * ys[i] for i in idx)
+        det = sxx * soo - sxo * sxo
+        if abs(det) <= 1e-12 * max(1.0, sxx * soo):
+            return (sxy / sxx if sxx > 0 else 0.0), 0.0
+        return (sxy * soo - soy * sxo) / det, (soy * sxx - sxy * sxo) / det
+
+    k, b = _fit(list(range(n)))
+    resid = [ys[i] - k * xs[i] - b * os_[i] for i in range(n)]
+    my = sum(ys) / n
+    sst = sum((y_ - my) ** 2 for y_ in ys)
+    r2 = 1.0 - sum(e * e for e in resid) / sst if sst > 0 else 0.0
+    rng = random.Random(0)
+    ks = sorted(_fit([rng.randrange(n) for _ in range(n)])[0] for _ in range(boot_reps))
+
+    def _pct(q: float) -> float:  # linear interpolation, like numpy.percentile
+        pos = (len(ks) - 1) * q / 100.0
+        lo_i = int(pos)
+        hi_i = min(lo_i + 1, len(ks) - 1)
+        return ks[lo_i] + (ks[hi_i] - ks[lo_i]) * (pos - lo_i)
+
+    ci_lo, ci_hi = _pct(2.5), _pct(97.5)
+    return {
+        **base, "status": "ok", "k_per_degc": k, "b_kw_per_k": b, "offset_term": use_off,
+        "ci_lo": ci_lo, "ci_hi": ci_hi, "rel_ci": (ci_hi - ci_lo) / k if k > 0 else float("inf"),
+        "r2": r2, "rmse_kwh": (sum(e * e for e in resid) / n) ** 0.5, "bias_kwh": sum(resid) / n,
+        "y_sum_kwh": float(sum(ys)),
+        "_X": xs, "_O": os_, "_y": ys,
+    }
+
+
+def lwt_k_pred_vs_meas(fit: dict[str, Any], k: float) -> float:
+    """Predicted / measured daily heating kWh for ``k`` (offset term at the fitted b)."""
+    pred = sum(k * x + float(fit.get("b_kw_per_k") or 0.0) * o for x, o in zip(fit["_X"], fit["_O"]))
+    return pred / max(1e-9, sum(fit["_y"]))
+
+
+def _fmt(v: Any, nd: int = 4) -> str:
+    return "-" if v is None else f"{float(v):.{nd}f}"
+
+
+def _record_lwt_k_outcome(outcome: dict[str, Any]) -> bool:
+    """Always store the outcome in ``kv_state``; INFO-log only on a change / state transition
+    (the refresh runs on every solve, ~20-45x a day)."""
+    outcome["at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    sig = "|".join(str(x) for x in (
+        outcome.get("outcome"), outcome.get("reason_code"),
+        None if outcome.get("k_candidate") is None else round(float(outcome["k_candidate"]), 3),
+        None if outcome.get("k_applied") is None else round(float(outcome["k_applied"]), 3),
+    ))
+    outcome["sig"] = sig
+    prev_sig = None
+    try:
+        prev_sig = json.loads(get_kv(LWT_K_OUTCOME_KV) or "{}").get("sig")
+    except Exception:  # noqa: BLE001
+        logger.warning("lwt k calibration [record]: previous outcome unreadable", exc_info=True)
+    changed = sig != prev_sig
+    if changed and outcome.get("outcome") == "blocked":
+        logger.warning("daikin_lwt_calibration: BLOCKED (%s): %s", outcome.get("reason_code"), outcome.get("reason"))
+    elif changed:
         logger.info(
-            "daikin_lwt_calibration: first fit k=%.5f kW/°C (default 0.0333); "
-            "samples=%d window=%dd rmse=%.2f kWh bias=%+0.2f kWh outliers_filtered=%d",
-            new_k, result["samples"], result["window_days"],
-            result.get("rmse_kwh") or 0.0, result.get("bias_kwh") or 0.0,
-            result.get("outliers_filtered", 0),
+            "daikin_lwt_calibration: %s%s k_prev=%s k_raw=%s k_candidate=%s k_applied=%s ci=[%s,%s] "
+            "b=%s days=%s r2=%s step_limited=%s clamped=%s",
+            outcome.get("outcome"),
+            f" ({outcome['reason']})" if outcome.get("reason") else "",
+            _fmt(outcome.get("k_prev")), _fmt(outcome.get("k_raw")), _fmt(outcome.get("k_candidate")),
+            _fmt(outcome.get("k_applied")), _fmt(outcome.get("ci_lo")), _fmt(outcome.get("ci_hi")),
+            _fmt(outcome.get("b_kw_per_k")), outcome.get("n_days"), _fmt(outcome.get("r2"), 2),
+            outcome.get("step_limited"), outcome.get("clamped"),
         )
-    else:
-        delta_pct = abs(new_k - prev_k) / max(1e-9, prev_k) * 100.0
-        if delta_pct >= log_min_delta_pct:
-            logger.info(
-                "daikin_lwt_calibration: k=%.5f kW/°C (was %.5f, %+0.1f%%); "
-                "samples=%d rmse=%.2f kWh bias=%+0.2f kWh",
-                new_k, prev_k, (new_k - prev_k) / max(1e-9, prev_k) * 100.0,
-                result["samples"], result.get("rmse_kwh") or 0.0,
-                result.get("bias_kwh") or 0.0,
-            )
-    return result
+    try:
+        set_kv(LWT_K_OUTCOME_KV, json.dumps(outcome, default=str))
+    except Exception:  # noqa: BLE001 — observability must not break the solve
+        logger.warning("lwt k calibration [record]: kv write failed", exc_info=True)
+    return changed
+
+
+def _lwt_k_day_anchor(prev_k: float | None, local_today: date) -> float:
+    """k at the start of the local day: the step bound is measured against it, so the
+    per-solve refresh cannot compound ±step% many times a day. No row -> physics default."""
+    from .physics import _KW_PER_DEGC_LWT_DEFAULT
+
+    try:
+        a = json.loads(get_kv(LWT_K_ANCHOR_KV) or "{}")
+        if a.get("date") == local_today.isoformat() and a.get("k"):
+            return float(a["k"])
+    except Exception:  # noqa: BLE001
+        logger.warning("lwt k calibration [anchor]: read failed", exc_info=True)
+    k0 = prev_k if prev_k else _KW_PER_DEGC_LWT_DEFAULT
+    try:
+        set_kv(LWT_K_ANCHOR_KV, json.dumps({"date": local_today.isoformat(), "k": k0}))
+    except Exception:  # noqa: BLE001
+        logger.warning("lwt k calibration [anchor]: write failed", exc_info=True)
+    return k0
+
+
+def refresh_daikin_lwt_kw_calibration(*, as_of: date | None = None) -> dict[str, Any]:
+    """Recompute k, bound the step per local day, and (only when live) upsert (#928).
+
+    Modes: ``LWT_K_CALIBRATION_ENABLED`` false + ``LWT_K_CALIBRATION_SHADOW`` true (default)
+    = shadow: the candidate is computed, logged and stored in
+    ``kv_state[lwt_k_calibration_last]`` but never written. Writes happen only when
+    ENABLED and not SHADOW. ENABLED false and SHADOW false = frozen (nothing computed).
+    Outcomes: ``applied`` | ``shadow`` | ``rejected`` | ``skipped`` | ``frozen`` | ``error``.
+    Previous k is kept on everything but ``applied``. The kv record is written on EVERY call.
+    """
+    out: dict[str, Any] = {}
+    enabled = bool(getattr(config, "LWT_K_CALIBRATION_ENABLED", False))
+    shadow = bool(getattr(config, "LWT_K_CALIBRATION_SHADOW", True))
+    out["mode"] = "live" if (enabled and not shadow) else ("shadow" if (enabled or shadow) else "frozen")
+    stage = "read-prev"
+    try:
+        prev = get_daikin_lwt_kw_calibration()
+        prev_k = float(prev["k_per_degc"]) if prev else None
+        out["k_prev"] = prev_k
+        if out["mode"] == "frozen":
+            out.update(outcome="frozen", reason="calibration disabled and shadow off", reason_code="frozen",
+                       k_applied=prev_k)
+            _record_lwt_k_outcome(out)
+            return out
+        if (out["mode"] == "live" and bool(getattr(config, "LP_W3_SPACE_FLOOR_ENABLED", False))
+                and float(getattr(config, "LP_W3_SPACE_FLOOR_KW_PER_K", 0.0) or 0.0) <= 0.0):
+            # Enable order: with the #921 floor on and s unset the floor follows k, and a lower k
+            # under-plans space heat (replay: -22 %). Set LP_W3_SPACE_FLOOR_KW_PER_K first.
+            out.update(outcome="blocked", reason_code="floor_slope_unset", k_applied=prev_k,
+                       reason="LP_W3_SPACE_FLOOR_ENABLED is on and LP_W3_SPACE_FLOOR_KW_PER_K=0: "
+                              "set the floor slope before letting k write")
+            _record_lwt_k_outcome(out)
+            return out
+        min_days = int(getattr(config, "LWT_K_MIN_DAYS", 14))
+        max_step = max(0.0, float(getattr(config, "LWT_K_MAX_STEP_PCT", 15.0))) / 100.0
+        stage = "fit"
+        fit = fit_lwt_kw_daily(as_of=as_of, min_days=min_days)
+        for key in ("n_days", "r2", "ci_lo", "ci_hi", "rel_ci", "b_kw_per_k", "as_of", "y_sum_kwh"):
+            if key in fit:
+                out[key] = fit[key]
+        if fit.get("status") != "ok":
+            out.update(outcome="skipped", reason=fit.get("reason"), reason_code="thin", k_applied=prev_k)
+            _record_lwt_k_outcome(out)
+            return out
+        k_raw = float(fit["k_per_degc"])
+        out["k_raw"] = k_raw
+        reason = code = None
+        if not math.isfinite(k_raw) or k_raw <= 0:
+            reason, code = f"non-positive k ({k_raw:.4f})", "nonpositive"
+        elif not math.isfinite(fit["rel_ci"]) or fit["rel_ci"] > LWT_K_MAX_REL_CI:
+            reason, code = f"CI too wide ((hi-lo)/k={fit['rel_ci']:.2f} > {LWT_K_MAX_REL_CI})", "wide_ci"
+        elif fit["r2"] < 0.2:
+            reason, code = f"weak fit (r2={fit['r2']:.2f} < 0.20)", "weak_r2"
+        if reason:
+            out.update(outcome="rejected", reason=reason, reason_code=code, k_applied=prev_k)
+            _record_lwt_k_outcome(out)
+            return out
+        stage = "bound"
+        tz = ZoneInfo(str(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")))
+        local_today = as_of or datetime.now(tz).date()
+        anchor = _lwt_k_day_anchor(prev_k, local_today)
+        lo, hi = anchor * (1.0 - max_step), anchor * (1.0 + max_step)
+        k_new = min(max(k_raw, lo), hi)
+        k_bounded = min(max(k_new, LWT_K_CLAMP_MIN), LWT_K_CLAMP_MAX)
+        out.update(k_candidate=k_bounded, step_limited=k_new != k_raw, clamped=k_bounded != k_new,
+                   day_anchor=anchor)
+        if out["mode"] != "live":
+            out.update(outcome="shadow", reason="shadow mode: candidate not written", reason_code="shadow",
+                       k_applied=prev_k)
+            _record_lwt_k_outcome(out)
+            return out
+        stage = "write"
+        upsert_daikin_lwt_kw_calibration(
+            k_per_degc=k_bounded, samples=int(fit["n_days"]), window_days=int(fit["window_days"]),
+            rmse_kwh=float(fit["rmse_kwh"]), bias_kwh=float(fit["bias_kwh"]),
+        )
+        out.update(outcome="applied", k_applied=k_bounded)
+        stage = "record"
+        _record_lwt_k_outcome(out)
+        return out
+    except Exception as exc:  # noqa: BLE001 — never block the solve, but never be silent
+        logger.warning("daikin_lwt_calibration [%s] failed: %r", stage, exc, exc_info=True)
+        out.update(outcome="error", reason=f"{stage}: {exc!r}", reason_code=f"error_{stage}")
+        try:
+            _record_lwt_k_outcome(out)
+        except Exception:  # noqa: BLE001
+            logger.warning("daikin_lwt_calibration [record-after-error] failed", exc_info=True)
+        return out
 
 
 # ---------------------------------------------------------------------------

@@ -301,6 +301,64 @@ SCHEMA: dict[str, SettingSpec] = {
             "offset). Medido em buckets Onecta: ~0,043 kW/K (IC95 0,020-0,070)."
         ),
     ),
+    "LWT_K_CALIBRATION_ENABLED": SettingSpec(
+        key="LWT_K_CALIBRATION_ENABLED",
+        type_name="str",
+        env_default=_str_env("LWT_K_CALIBRATION_ENABLED", "false"),
+        enum=("true", "false"),
+        description=(
+            "Calibração do k (#928): kW por grau de LWT acima de 18 C, reajustado por regressão "
+            "diária (totais diários do Onecta, com os offsets do HEM, sem dias de ausência). "
+            "Só grava quando ligado E LWT_K_CALIBRATION_SHADOW=false. Desligado = congela no "
+            "valor guardado (interruptor)."
+        ),
+    ),
+    "LWT_K_CALIBRATION_SHADOW": SettingSpec(
+        key="LWT_K_CALIBRATION_SHADOW",
+        type_name="str",
+        env_default=_str_env("LWT_K_CALIBRATION_SHADOW", "true"),
+        enum=("true", "false"),
+        description=(
+            "Calibração do k (#928), modo sombra: calcula, registra e guarda o candidato "
+            "(kv_state lwt_k_calibration_last) mas NUNCA grava o k. Para gravar: "
+            "LWT_K_CALIBRATION_ENABLED=true e este em false."
+        ),
+    ),
+    "LP_W3_SPACE_FLOOR_KW_PER_K": SettingSpec(
+        key="LP_W3_SPACE_FLOOR_KW_PER_K",
+        type_name="float",
+        env_default=_float_env("LP_W3_SPACE_FLOOR_KW_PER_K", "0.0"),
+        min_value=0.0,
+        max_value=0.2,
+        description=(
+            "Aquecimento (#928): inclinação s (kW por grau de LWT) do piso de aquecimento, "
+            "independente do k calibrado. 0 = legado (o piso usa o k). Com s > 0: "
+            "piso = F x s x max(0, X + offset_mínimo) x duração, X = LWT da curva - 18; "
+            "a inversão energia -> offset usa o mesmo s."
+        ),
+    ),
+    "LWT_K_MAX_STEP_PCT": SettingSpec(
+        key="LWT_K_MAX_STEP_PCT",
+        type_name="float",
+        env_default=_float_env("LWT_K_MAX_STEP_PCT", "15.0"),
+        min_value=0.0,
+        max_value=100.0,
+        description=(
+            "Calibração do k (#928): mudança máxima do k por reajuste, em % do valor "
+            "anterior (o k também fica limitado a 0,03-0,10). 0 = nunca muda."
+        ),
+    ),
+    "LWT_K_MIN_DAYS": SettingSpec(
+        key="LWT_K_MIN_DAYS",
+        type_name="int",
+        env_default=_int_env("LWT_K_MIN_DAYS", "14"),
+        min_value=3,
+        max_value=30,
+        description=(
+            "Calibração do k (#928): mínimo de dias medidos (Onecta, fora de ausência) "
+            "para aceitar um reajuste; com menos evidência o k anterior é mantido."
+        ),
+    ),
     "LP_COP_LWT_OFFSET_PENALTY_PER_K": SettingSpec(
         key="LP_COP_LWT_OFFSET_PENALTY_PER_K",
         type_name="float",

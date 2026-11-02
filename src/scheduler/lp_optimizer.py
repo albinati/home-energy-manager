@@ -30,8 +30,11 @@ from ..physics import (
     get_lwt_base_c,
     lwt_offset_from_space_kw,
     lwt_offset_from_space_kw_device,
+    space_capacity_slope,
+    space_floor_curve_kw,
     space_floor_device_draw_kw,
     space_floor_device_params,
+    space_floor_slope_override,
     predict_passive_daikin_load,
 )
 from ..weather import WeatherLpSeries
@@ -176,6 +179,7 @@ class LpPlan:
     """#863 — the per-K lift COP penalty this plan was SOLVED with (0 = single COP)."""
     cop_space_effective: list[float] = field(default_factory=list)
     space_floor_kwh: list[float] = field(default_factory=list)
+    space_ceil_kwh: list[float] = field(default_factory=list)  # #928: per-slot space ceiling (diagnostic)
     """#863 — per-slot curve draw (offset 0) kWh the segments were built on (len N)."""
     space_lift_widths_kwh: list[list[float]] = field(default_factory=list)
     space_lift_cops: list[list[float]] = field(default_factory=list)
@@ -456,7 +460,9 @@ def _emitter_h0_kwh(*, initial: Any, t_out0: float, cop0: float, tau_h: float) -
     pen = max(0.0, float(getattr(config, "LP_COP_LWT_OFFSET_PENALTY_PER_K", 0.0) or 0.0))
     if pen > 0.0 and curve is not None and lwt > curve:
         cop *= max(float(getattr(config, "LP_COP_LIFT_MIN_MULTIPLIER", 0.5)), 1.0 - pen * (lwt - curve))
-    return get_kw_per_degc_lwt() * max(0.0, lwt - 18.0) * cop * tau_h * ramp
+    from ..physics import space_capacity_slope as _cap_slope
+
+    return (_cap_slope() or get_kw_per_degc_lwt()) * max(0.0, lwt - 18.0) * cop * tau_h * ramp
 
 
 def solve_lp(
@@ -602,8 +608,10 @@ def solve_lp(
         min(get_daikin_heating_kw(t) * slot_h, max_hp_kwh_per_slot)
         for t in t_out
     ]
+    _cap_slope_v = space_capacity_slope() or None  # #928: None (s=0) = legacy k, bit for bit
     space_ceil_kwh = [
-        min(get_daikin_heating_kw(t, lwt_offset_delta=_slot_lift(t)) * slot_h, max_hp_kwh_per_slot)
+        min(get_daikin_heating_kw(t, lwt_offset_delta=_slot_lift(t), slope=_cap_slope_v) * slot_h,
+            max_hp_kwh_per_slot)
         for t in t_out
     ]
 
@@ -797,13 +805,17 @@ def solve_lp(
     # (lp_dispatch._lp_offsets: clamp to max(OPTIMIZATION_LWT_OFFSET_MIN, DAIKIN_LWT_LP_OFFSET_MIN)).
     w3_sf_on = bool(w3) and bool(getattr(config, "LP_W3_SPACE_FLOOR_ENABLED", False)) and not off_climate
     w3_sf_floor: list[float] = [0.0] * n
-    _fac, _k = 1.0, 0.0
+    _fac, _k, _sf_s = 1.0, 0.0, 0.0
     if w3_sf_on:
         _min_off = min(0.0, max(float(config.OPTIMIZATION_LWT_OFFSET_MIN), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
         _fac, _k = space_floor_device_params()
+        _sf_s = space_floor_slope_override()  # #928: >0 decouples the floor from the calibrated k
+        if _sf_s > 0.0:
+            _k = _sf_s
         for _i in range(n):
             w3_sf_floor[_i] = w3_space_floor_kwh_slot(
-                curve_kw=get_daikin_heating_kw(float(t_out[_i])), k_kw_per_k=_k,
+                curve_kw=(space_floor_curve_kw(float(t_out[_i]), _sf_s) if _sf_s > 0.0
+                          else get_daikin_heating_kw(float(t_out[_i]))), k_kw_per_k=_k,
                 min_offset_k=_min_off, factor=_fac, slot_h=slot_h,
                 cap_kwh=min(float(space_ceil_kwh[_i]), max_hp_kwh),
             )
@@ -878,7 +890,7 @@ def solve_lp(
                 xs.append(lift)
             levels = [fl]
             for x in xs[1:]:
-                raw = get_daikin_heating_kw(t, lwt_offset_delta=x) * slot_h
+                raw = get_daikin_heating_kw(t, lwt_offset_delta=x, slope=_cap_slope_v) * slot_h
                 levels.append(max(levels[-1], min(raw, max_hp_kwh_per_slot)))
             e_base[i] = pulp.LpVariable(f"space_base_{i}", lowBound=0, upBound=fl)
             segs = []
@@ -2151,6 +2163,7 @@ def solve_lp(
             # #921 — invert the SAME device model the floor uses (a slot at the floor = deepest offset).
             plan.lwt_offset_c.append(lwt_offset_from_space_kw_device(
                 es_val / slot_h, t_out[i], factor=_fac, k_t=_k, lo=_lwt_inv_lo, hi=_lwt_inv_hi,
+                curve_slope=_sf_s if _sf_s > 0.0 else None,
             ))
         else:
             plan.lwt_offset_c.append(lwt_offset_from_space_kw(
@@ -2192,6 +2205,7 @@ def solve_lp(
     plan.cop_lwt_offset_penalty_per_k = cop_lift_pen if cop_segments_on else 0.0
     if cop_segments_on:
         plan.space_floor_kwh = [float(x) for x in space_floor_kwh]
+        plan.space_ceil_kwh = [float(x) for x in space_ceil_kwh]
         plan.space_lift_widths_kwh = [[w for _v, w, _c in e_lift[i]] for i in range(n)]
         plan.space_lift_cops = [[c for _v, _w, c in e_lift[i]] for i in range(n)]
     if peak_import_idx:

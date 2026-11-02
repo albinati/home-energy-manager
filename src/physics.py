@@ -15,8 +15,10 @@ HEAT_LOSS_C_PER_HOUR: float = 0.3  # Daikin Altherma typical standing loss °C/h
 # db.compute_daikin_lwt_kw_calibration() when a calibration row exists and the
 # fitted value falls inside the safety bounds below.
 _KW_PER_DEGC_LWT_DEFAULT: float = 0.0333
-_KW_PER_DEGC_LWT_MIN: float = 0.015   # ~45 % of default
-_KW_PER_DEGC_LWT_MAX: float = 0.075   # ~225 % of default
+_KW_PER_DEGC_LWT_MIN: float = 0.03    # #928: matches db.LWT_K_CLAMP_MIN (used when LWT_K_CALIBRATION_ENABLED)
+_KW_PER_DEGC_LWT_MAX: float = 0.10    # #928: matches db.LWT_K_CLAMP_MAX
+_LEGACY_KW_MIN: float = 0.015   # pre-#928 bounds, still used while calibration is off
+_LEGACY_KW_MAX: float = 0.075
 MARGIN_OF_SAFETY_C: float = 0.5    # Pipe-loss / measurement margin
 DHW_SETPOINT_MAX_C: float = 65.0   # Absolute safe ceiling (no boiling stress)
 DHW_SETPOINT_MIN_C: float = 35.0   # Never go below legionella risk floor
@@ -43,7 +45,15 @@ def get_kw_per_degc_lwt() -> float:
     if row is None:
         return _KW_PER_DEGC_LWT_DEFAULT
     k = float(row.get("k_per_degc", _KW_PER_DEGC_LWT_DEFAULT))
-    if not (_KW_PER_DEGC_LWT_MIN <= k <= _KW_PER_DEGC_LWT_MAX):
+    if k != k:  # NaN
+        return _KW_PER_DEGC_LWT_DEFAULT
+    from .config import config as _cfg
+
+    if bool(getattr(_cfg, "LWT_K_CALIBRATION_ENABLED", False)):
+        # #928: continuous clamp to the plausible range (no snap to the default).
+        return min(max(k, _KW_PER_DEGC_LWT_MIN), _KW_PER_DEGC_LWT_MAX)
+    # Legacy (calibration off): the original wide bounds + snap to the default.
+    if not (_LEGACY_KW_MIN <= k <= _LEGACY_KW_MAX):
         return _KW_PER_DEGC_LWT_DEFAULT
     return k
 
@@ -144,7 +154,7 @@ def get_lwt_base_c(temp_outdoor_c: float) -> float:
     return min(50.0, max(18.0, lwt))
 
 
-def get_daikin_heating_kw(temp_outdoor_c: float, lwt_offset_delta: float = 0.0) -> float:
+def get_daikin_heating_kw(temp_outdoor_c: float, lwt_offset_delta: float = 0.0, slope: float | None = None) -> float:
     """Estimate continuous space-heating electrical draw from outdoor temperature.
 
     Uses the physical climate (weather-compensation) curve configured on the Daikin panel
@@ -166,7 +176,7 @@ def get_daikin_heating_kw(temp_outdoor_c: float, lwt_offset_delta: float = 0.0) 
     lwt = get_lwt_base_c(temp_outdoor_c) + lwt_offset_delta
     lwt = min(50.0, max(18.0, lwt))
 
-    return (lwt - 18.0) * get_kw_per_degc_lwt()
+    return (lwt - 18.0) * (float(slope) if slope else get_kw_per_degc_lwt())
 
 
 def apply_cop_lift_multiplier(
@@ -326,6 +336,42 @@ def space_floor_device_params() -> tuple[float, float]:
     return factor, (trim if trim > 0 else float(get_kw_per_degc_lwt()))
 
 
+def space_floor_slope_override() -> float:
+    """#928: ``LP_W3_SPACE_FLOOR_KW_PER_K`` (s). 0 = legacy (the floor reads the calibrated k).
+    s > 0 decouples the #921 floor and its offset inversion from k:
+    ``floor = F * s * max(0, X + min_off)``, ``X = curve LWT - 18``."""
+    from .config import config
+
+    try:
+        return max(0.0, float(getattr(config, "LP_W3_SPACE_FLOOR_KW_PER_K", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def space_capacity_slope() -> float:
+    """#928: capacity slope (kW per K of LWT) for the space CEILING, lift-segment widths and emitter
+    h0. 0.0 = legacy (they read the calibrated k, bit for bit). With ``LP_W3_SPACE_FLOOR_KW_PER_K``
+    s > 0 it is ``max(k, F*s)``: the calibrated k is the AVERAGE draw, not the capacity at max lift,
+    and the ceiling must never fall below the floor ``F*s*(X+off)`` at the same lift."""
+    from .config import config
+
+    s = space_floor_slope_override()
+    if s <= 0.0:
+        return 0.0
+    f = max(0.0, float(getattr(config, "LP_W3_SPACE_FLOOR_FACTOR", 1.0)))
+    return max(float(get_kw_per_degc_lwt()), f * s)
+
+
+def space_floor_curve_kw(temp_outdoor_c: float, slope: float) -> float:
+    """Curve draw ``X * slope`` (kW) with the same LWT clamp as :func:`get_daikin_heating_kw`."""
+    from .config import config
+
+    if temp_outdoor_c >= config.DAIKIN_WEATHER_CURVE_HIGH_C:
+        return 0.0
+    lwt = min(50.0, max(18.0, get_lwt_base_c(temp_outdoor_c)))
+    return (lwt - 18.0) * float(slope)
+
+
 def space_floor_device_draw_kw(curve_kw: float, offset_k: float, *, factor: float, k_t: float) -> float:
     """Electric kW the device draws at ``offset_k`` under the floor's device model."""
     return max(0.0, float(factor)) * max(0.0, float(curve_kw) + max(0.0, float(k_t)) * float(offset_k))
@@ -339,6 +385,7 @@ def lwt_offset_from_space_kw_device(
     k_t: float,
     lo: float | None = None,
     hi: float | None = None,
+    curve_slope: float | None = None,
 ) -> float:
     """Inverse of :func:`space_floor_device_draw_kw` (used instead of
     :func:`lwt_offset_from_space_kw` when the W3 space floor is on): a slot planned exactly at
@@ -346,7 +393,7 @@ def lwt_offset_from_space_kw_device(
     model is degenerate (no curve draw, factor or k_t <= 0)."""
     from .config import config
 
-    c = get_daikin_heating_kw(temp_outdoor_c)
+    c = (space_floor_curve_kw(temp_outdoor_c, curve_slope) if curve_slope else get_daikin_heating_kw(temp_outdoor_c))
     if c <= 0.0 or factor <= 0.0 or k_t <= 0.0:
         return lwt_offset_from_space_kw(space_kw, temp_outdoor_c, lo=lo, hi=hi)
     lo_b = float(config.OPTIMIZATION_LWT_OFFSET_MIN) if lo is None else float(lo)
