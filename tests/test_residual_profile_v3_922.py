@@ -237,6 +237,157 @@ def test_runtime_settings_are_editable_and_validated() -> None:
         rts.set_setting("LP_RESIDUAL_STATISTIC", "mode", actor="test")
 
 
+# -- review fixes (Opus review of #925) ---------------------------------------
+
+
+def test_waterfill_unit() -> None:
+    hp, left = db._waterfill_hp([1.0, 1.0, 1.0, 1.0], 2.0)
+    assert hp == pytest.approx([0.5] * 4) and left == 0.0
+    hp, left = db._waterfill_hp([1.0, 1.0, 1.0, 2.0], 1.0)     # peak slot takes it all
+    assert hp == pytest.approx([0.0, 0.0, 0.0, 1.0])
+    hp, left = db._waterfill_hp([1.0, 1.0, 1.0, 1.0], 5.0)     # meter > load: carry
+    assert hp == pytest.approx([1.0] * 4) and left == pytest.approx(1.0)
+    assert db._waterfill_hp([1.0, 2.0], 0.0) == ([0.0, 0.0], 0.0)
+
+
+def test_steady_load_with_large_hp_is_not_clipped_into_phantom_residual() -> None:
+    """Shape-excess allocation gave the quietest slot 0 HP and clipped the rest,
+    keeping ~1 kWh/day of phantom residual. Steady load + steady HP must leave
+    a flat residual that sums to load - HP."""
+    for d in _recent(6):
+        _seed_bucket(d, 8, [2.0, 2.04, 1.96, 2.0], temp_c=2.0)   # ~1 kWh/slot, noise only
+        _onecta(d, 8, heating=2.0)
+    prof = db.residual_load_profile_v2(window_days=60)
+    res = [prof["profile"][(16, 0)], prof["profile"][(16, 30)],
+           prof["profile"][(17, 0)], prof["profile"][(17, 30)]]
+    assert sum(res) == pytest.approx(4.0 - 2.0, abs=0.05)
+    assert max(res) - min(res) < 0.1                      # flat, not a clipped shape
+    hp = [prof["hp_profile"][(h, m)] for h, m in ((16, 0), (16, 30), (17, 0), (17, 30))]
+    assert sum(hp) == pytest.approx(2.0, abs=0.05)
+
+
+def test_metered_hp_above_the_buckets_load_carries_into_the_next_bucket() -> None:
+    for d in _recent(6):
+        _seed_bucket(d, 8, 2.0, temp_c=2.0)      # 4.0 kWh in the bucket
+        _seed_bucket(d, 9, 2.0, temp_c=2.0)      # 4.0 kWh in the next
+        _onecta(d, 8, heating=5.0)               # 1.0 more than the house drew
+        _onecta(d, 9, heating=0.0)
+    prof = db.residual_load_profile_v2(window_days=60)
+    nxt = sum(prof["profile"][(h, m)] for h in (18, 19) for m in (0, 30))
+    cur = sum(prof["profile"][(h, m)] for h in (16, 17) for m in (0, 30))
+    assert cur == pytest.approx(0.0, abs=0.05)
+    assert nxt == pytest.approx(3.0, abs=0.05)
+
+
+def _set_daily_fetched_at(d: date, iso: str) -> None:
+    with db._lock:
+        conn = db.get_connection()
+        try:
+            conn.execute("UPDATE daikin_consumption_daily SET fetched_at=? WHERE date=?", (iso, d.isoformat()))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def test_daily_row_fetched_before_its_day_ended_is_partial_and_ignored() -> None:
+    days = _recent(6)
+    for d in days:
+        _seed_bucket(d, 8, 1.0, temp_c=25.0)     # warm: physics HP ~ 0
+        _onecta(d, 8, heating=1.0, source="telemetry_integral")
+        db.upsert_daikin_consumption_daily(date=d.isoformat(), kwh_total=2.0, source="onecta")
+    partial = days[0]
+    _set_daily_fetched_at(partial, f"{partial.isoformat()}T12:00:00Z")
+    prof = db.residual_load_profile_v2(window_days=60, use_cache=False)
+    assert prof["daily_partial_days"] == [partial.isoformat()]
+    assert prof["day_counts"]["total"] == 6
+
+
+def test_onecta_buckets_above_the_day_total_are_scaled_down() -> None:
+    days = _recent(6)
+    for d in days:
+        _seed_bucket(d, 8, 2.0, temp_c=2.0)      # 1 kWh/slot
+        _onecta(d, 8, heating=4.0)               # meter says 4.0 ...
+        db.upsert_daikin_consumption_daily(date=d.isoformat(), kwh_total=2.0, source="onecta")  # ... day says 2.0
+    prof = db.residual_load_profile_v2(window_days=60, use_cache=False)
+    assert sorted(prof["daily_scaled_days"]) == sorted(d.isoformat() for d in days)
+    assert prof["profile"][(16, 0)] == pytest.approx(0.5, abs=0.03)   # (4 - 2) / 4 slots
+
+
+def test_guests_days_are_non_representative_not_away_and_have_no_return_day() -> None:
+    days = _recent(8, start_ago=4)
+    guest_day = days[3]
+    for d in days:
+        _seed_bucket(d, 8, 2.4 if d == guest_day else 1.0)
+        _snapshot(d, "guests" if d == guest_day else "normal")
+    prof = db.residual_load_profile_v2(window_days=60, use_cache=False)
+    assert prof["non_representative_days"] == [guest_day.isoformat()]
+    assert guest_day.isoformat() not in prof["away_days"]
+    assert prof["return_days"] == []
+    assert prof["profile"][(16, 0)] == pytest.approx(0.5, abs=0.02)   # the guests day is out
+    assert prof["day_counts"]["non_representative_excluded"] == 1
+
+
+def test_completed_appliance_run_is_removed_from_the_history() -> None:
+    days = _recent(6)
+    for d in days:
+        _seed_bucket(d, 8, 2.0)                  # 1 kWh/slot, warm: no HP
+    d0 = days[0]
+    start = datetime(d0.year, d0.month, d0.day, 16, 0, tzinfo=LON).astimezone(UTC)
+    end = start + timedelta(hours=1)
+    aid = db.add_appliance(vendor="smartthings", vendor_device_id="t922", name="Washer",
+                           device_type="washer", default_duration_minutes=60, deadline_local_time="07:00",
+                           typical_kw=0.5, enabled=True)
+    z = lambda t: t.isoformat().replace("+00:00", "Z")  # noqa: E731
+    db.create_appliance_job(appliance_id=aid, armed_at_utc=z(start - timedelta(hours=1)),
+                            deadline_utc=z(end + timedelta(hours=3)), duration_minutes=60,
+                            planned_start_utc=z(start), planned_end_utc=z(end),
+                            avg_price_pence=10.0, status="completed")
+    with db._lock:
+        conn = db.get_connection()
+        try:
+            conn.execute("UPDATE appliance_jobs SET actual_start_utc=?, completed_at_utc=?, actual_kwh=? WHERE appliance_id=?",
+                         (z(start), z(end), 1.0, aid))
+            conn.commit()
+        finally:
+            conn.close()
+    prof = db.residual_load_profile_v2(window_days=60, use_cache=False)
+    # one of six days loses 0.5 kWh in each of the 16:00 and 16:30 slots
+    assert prof["profile"][(16, 0)] == pytest.approx((5 * 1.0 + 0.5) / 6, abs=0.02)
+    assert prof["profile"][(17, 0)] == pytest.approx(1.0, abs=0.02)
+
+
+def test_scenario_spread_is_continuous_when_the_mean_exceeds_p75() -> None:
+    """Right-skewed slot: mean > p75. spread must still be >= the centre and
+    carry the (p75 - median) gap instead of collapsing to the centre."""
+    days = _recent(8)
+    for i, d in enumerate(days):
+        _seed_bucket(d, 8, 12.0 if i == 0 else [1.0, 1.1, 1.2, 1.3][i % 4])
+    prof = db.residual_load_profile_v2(window_days=60, use_cache=False)
+    c = prof["profile"][(16, 0)]
+    sp = prof["spread"][(16, 0)]
+    assert c > 0.9                                   # mean pulled up by the outlier
+    assert sp >= c and sp > c + 0.01                 # gap p75 - median kept
+
+
+def test_golden_kill_switch_off_matches_v2_values(monkeypatch) -> None:
+    """Hard-coded v2 numbers (computed on main for this fixture) — the switch
+    off must keep producing exactly these."""
+    for d in _recent(6):
+        for j, kw in enumerate([1.0, 2.0, 3.0, 1.5]):
+            _seed_slot(d, 16 + j // 2, 30 * (j % 2), kw, temp_c=2.0)
+        _onecta(d, 8, heating=1.2)
+    monkeypatch.setattr(config, "LP_RESIDUAL_PROFILE_V3", False, raising=False)
+    prof = db.residual_load_profile_v2(window_days=60, use_cache=False)
+    got = {k: round(prof["profile"][k], 4) for k in ((16, 0), (16, 30), (17, 0), (17, 30))}
+    assert got == GOLDEN_V2
+    assert round(prof["spread"][(17, 0)], 4) == GOLDEN_V2_SPREAD_17_0
+    assert prof["day_counts"]["total"] == 6 and prof["calibrated_days"] == 6
+
+
+GOLDEN_V2: dict = {(16, 0): 0.4316, (16, 30): 0.9316, (17, 0): 1.4316, (17, 30): 0.6816}
+GOLDEN_V2_SPREAD_17_0 = 1.4316
+
+
 # -- wire: what the LP solver actually receives -------------------------------
 
 
