@@ -91,10 +91,10 @@ def test_comfort_slack_makes_lp_unavailable():
     """UA=600 in ordinary UK weather keeps the trajectory inside the absolute
     band but the pump cannot hold the floor → slack in many slots → refused."""
     plan = _plan(lwt=[5.0] * 8, indoor=[20.4] * 9, bands=["standard"] * 8)
-    plan.comfort_slack_c = [0.0, 0.0, 0.3, 0.6, 0.8, 0.9, 1.0, 1.1]  # 6 slots > 0.1
+    plan.comfort_slack_c = [0.0, 0.0, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1]  # 6 slots > 0.5 (#944 tol)
     ok, reason = w3_trajectory_plausible(plan)
     assert not ok and reason.startswith("comfort_slack:6_slots")
-    plan.comfort_slack_c = [0.0] * 6 + [0.2, 0.3]  # 2 slots: a real cold-snap dip is tolerated
+    plan.comfort_slack_c = [0.0] * 4 + [0.6, 0.7, 0.8, 0.9]  # 4 slots > tol: still within MAX_SLACK_SLOTS, tolerated
     assert w3_trajectory_plausible(plan)[0]
 
 

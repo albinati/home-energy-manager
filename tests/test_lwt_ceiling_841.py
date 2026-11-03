@@ -261,7 +261,7 @@ def test_heating_above_ceiling_trips_plausibility_gate():
 def test_floor_slack_still_trips_plausibility_gate():
     plan = _plan(lwt=[0.0] * 8, indoor=[21.0] * 9)
     plan.w3_ceiling_c = 23.0
-    plan.comfort_slack_c = [0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.0]
+    plan.comfort_slack_c = [0.0, 0.0, 0.8, 0.8, 0.8, 0.8, 0.8, 0.0]
     ok, reason = w3_trajectory_plausible(plan)
     assert not ok and reason.startswith("comfort_slack:5_slots")
 

@@ -69,7 +69,7 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
 - **Plausibility gate** (`w3_trajectory_plausible`): the LP source is
   unavailable (diff row `lp_available=false`, `lp_reason`) when the plan
   carries comfort SLACK (`plan.comfort_slack_c` = FLOOR shortfall only, >
-  `LP_W3_SLACK_TOL_C` 0.1 °C) in more than `LP_W3_MAX_SLACK_SLOTS` (4) slots —
+  `LP_W3_SLACK_TOL_C`, runtime setting, 0.5 °C since #944 (was 0.1, which vetoed a deliberate 0.13 °C evening undershoot and pinned prod to the tier rule from 2026-11-01)) in more than `LP_W3_MAX_SLACK_SLOTS` (runtime, 4) slots; the emergency-floor and ceiling checks keep a fixed 0.1 °C tolerance; the outcome is stored in `exogenous_snapshot.w3_gate` and `/api/v1/daikin/heating-plan` reports `lwt_source_effective` (`lp`/`tier`) + `lwt_source_effective_reason` —
   floor slack is only ever used when the pump cannot hold the per-slot floor,
   i.e. the RC model cannot hold the house (unfitted UA/k) — or when ceiling
   slack (`plan.comfort_slack_hi_c`) coincides with planned space heat in such a

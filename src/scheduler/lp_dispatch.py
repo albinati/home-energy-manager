@@ -622,6 +622,13 @@ def _slot_is_near_now(plan: LpPlan, i: int, now_utc: datetime | None = None) -> 
     return abs(plan.slot_starts_utc[i] - now) <= stale
 
 
+# #944: the emergency-floor and ceiling vetoes keep their own tight tolerance.
+# LP_W3_SLACK_TOL_C only forgives a small, economically chosen undershoot of the
+# comfort FLOOR; the emergency floor (20 C) is a hard "never needed" line and a
+# ceiling overshoot while heating is deliberate overheating, so neither widens.
+_W3_STRICT_SLACK_TOL_C = 0.1
+
+
 def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     """May the LP's W3 indoor trajectory drive hardware? (#808 review)
 
@@ -644,7 +651,14 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     slack = plan.comfort_slack_c or []
     slack_hi = getattr(plan, "comfort_slack_hi_c", None) or []
     heat = getattr(plan, "space_electric_kwh", None) or []
-    s_tol = float(getattr(config, "LP_W3_SLACK_TOL_C", 0.1))
+    s_tol = float(getattr(config, "LP_W3_SLACK_TOL_C", 0.4))
+    # #944: never let the gate accept a prediction sitting at the cold-backstop
+    # trigger (live floor - LWT_COMFORT_BACKSTOP_MARGIN_C): clamp to margin - 0.1.
+    _margin = float(getattr(config, "LWT_COMFORT_BACKSTOP_MARGIN_C", 0.5))
+    if s_tol > _margin - 0.1 + 1e-9:
+        logger.warning("LP_W3_SLACK_TOL_C %.2f >= backstop margin %.2f - 0.1: clamped", s_tol, _margin)
+        s_tol = max(0.0, _margin - 0.1)
+    strict_tol = _W3_STRICT_SLACK_TOL_C
     max_slack_slots = int(getattr(config, "LP_W3_MAX_SLACK_SLOTS", 4))
     # #866: with an emitter lag a heat deficit in the first ceil(tau/30)+1 slots cannot be
     # undone (heat produced now only reaches the room later), so floor/emergency slack there
@@ -658,7 +672,7 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
         # slot (overheating on purpose); a house that merely starts above the
         # ceiling has unavoidable overshoot and must not disable the LP source.
         hi_bad = (
-            i < len(slack_hi) and float(slack_hi[i]) > s_tol
+            i < len(slack_hi) and float(slack_hi[i]) > strict_tol
             and i < len(heat) and float(heat[i]) > 1e-6
         )
         if lo_bad or hi_bad:
@@ -670,7 +684,7 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     slack_em = getattr(plan, "comfort_slack_emergency_c", None) or []
     em_floor = getattr(plan, "w3_emergency_floor_c", None)
     if slack_em and em_floor is not None and float(traj[0]) >= float(em_floor):
-        if any(float(x) > s_tol for x in slack_em[lag_skip:]):
+        if any(float(x) > strict_tol for x in slack_em[lag_skip:]):
             return False, "emergency_slack"
     # Judge the trajectory against the floor/setpoint the plan was SOLVED with;
     # live config only for older plans that did not record them.
@@ -688,6 +702,39 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     if hi > ceiling + 2 * tol:
         return False, f"trajectory_implausible_max:{hi:.1f}"
     return True, "ok"
+
+
+_LWT_EFFECTIVE_KEY = "lwt_source_effective"
+
+
+def record_lwt_source_effective(source: str, reason: str) -> None:
+    """#944: persist which source really drove the last dispatch (``lp`` or
+    ``tier``) and why, for ``/api/v1/daikin/heating-plan`` and audits."""
+    try:
+        db.set_kv(_LWT_EFFECTIVE_KEY, json.dumps({
+            "source": source, "reason": reason,
+            "at": datetime.now(UTC).isoformat(timespec="seconds"),
+        }))
+    except Exception:  # pragma: no cover — telemetry must never break dispatch
+        logger.debug("lwt_source_effective write failed", exc_info=True)
+
+
+def read_lwt_source_effective() -> dict[str, Any] | None:
+    try:
+        raw = db.get_kv(_LWT_EFFECTIVE_KEY)
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def w3_gate_snapshot(plan: LpPlan) -> dict[str, Any]:
+    """#944: gate outcome for ``exogenous_snapshot['w3_gate']``."""
+    ok, reason = w3_trajectory_plausible(plan)
+    return {
+        "ok": bool(ok), "reason": reason,
+        "slack_tol_c": float(getattr(config, "LP_W3_SLACK_TOL_C", 0.4)),
+        "max_slack_slots": int(getattr(config, "LP_W3_MAX_SLACK_SLOTS", 4)),
+    }
 
 
 def _tier_offsets(
@@ -1891,6 +1938,7 @@ def _write_lwt_preheat_actions(
     quota headroom here, dropping trailing pairs so we can never exceed budget.
     """
     if not config.DAIKIN_LWT_PREHEAT_ENABLED:
+        record_lwt_source_effective("none", "preheat_off")
         return 0
 
     # Demand gate (#540 quick win, #847): no BOOST offsets without measured
@@ -1918,6 +1966,7 @@ def _write_lwt_preheat_actions(
         # Nothing to boost AND no space heat planned: a setback on a non-heating
         # house is pure quota churn -> old behaviour, write no rows (#847 review).
         logger.info("LWT pre-heat: demand gate closed and no space heat planned — no rows written")
+        record_lwt_source_effective("none", "no_space_heat")
         return 0
     if gate_closed:
         logger.info(
@@ -1950,9 +1999,12 @@ def _write_lwt_preheat_actions(
     guards: dict[str, int] = {}
     lp_offsets = _lp_offsets(plan, indoor_c, guards=guards)
     source_used = _lwt_source()
+    effective_reason = "ok" if source_used == "lp" else "source_tier"
     if source_used == "lp" and lp_offsets is None:
         logger.info("LWT source=lp requested but the LP trajectory is unavailable (%s) — using the tier rule", lp_reason)
         source_used = "tier"
+        effective_reason = lp_reason
+    record_lwt_source_effective(source_used, effective_reason)
     if gate_closed and source_used == "lp":
         # The LP's own planned space-heat demand IS the signal under the LP source:
         # with coast_mode=lp the compressor is off outside boosts, so measured
@@ -2011,6 +2063,7 @@ def _write_lwt_preheat_actions(
             len(pairs), headroom,
         )
         _record(list(pairs))
+        record_lwt_source_effective("none", "quota")  # #944: nothing was written
         _PRESERVE.flag = True  # rows were already cleared: put the old ones back (#847)
         return 0
     if len(pairs) > max_pairs:
@@ -2366,6 +2419,7 @@ def _write_daikin_from_lp_plan_impl(
         else:
             db.clear_actions_for_date(plan_date, device="daikin")
         logger.info("write_daikin_from_lp_plan: skipped (Daikin holiday mode)")
+        record_lwt_source_effective("none", "holiday")
         return 0
 
     # #714 — LP-OWNED regime. Gated on ``plan.dhw_lp_owned`` (the plan's own record of

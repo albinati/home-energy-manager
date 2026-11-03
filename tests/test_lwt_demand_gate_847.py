@@ -323,3 +323,49 @@ def test_h1_restored_rows_carry_current_plan_date_and_reconcile(monkeypatch):
     rows = [r for r in db.get_actions_for_plan_date(today, "daikin") if r["action_type"] == "lwt_preheat"]
     assert rows[0]["status"] == "active", rows
     assert any(a.get("lwt_offset") == -2 for a in applied), applied
+
+
+def _eff():
+    return lp_dispatch.read_lwt_source_effective()
+
+
+def _lp_plan_for_wire(slack):
+    p = _plan(_start())
+    n = 8
+    p.lwt_offset_c = [4.0] * n
+    p.indoor_temp_c = [20.9] * (n + 1)
+    p.comfort_slack_c = list(slack)
+    p.comfort_slack_hi_c = [0.0] * n
+    p.comfort_slack_emergency_c = [0.0] * n
+    p.w3_night_floor_c = 20.0
+    p.w3_emergency_floor_c = 20.0
+    p.w3_ceiling_c = 23.0
+    p.price_band = ["standard"] * n
+    return p
+
+
+def test_wire_effective_source_lp_and_tier_veto(monkeypatch):
+    monkeypatch.setattr(db, "measured_space_heating_kwh_excluding_offset_windows", lambda *a, **k: 2.0)
+    monkeypatch.setitem(app_config._overrides, "DAIKIN_LWT_SOURCE", "lp")
+    lp_dispatch._write_lwt_preheat_actions(_start().date().isoformat(), _lp_plan_for_wire([0.13] * 7 + [0.0]), [])
+    assert _eff()["source"] == "lp"
+    lp_dispatch._write_lwt_preheat_actions(_start().date().isoformat(), _lp_plan_for_wire([0.8] * 6 + [0.0] * 2), [])
+    e = _eff()
+    assert e["source"] == "tier" and e["reason"].startswith("comfort_slack:6_slots")
+
+
+def test_wire_effective_source_none_paths(monkeypatch):
+    monkeypatch.setattr(db, "measured_space_heating_kwh_excluding_offset_windows", lambda *a, **k: 2.0)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_ENABLED", False, raising=False)
+    lp_dispatch._write_lwt_preheat_actions(_start().date().isoformat(), _plan(_start()), [])
+    assert (_eff()["source"], _eff()["reason"]) == ("none", "preheat_off")
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_ENABLED", True, raising=False)
+    monkeypatch.setattr(db, "measured_space_heating_kwh_excluding_offset_windows", lambda *a, **k: 0.0)
+    p = _plan(_start())
+    p.space_electric_kwh = [0.0] * 8
+    lp_dispatch._write_lwt_preheat_actions(_start().date().isoformat(), p, [])
+    assert _eff()["reason"] == "no_space_heat"
+    monkeypatch.setattr(db, "measured_space_heating_kwh_excluding_offset_windows", lambda *a, **k: 2.0)
+    monkeypatch.setattr("src.api_quota.quota_remaining", lambda vendor: 0)
+    lp_dispatch._write_lwt_preheat_actions(_start().date().isoformat(), _plan(_start()), [])
+    assert (_eff()["source"], _eff()["reason"]) == ("none", "quota")
