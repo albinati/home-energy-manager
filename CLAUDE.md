@@ -218,7 +218,7 @@ Full annotated block (history, incidents, rationale): [docs/ENV_NOTES.md](docs/E
 | `PV_RECENT_BIAS_MIN` / `_MAX` / `_MIN_DAYS` | 0.6 / 1.4 / 3 | Clamp and sample-day gate for the bias nudge |
 | `LP_SCENARIO_*_TEMP_DELTA_C` / `_LOAD_FACTOR` / `_PV_FACTOR` | +1/0.90/1.05; -1.5/1.15/0.85 | Optimistic / pessimistic scenario perturbations |
 | `LP_PESS_CHARGE_FLOOR_ENABLED` (+ `_TOLERANCE_KWH` 0.2, `_HOURS` 24, `_SLACK_PENALTY_PENCE` 50) | true | Newsvendor charge floor from pessimistic solve |
-| `LP_W3_TAU_H` | 0 (deploy: 53.6) | W3 loss time constant (#949): UA = 1000*C/tau at unchanged C; 0 = pinned UA bit-for-bit; non-zero outside 20..150 ignored |
+| `LP_W3_TAU_H` | 0 (deploy: 55) | W3 loss time constant (#949): UA = 1000*C/tau at unchanged C; 0 = pinned UA bit-for-bit; non-zero outside 20..150 ignored |
 | `LP_SOC_RESERVE_RECOVERY_SLACK_PENALTY_PENCE` | 50 | Soft reserve floor when SoC starts below reserve (#789) |
 | `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH` | 0.30 | Commit peak_export only if pessimistic exports at least this |
 | `LP_SCENARIOS_ON_TRIGGER_REASONS` | plan_push,octopus_fetch,tier_boundary,... | Which triggers run the 3-pass solve |

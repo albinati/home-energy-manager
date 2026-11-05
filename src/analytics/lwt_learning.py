@@ -965,11 +965,12 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
 
 
 # ── #949: W3 replay drift telemetry (shadow only; shares the LP's RC step) ───────────
+# Half-open [lo, hi) bands on the executed offset (offsets are whole K, so the cut points sit midway).
 REPLAY_BANDS: tuple[tuple[str, float, float], ...] = (
-    ("le_m1", float("-inf"), -1.0),   # <= -1
-    ("0_to_2", -0.999, 2.0),          # coast-ish / hold: (-1, 2]
-    ("3_to_5", 2.001, 5.0),           # lift
-    ("gt_5", 5.001, float("inf")),
+    ("le_m1", float("-inf"), -0.5),   # <= -1
+    ("0_to_2", -0.5, 2.5),            # 0..+2
+    ("3_to_5", 2.5, 5.5),             # +3..+5
+    ("gt_5", 5.5, float("inf")),      # > +5
 )
 REPLAY_WINDOW_SLOTS = 16              # 8 h
 _TAU_FIT_GRID_H = tuple(float(x) for x in range(20, 151))
@@ -977,7 +978,7 @@ _TAU_FIT_GRID_H = tuple(float(x) for x in range(20, 151))
 
 def _replay_band(off: float) -> str:
     for name, lo, hi in REPLAY_BANDS:
-        if lo <= off <= hi:
+        if lo <= off < hi:
             return name
     return "gt_5"
 
@@ -992,9 +993,14 @@ def _replay_series(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         t_out = r.get("outdoor_real_c")
         if t_out is None:
             t_out = r.get("outdoor_fc_c")
-        cop = r.get("cop_space")
-        if t_out is None or cop is None or float(cop) <= 0:
+        if t_out is None:
             continue
+        # CURVE COP at the measured outdoor temp. The logged ``cop_space`` is the LP's
+        # lift-derated COP at the PLANNED offset (an echo of LP output); w3_q_th_kwh_for_offset
+        # applies the lift penalty once, at the executed offset.
+        from ..config import cop_at_temperature
+
+        cop = max(1.0, cop_at_temperature(config.DAIKIN_COP_CURVE, float(t_out)))
         out.append({"t": t, "ti": float(r["indoor_real_c"]), "to": float(t_out), "off": float(r["device_offset"]),
                     "cop": float(cop), "g": float(r.get("gain_kw") or 0.0)})
     return out
@@ -1068,7 +1074,10 @@ def replay_drift_by_band(rows: list[dict[str, Any]], c_kwh: float, ua_pin: float
 
 def fit_tau_replay(rows: list[dict[str, Any]], c_kwh: float) -> float | None:
     """Shadow estimate: the tau in [20, 150] h that minimises the squared end error of the
-    replayed coast-band (offset <= -1) windows. None when there is no coast window."""
+    replayed coast-band (offset <= -1) windows. None when there is no coast window.
+
+    Caveat: at -1/-2 the coast band cannot separate UA from an error in the MODELLED heat input
+    (device draw x COP at those offsets); a biased input shifts the fitted tau. Shadow only."""
     wins = _band_windows(_replay_series(rows), "le_m1")
     if not wins:
         return None
@@ -1090,7 +1099,10 @@ def replay_telemetry(rows: list[dict[str, Any]], c_kwh: float, ua_pin: float) ->
         tau_fit = fit_tau_replay(rows, c_kwh)
         tau_ref = tau_cfg if tau_cfg > 0 else tau_fit
         return {"replay_drift_by_band": replay_drift_by_band(rows, c_kwh, ua_pin, tau_ref),
-                "replay_tau_ref_h": tau_ref, "tau_fit_h": tau_fit}
+                "replay_tau_ref_h": tau_ref, "tau_fit_h": tau_fit,
+                # "fit_in_sample": tau_ref was fitted on the same coast windows it is scored on, so
+                # ua_tau.mean_8h_err_k in the coast band is minimised by construction.
+                "replay_tau_ref_source": "config" if tau_cfg > 0 else "fit_in_sample"}
     except Exception:
         logger.debug("replay telemetry failed", exc_info=True)
         return {}

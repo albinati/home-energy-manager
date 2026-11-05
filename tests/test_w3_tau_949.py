@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -18,6 +17,7 @@ import pytest
 from src import db, physics
 from src.analytics import lwt_learning as ll
 from src.config import config as app_config
+from src.config import cop_at_temperature
 from src.scheduler.lp_optimizer import LpInitialState, solve_lp
 from src.weather import WeatherLpSeries
 
@@ -37,14 +37,15 @@ PROD_ENV = {
     "LP_W3_INTERNAL_GAIN_KW": 0.15, "INDOOR_SETPOINT_C": 21.0, "LP_W3_NIGHT_FLOOR_C": 20.0,
     "DAIKIN_WEATHER_CURVE_LOW_C": 0.0, "DAIKIN_WEATHER_CURVE_LOW_LWT_C": 40.0,
     "DAIKIN_WEATHER_CURVE_HIGH_C": 18.0, "DAIKIN_WEATHER_CURVE_HIGH_LWT_C": 18.0, "DAIKIN_WEATHER_CURVE_OFFSET_C": 0.0,
+    "OPTIMIZATION_LWT_OFFSET_MIN": -2.0,  # prod knob (code default -10 lets the LP plan -5 nights)
     "LP_W3_PEAK_COAST_DELTA_C": 0.0, "LP_W3_EMITTER_TAU_MIN": 0.0, "LP_W3_TAU_H": 0.0,
     "BATTERY_CAPACITY_KWH": 10.0, "LP_SOC_FINAL_KWH": 2.5,
 }
 
 
 @pytest.fixture(autouse=True)
-def _env(monkeypatch):
-    monkeypatch.setattr(app_config, "DB_PATH", tempfile.mktemp(suffix=".db"), raising=False)
+def _env(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_config, "DB_PATH", str(tmp_path / "t.db"), raising=False)
     db.init_db()
     for k, v in PROD_ENV.items():
         monkeypatch.setattr(app_config, k, v, raising=False)
@@ -64,18 +65,17 @@ def _window(rows, start: str, end: str):
     return [r for r in rows if a <= _z(r["slot_time_utc"]) <= b]
 
 
-def _replay(win, tau_h: float | None, chain: str = "offset") -> tuple[float, float]:
+def _replay(win, tau_h: float | None) -> tuple[float, float]:
     """(replayed T at the window end, measured T at the window end) from the measured start.
 
-    chain="offset": thermal kWh from the EXECUTED offset via ``w3_q_th_kwh_for_offset``;
-    chain="lp_log": the LP's own logged thermal (e_space_kwh x cop_space)."""
+    Thermal kWh from the EXECUTED offset via ``w3_q_th_kwh_for_offset`` with the CURVE COP at the
+    measured outdoor temp (the logged ``cop_space`` is the LP's already lift-derated COP at the
+    planned offset: using it would double-count the penalty and echo LP output)."""
     ua = UA_PIN if not tau_h else physics.w3_ua_from_tau(C_KWH, tau_h)
     body = win[:-1]
     t_out = [r["outdoor_real_c"] if r["outdoor_real_c"] is not None else r["outdoor_fc_c"] for r in body]
-    if chain == "offset":
-        q = [physics.w3_q_th_kwh_for_offset(r["device_offset"], t, r["cop_space"]) for r, t in zip(body, t_out)]
-    else:
-        q = [r["e_space_kwh"] * r["cop_space"] for r in body]
+    q = [physics.w3_q_th_kwh_for_offset(r["device_offset"], t, max(1.0, cop_at_temperature(app_config.DAIKIN_COP_CURVE, t)))
+         for r, t in zip(body, t_out)]
     traj = physics.w3_rc_replay(win[0]["indoor_real_c"], t_out, q, [r["gain_kw"] for r in body], ua, C_KWH)
     return traj[-1], win[-1]["indoor_real_c"]
 
@@ -101,20 +101,11 @@ def test_coast_replay_matches_only_with_tau_consistent_ua(start, end):
 def test_lift_windows_do_not_regress(start, end):
     win = _window(_rows(), start, end)
     assert len(win) >= 8
-    # (a) the LP's own logged thermal chain: the spec criterion holds as written.
-    rep_tau, meas = _replay(win, TAU_MEAS, "lp_log")
-    rep_pin, _ = _replay(win, None, "lp_log")
-    e_tau, e_pin = abs(rep_tau - meas), abs(rep_pin - meas)
-    print(f"{start}: lp_log |err| tau={e_tau:.3f} pin={e_pin:.3f}")
-    assert e_tau <= max(e_pin, 0.2), (e_tau, e_pin)
-    # (b) executed-offset chain (helper): the model under-delivers lift heat (house warms
-    # faster than modelled), so tau-consistent UA reads cold by up to ~0.33 K over 4 h.
-    # Bounded, documented; NOT the spec's 0.2 (see PR body).
     rep_tau, meas = _replay(win, TAU_MEAS)
     rep_pin, _ = _replay(win, None)
     e_tau, e_pin = abs(rep_tau - meas), abs(rep_pin - meas)
-    print(f"{start}: offset-chain |err| tau={e_tau:.3f} pin={e_pin:.3f}")
-    assert e_tau <= max(e_pin, 0.35), (e_tau, e_pin)
+    print(f"{start}: lift drift tau53.6={rep_tau - meas:+.3f} pin={rep_pin - meas:+.3f}")
+    assert e_tau <= max(e_pin, 0.25), (e_tau, e_pin)
 
 
 def test_replay_and_lp_share_one_step():
@@ -159,14 +150,25 @@ def _solve(outdoor=9.5, indoor=21.0, n=48):
                     weather=w, initial=st, tz=TZ)
 
 
-def test_tau_zero_is_bit_for_bit_identical(monkeypatch):
-    a = _solve(n=24)
-    monkeypatch.setattr(app_config, "LP_W3_TAU_H", 0.0, raising=False)
-    b = _solve(n=24)
-    assert a.ok and b.ok
-    assert a.objective_pence == b.objective_pence
-    assert a.indoor_temp_c == b.indoor_temp_c
-    assert b.w3_ua_source == "pin" and b.w3_ua_w_per_k == pytest.approx(UA_PIN)
+GOLDEN = Path(__file__).parent / "fixtures" / "w3_golden_pre949_1278998.json"
+
+
+def test_tau_zero_matches_pre_pr_golden(monkeypatch):
+    """Golden = objective / t_in / offsets produced by the PRE-PR optimizer at commit 1278998
+    (same harness, 24 slots, prod constants, 3 cases incl. the no-gain branch). t_in and offsets
+    are compared exactly (they are stored rounded to 6 dp by the LP); the objective to 1e-8
+    relative (it differed from the pre-PR run by <= 6e-7 absolute when regenerated)."""
+    golden = json.loads(GOLDEN.read_text())
+    assert len(golden) == 3
+    for g in golden:
+        monkeypatch.setattr(app_config, "LP_W3_INTERNAL_GAIN_KW", g["gain"], raising=False)
+        monkeypatch.setattr(app_config, "LP_W3_TAU_H", 0.0, raising=False)
+        p = _solve(outdoor=g["outdoor"], indoor=g["indoor"], n=24)
+        assert p.ok
+        assert p.objective_pence == pytest.approx(g["objective"], rel=1e-8), g["outdoor"]
+        assert list(p.indoor_temp_c) == g["t_in"], g["outdoor"]
+        assert list(p.lwt_offset_c) == g["offsets"], g["outdoor"]
+        assert p.w3_ua_source == "pin" and p.w3_ua_w_per_k == pytest.approx(UA_PIN)
 
 
 def test_bounds_and_ua_on_plan(monkeypatch, caplog):
@@ -198,18 +200,30 @@ def test_settings_schema_range(monkeypatch):
     assert spec.env_default() == 0.0
 
 
-def test_solve_smoke_no_all_night_coast(monkeypatch):
-    monkeypatch.setattr(app_config, "LP_W3_TAU_H", TAU_MEAS, raising=False)
+def _smoke(monkeypatch, tau):
+    monkeypatch.setattr(app_config, "LP_W3_TAU_H", tau, raising=False)
     p = _solve(outdoor=9.5, n=48)
     assert p.ok, p.status
     slots = p.slot_starts_utc
     night = [i for i, s in enumerate(slots) if s.hour >= 22 or s.hour < 7]
     # setpoint-holding hours; 20:00-22:00 is the planned pre-night coast into the 22:00 cheap band
-    # (night floor 20 starts at 22:00), see PR body
+    # (night floor 20 starts at 22:00)
     day = [i for i, s in enumerate(slots) if 7 <= s.hour < 20]
     mean_night = sum(p.lwt_offset_c[i] for i in night) / len(night)
     t_day_min = min(p.indoor_temp_c[i + 1] for i in day)
-    print(f"night mean offset {mean_night:+.2f}, day min t_in {t_day_min:.2f}")
+    print(f"tau={tau}: night mean offset {mean_night:+.2f}, day min t_in {t_day_min:.2f}")
+    return p, mean_night, t_day_min
+
+
+def test_solve_smoke_pin_ua_reproduces_all_night_coast(monkeypatch):
+    p, mean_night, _ = _smoke(monkeypatch, 0.0)
+    night = [p.lwt_offset_c[i] for i, s in enumerate(p.slot_starts_utc) if s.hour >= 22 or s.hour < 7]
+    assert mean_night == pytest.approx(-2.0, abs=0.05) and max(night) <= -1.99  # the bug
+
+
+@pytest.mark.parametrize("tau", [TAU_MEAS, 55.0])
+def test_solve_smoke_no_all_night_coast(monkeypatch, tau):
+    p, mean_night, t_day_min = _smoke(monkeypatch, tau)
     assert mean_night >= 0.0
     assert t_day_min >= 20.9
     from src.scheduler.lp_dispatch import w3_gate_snapshot
@@ -218,14 +232,29 @@ def test_solve_smoke_no_all_night_coast(monkeypatch):
     assert set(snap) >= {"ok", "reason"}  # the gate verdict is recorded
 
 
-def test_replay_telemetry_payload():
+def test_replay_telemetry_payload(monkeypatch):
+    monkeypatch.setattr(app_config, "LP_W3_TAU_H", TAU_MEAS, raising=False)
     rows = _rows()
     out = ll.replay_telemetry(rows, C_KWH, UA_PIN)
+    assert out["replay_tau_ref_source"] == "config" and out["replay_tau_ref_h"] == TAU_MEAS
     assert 20.0 <= out["tau_fit_h"] <= 150.0
     bands = out["replay_drift_by_band"]
     assert set(bands) == {"le_m1", "0_to_2", "3_to_5", "gt_5"}
     coast = bands["le_m1"]
     assert coast["n_slots"] > 0 and coast["n_windows_8h"] >= 1
-    # at the tau-implied UA the coast windows drift less than at the pinned UA
+    # the CONFIGURED tau (out of sample) drifts less on the coast windows than the pinned UA
     assert abs(coast["ua_tau"]["mean_8h_err_k"]) < abs(coast["ua_pin"]["mean_8h_err_k"])
     print("tau_fit_h", out["tau_fit_h"], "coast", coast)
+
+
+def test_replay_telemetry_knob_off_marks_in_sample(monkeypatch):
+    monkeypatch.setattr(app_config, "LP_W3_TAU_H", 0.0, raising=False)
+    out = ll.replay_telemetry(_rows(), C_KWH, UA_PIN)
+    assert out["replay_tau_ref_source"] == "fit_in_sample" and out["replay_tau_ref_h"] == out["tau_fit_h"]
+
+
+def test_replay_bands_are_half_open_and_total():
+    for off in (-5.0, -1.0, -0.999, -0.5, 0.0, 2.0, 2.0001, 2.4999, 2.5, 3.0, 5.0, 5.4999, 5.5, 5.5001, 9.0):
+        ll._replay_band(off)  # never falls through by accident
+    assert [ll._replay_band(x) for x in (-1.0, -0.4, 0.0, 2.0, 2.001, 3.0, 5.0, 5.001, 6.0)] == [
+        "le_m1", "0_to_2", "0_to_2", "0_to_2", "0_to_2", "3_to_5", "3_to_5", "3_to_5", "gt_5"]

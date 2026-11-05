@@ -127,10 +127,19 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   LP). Telemetry (shadow, no auto-apply): the daily `lwt_learning_daily` payload carries
   `replay_drift_by_band` (offset bands <=-1 / 0..2 / 3..5 / >5: n slots, mean one-slot-ahead error, mean 8 h
   integrated error at the pinned UA and at the tau-implied UA) and `tau_fit_h` (tau in 20..150 minimising the
-  coast-band replay error). **Deploy:** set `LP_W3_TAU_H=53.6`, then revert the interim prod knobs
-  `INDOOR_SETPOINT_C` 21.5 -> 21.0 and `LP_W3_MAX_SLACK_SLOTS` 16 -> 4. Consequence: holding 21.0 costs about
-  +1.5-2 kWh_e/day versus the old 20.7 drift; night offsets move from about -2 to about +2 and plan cost
-  forecasts rise. Known limit: the emitter-lag variant (`LP_W3_EMITTER_TAU_MIN`) is not part of the replay.
+  coast-band replay error; with the knob at 0 it is scored in-sample, flagged by `replay_tau_ref_source:
+  "fit_in_sample"`, and the coast band cannot separate UA from an error in the modelled heat input at -1/-2).
+  The replay uses the CURVE COP at the measured outdoor temperature and applies the #863 lift penalty once,
+  at the executed offset (the logged `cop_space` is already lift-derated at the planned offset).
+  **Deploy:** set `LP_W3_TAU_H=55` (53.6 is acceptable; 55 is the fixture coast fit, lift residuals
+  -0.02 .. -0.19 K), then revert `INDOOR_SETPOINT_C` 21.5 -> 21.0. KEEP `LP_W3_MAX_SLACK_SLOTS` at 16 (or
+  >= 8) until a few cold nights are observed: at 5 C outdoor the LP's lift capacity (~1.2 kW_e at +5) cannot
+  hold 21 at UA ~308 and the gate rejects (`comfort_slack:5_slots>4` -> tier). Watch after deploy: the
+  `w3_gate.reason` fallback rate, `exogenous_snapshot.w3_rc`, measured indoor vs plan in lift windows
+  (overshoot above 21.2 = wasted energy) and `replay_drift_by_band`. Consequence: night offsets move from
+  about -2 to about +1..+2 and plan cost forecasts rise (plan objective +28-52 % in synthetic solves,
+  includes battery terms, indicative only). Known limit: the emitter-lag variant
+  (`LP_W3_EMITTER_TAU_MIN`) is not part of the replay.
 - Rollout: deploy with `tier` → read `lwt_source_diff` + `plan.indoor_temp_c`
   for a day (`lp_available=true`, boosts only in cheap bands, setbacks only in
   the peak, trajectory within 17–23 °C) → `PUT /api/v1/settings`
