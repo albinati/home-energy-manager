@@ -6,6 +6,7 @@ preventing LLM hallucination and ensuring physics-based setpoints.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 HEAT_LOSS_C_PER_HOUR: float = 0.3  # Daikin Altherma typical standing loss °C/h
@@ -375,6 +376,117 @@ def space_floor_curve_kw(temp_outdoor_c: float, slope: float) -> float:
 def space_floor_device_draw_kw(curve_kw: float, offset_k: float, *, factor: float, k_t: float) -> float:
     """Electric kW the device draws at ``offset_k`` under the floor's device model."""
     return max(0.0, float(factor)) * max(0.0, float(curve_kw) + max(0.0, float(k_t)) * float(offset_k))
+
+
+# ---------------------------------------------------------------------------
+# W3 building RC model (#949): ONE per-slot step shared by the LP constraint and
+# the offline replay (so the telemetry and the tests judge the equation the LP
+# actually solves). Lives in physics.py (pure, no PuLP import, no I/O).
+# ---------------------------------------------------------------------------
+
+_J_PER_KWH = 3.6e6
+W3_TAU_H_MIN = 20.0
+W3_TAU_H_MAX = 150.0
+_w3_tau_warned: set[float] = set()
+
+
+def effective_w3_tau_h() -> float:
+    """``LP_W3_TAU_H`` as the LP uses it: 0 = off; a non-zero value outside
+    [20, 150] h logs one warning per value and is treated as 0."""
+    from .config import config
+
+    try:
+        v = float(getattr(config, "LP_W3_TAU_H", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        v = 0.0
+    if v == 0.0:
+        return 0.0
+    if not (W3_TAU_H_MIN <= v <= W3_TAU_H_MAX):
+        if v not in _w3_tau_warned:
+            _w3_tau_warned.add(v)
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "LP_W3_TAU_H=%s is outside [%g, %g] h; ignored (treated as 0 = pinned UA)",
+                v, W3_TAU_H_MIN, W3_TAU_H_MAX,
+            )
+        return 0.0
+    return v
+
+
+def w3_ua_from_tau(c_kwh_per_k: float, tau_h: float) -> float:
+    """UA (W/K) that makes the RC decay time constant equal ``tau_h`` at capacity C."""
+    return 1000.0 * float(c_kwh_per_k) / float(tau_h)
+
+
+def w3_rc_step(t_in: Any, t_out_c: float, q_room_j: Any, gain_j: Any, ua_w_per_k: float,
+               c_j_per_k: float, dt_s: float) -> Any:
+    """Next indoor temperature: ``T' = T + (Q - UA (T - T_out) dt [+ G]) / C`` (J units).
+
+    ``t_in`` / ``q_room_j`` may be PuLP expressions (the expression stays linear);
+    ``gain_j`` None = no gain term (the pre-#854 equation, operation order preserved
+    so the LP matrix is unchanged)."""
+    loss_j = ua_w_per_k * (t_in - t_out_c) * dt_s
+    if gain_j is None:
+        return t_in + (q_room_j - loss_j) / c_j_per_k
+    return t_in + (q_room_j - loss_j + gain_j) / c_j_per_k
+
+
+def w3_rc_replay(
+    t0_c: float,
+    t_out_c: list[float],
+    q_th_kwh: list[float],
+    gain_kw: list[float],
+    ua_w_per_k: float,
+    c_kwh_per_k: float,
+    slot_h: float = 0.5,
+) -> list[float]:
+    """Replay the W3 RC equation (no emitter lag) from ``t0_c``. Returns len(n)+1 temps."""
+    out = [float(t0_c)]
+    dt_s = slot_h * 3600.0
+    c_j = c_kwh_per_k * _J_PER_KWH
+    for i in range(len(q_th_kwh)):
+        g = float(gain_kw[i]) if i < len(gain_kw) and gain_kw[i] is not None else 0.0
+        out.append(w3_rc_step(out[-1], float(t_out_c[i]), float(q_th_kwh[i]) * _J_PER_KWH,
+                              g * slot_h * _J_PER_KWH, ua_w_per_k, c_j, dt_s))
+    return out
+
+
+def w3_q_th_kwh_for_offset(
+    offset_k: float,
+    t_out_c: float,
+    cop_space: float,
+    *,
+    slot_h: float = 0.5,
+    cap_kwh: float | None = None,
+) -> float:
+    """Thermal kWh the W3 model credits to a slot run at ``offset_k`` (the chain the LP
+    uses with LP_W3_SPACE_FLOOR_ENABLED): device draw ``F*(curve + k*offset)*slot_h``
+    (``space_floor_device_draw_kw``), times the curve COP, times the #863 lift multiplier
+    ``max(LP_COP_LIFT_MIN_MULTIPLIER, 1 - p*max(0, offset))`` (p = LP_COP_LWT_OFFSET_PENALTY_PER_K)."""
+    from .config import config
+
+    s = space_floor_slope_override()
+    factor, k_t = space_floor_device_params()
+    if s > 0.0:
+        k_t = s
+        curve = space_floor_curve_kw(t_out_c, s)
+    else:
+        curve = get_daikin_heating_kw(t_out_c)
+    e_kwh = space_floor_device_draw_kw(curve, offset_k, factor=factor, k_t=k_t) * slot_h
+    if offset_k > 0.0:
+        # Lift: the LP's lift segments follow the CAPACITY slope (space_capacity_slope), clipped
+        # at the compressor cap, and never below the offset-0 draw.
+        hp_cap = float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * slot_h
+        e0 = min(get_daikin_heating_kw(t_out_c) * slot_h, hp_cap)  # the LP's space_floor_kwh
+        raw = get_daikin_heating_kw(t_out_c, lwt_offset_delta=offset_k, slope=space_capacity_slope() or None) * slot_h
+        e_kwh = max(e0, min(raw, hp_cap))
+    if cap_kwh is not None:
+        e_kwh = min(e_kwh, cap_kwh)
+    pen = max(0.0, float(getattr(config, "LP_COP_LWT_OFFSET_PENALTY_PER_K", 0.0) or 0.0))
+    mult = max(float(getattr(config, "LP_COP_LIFT_MIN_MULTIPLIER", 0.5)),
+               1.0 - pen * max(0.0, float(offset_k))) if pen > 0.0 else 1.0
+    return e_kwh * float(cop_space) * mult
 
 
 def lwt_offset_from_space_kw_device(

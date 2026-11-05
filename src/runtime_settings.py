@@ -291,6 +291,20 @@ SCHEMA: dict[str, SettingSpec] = {
             "bit-for-bit)."
         ),
     ),
+    "LP_W3_TAU_H": SettingSpec(
+        key="LP_W3_TAU_H",
+        type_name="float",
+        env_default=_float_env("LP_W3_TAU_H", "0.0"),
+        min_value=0.0,
+        max_value=150.0,
+        description=(
+            "W3 RC model (#949): building time constant in hours used for the LOSS term "
+            "only. When > 0 the LP uses UA = 1000 * C / tau (C unchanged), so the model "
+            "decays at the measured tau (unit-off coast: 53.6 h) instead of the pinned "
+            "BUILDING_UA_W_PER_K. 0 = off (pinned UA, bit-for-bit). A non-zero value "
+            "outside 20..150 is ignored (treated as 0) with a warning."
+        ),
+    ),
     "LP_W3_SPACE_FLOOR_ENABLED": SettingSpec(
         key="LP_W3_SPACE_FLOOR_ENABLED",
         type_name="str",

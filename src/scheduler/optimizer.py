@@ -2680,6 +2680,12 @@ def _run_optimizer_lp(
     except Exception:  # noqa: BLE001 — audit only, never block a plan
         logger.debug("w3_gate snapshot failed", exc_info=True)
 
+    if getattr(plan, "w3_ua_w_per_k", None) is not None:  # #949 — RC loss parameters this plan was solved with
+        exogenous_snapshot["w3_rc"] = {
+            "ua_w_per_k": plan.w3_ua_w_per_k, "tau_h": plan.w3_tau_h,
+            "c_kwh_per_k": plan.w3_c_kwh_per_k, "source": plan.w3_ua_source,
+        }
+
     lp_slots = lp_plan_to_slots(plan)
     counts = {"negative": 0, "cheap": 0, "solar_charge": 0, "standard": 0, "peak": 0, "peak_export": 0}
     for s in lp_slots:

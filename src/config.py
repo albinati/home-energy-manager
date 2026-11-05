@@ -2717,6 +2717,14 @@ class Config:
         self._rt_set("LP_W3_EMITTER_TAU_MIN", float(value))
 
     @property
+    def LP_W3_TAU_H(self) -> float:
+        return float(self._rt_get("LP_W3_TAU_H"))
+
+    @LP_W3_TAU_H.setter
+    def LP_W3_TAU_H(self, value: float) -> None:
+        self._rt_set("LP_W3_TAU_H", float(value))
+
+    @property
     def LP_W3_SPACE_FLOOR_ENABLED(self) -> bool:
         return str(self._rt_get("LP_W3_SPACE_FLOOR_ENABLED")).strip().lower() in ("true", "1", "yes", "on")
 
