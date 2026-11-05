@@ -36,6 +36,7 @@ from ..physics import (
     space_floor_device_params,
     space_floor_slope_override,
     predict_passive_daikin_load,
+    w3_rc_step,
 )
 from ..weather import WeatherLpSeries
 from .pv_trust import PvSufficiencyGuardDiag, evaluate_pv_sufficiency_guard
@@ -154,6 +155,11 @@ class LpPlan:
     indoor_temp_c: list[float] = field(default_factory=list)  # len N+1; W3 (#540), empty when off
     daikin_state: str = "active"
     """#872 — "active" | "passive" | "off" (holiday mode: zero Daikin draw planned)."""
+    w3_ua_w_per_k: float | None = None
+    """#949 — the UA (W/K) the RC loss term was SOLVED with (tau-implied or pinned)."""
+    w3_tau_h: float | None = None
+    w3_c_kwh_per_k: float | None = None
+    w3_ua_source: str | None = None  # "pin" | "tau"
     w3_night_floor_c: float | None = None
     """#820 — the W3 night floor this plan was SOLVED with (the plausibility
     gate must judge the trajectory against it, not the live config)."""
@@ -748,6 +754,20 @@ def solve_lp(
         # readers can each fall back to env independently).
         c_bld_kwh = max(get_building_thermal_mass_kwh_per_k(), tau_h * ua_bld / 1000.0)
         c_bld = c_bld_kwh * j_per_kwh               # J/K
+        # #949 — tau-consistent loss: LP_W3_TAU_H > 0 sets UA = 1000*C/tau (C unchanged, the
+        # pinned get_building_ua_w_per_k() is untouched for other consumers). 0 = pinned UA.
+        from ..physics import effective_w3_tau_h, w3_ua_from_tau
+
+        w3_tau_cfg = effective_w3_tau_h()
+        w3_ua_source = "pin"
+        if w3_tau_cfg > 0.0:
+            ua_bld = w3_ua_from_tau(c_bld_kwh, w3_tau_cfg)
+            w3_ua_source = "tau"
+        logger.info(
+            "W3 RC: UA=%.1f W/K (tau_w3=%.1f h, C=%.3f kWh/K, source=%s)",
+            ua_bld, (w3_tau_cfg if w3_tau_cfg > 0.0 else 1000.0 * c_bld_kwh / max(ua_bld, 1e-9)),
+            c_bld_kwh, w3_ua_source,
+        )
         w3_night_floor = float(getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5))
         w3_day_sp = float(config.INDOOR_SETPOINT_C)
         w3_ns = int(getattr(config, "LP_W3_NIGHT_START_HOUR_LOCAL", 22))
@@ -1396,12 +1416,8 @@ def solve_lp(
                 prob += w3_d[i] == w3_emit_a * w3_h[i] + w3_emit_b * _thermal_space(i)
                 prob += w3_h[i + 1] == w3_h[i] + _thermal_space(i) - w3_d[i]
                 q_room_j = w3_d[i] * j_per_kwh
-            loss_bld_j = ua_bld * (t_in[i] - t_out[i]) * dt_s
-            if w3_g_int > 0 or w3_g_sol > 0:
-                gain_j = w3_gain_kw[i] * slot_h * j_per_kwh
-                prob += t_in[i + 1] == t_in[i] + (q_room_j - loss_bld_j + gain_j) / c_bld
-            else:
-                prob += t_in[i + 1] == t_in[i] + (q_room_j - loss_bld_j) / c_bld
+            _gain_j = (w3_gain_kw[i] * slot_h * j_per_kwh) if (w3_g_int > 0 or w3_g_sol > 0) else None
+            prob += t_in[i + 1] == w3_rc_step(t_in[i], t_out[i], q_room_j, _gain_j, ua_bld, c_bld, dt_s)
             # Soft comfort floor — slack-penalised, so the LP is NEVER Infeasible.
             prob += t_in[i + 1] + s_lo[i] >= _w3_floor(i)
             if w3_em_pen > 0:
@@ -2177,6 +2193,10 @@ def solve_lp(
         plan.daikin_state = daikin_state
         if w3:
             plan.w3_night_floor_c = w3_night_floor
+            plan.w3_ua_w_per_k = float(ua_bld)
+            plan.w3_tau_h = float(w3_tau_cfg) if w3_tau_cfg > 0.0 else 1000.0 * c_bld_kwh / max(float(ua_bld), 1e-9)
+            plan.w3_c_kwh_per_k = float(c_bld_kwh)
+            plan.w3_ua_source = w3_ua_source
             plan.w3_setpoint_c = w3_day_sp
             plan.w3_peak_coast_delta_c = w3_peak_delta
             plan.w3_ceiling_c = w3_ceiling

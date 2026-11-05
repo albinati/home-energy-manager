@@ -113,6 +113,33 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   (the better estimator). Kill
   switches: `LP_W3_TIN_ENABLED=false` (the model), `DAIKIN_LWT_SOURCE=tier`
   (the hardware path).
+- **tau-consistent UA (#949, `LP_W3_TAU_H`).** The pinned UA 200 W/K with C = 82.66 h x 200 = 16.53 kWh/K
+  implies tau 82.7 h, but the only clean measurement (unit-off holiday coast) is **tau = 53.6 h**, i.e.
+  UA ~ 308 W/K at the same C. With UA 200 the LP predicted the house flat/rising at `lwt_offset = -2`
+  (LWT 26-29 C, outdoor 8.5-10 C) while rooms fell 0.04-0.05 K/h, so it coasted all night and the house
+  sat at 20.5-20.7. `LP_W3_TAU_H` (runtime, comfort/LWT group, 0 = off = bit-for-bit, valid 20..150, a
+  non-zero value outside the range is ignored with one warning) sets the LOSS term only:
+  `UA_w3 = 1000 * C / tau_w3`; C and `get_building_ua_w_per_k()` (used by other consumers) are untouched.
+  Each solve logs `W3 RC: UA=.. W/K (tau_w3=.. h, C=.. kWh/K, source=pin|tau)`, stamps `plan.w3_ua_w_per_k /
+  w3_tau_h / w3_c_kwh_per_k` and persists them in `exogenous_snapshot['w3_rc']`. The RC step is ONE function
+  (`physics.w3_rc_step`) shared by the LP constraint and the offline `physics.w3_rc_replay`;
+  `physics.w3_q_th_kwh_for_offset` gives the thermal kWh of a slot at an executed offset (same chain as the
+  LP). Telemetry (shadow, no auto-apply): the daily `lwt_learning_daily` payload carries
+  `replay_drift_by_band` (offset bands <=-1 / 0..2 / 3..5 / >5: n slots, mean one-slot-ahead error, mean 8 h
+  integrated error at the pinned UA and at the tau-implied UA) and `tau_fit_h` (tau in 20..150 minimising the
+  coast-band replay error; with the knob at 0 it is scored in-sample, flagged by `replay_tau_ref_source:
+  "fit_in_sample"`, and the coast band cannot separate UA from an error in the modelled heat input at -1/-2).
+  The replay uses the CURVE COP at the measured outdoor temperature and applies the #863 lift penalty once,
+  at the executed offset (the logged `cop_space` is already lift-derated at the planned offset).
+  **Deploy:** set `LP_W3_TAU_H=55` (53.6 is acceptable; 55 is the fixture coast fit, lift residuals
+  -0.02 .. -0.19 K), then revert `INDOOR_SETPOINT_C` 21.5 -> 21.0. KEEP `LP_W3_MAX_SLACK_SLOTS` at 16 (or
+  >= 8) until a few cold nights are observed: at 5 C outdoor the LP's lift capacity (~1.2 kW_e at +5) cannot
+  hold 21 at UA ~308 and the gate rejects (`comfort_slack:5_slots>4` -> tier). Watch after deploy: the
+  `w3_gate.reason` fallback rate, `exogenous_snapshot.w3_rc`, measured indoor vs plan in lift windows
+  (overshoot above 21.2 = wasted energy) and `replay_drift_by_band`. Consequence: night offsets move from
+  about -2 to about +1..+2 and plan cost forecasts rise (plan objective +28-52 % in synthetic solves,
+  includes battery terms, indicative only). Known limit: the emitter-lag variant
+  (`LP_W3_EMITTER_TAU_MIN`) is not part of the replay.
 - Rollout: deploy with `tier` → read `lwt_source_diff` + `plan.indoor_temp_c`
   for a day (`lp_available=true`, boosts only in cheap bands, setbacks only in
   the peak, trajectory within 17–23 °C) → `PUT /api/v1/settings`

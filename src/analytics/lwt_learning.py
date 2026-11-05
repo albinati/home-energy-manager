@@ -948,7 +948,7 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
         "payload": {"c_kwh_per_k": c, "ua_est_night_w_per_k": ua_night,
                     # #843: the coast-only UA is C x decay rate with C = tau x UA_pin -> circular
                     "ua_from_tau_scaled_w_per_k": ua, "ua_from_tau_scaled_night_w_per_k": ua_night,
-                    "ua_est_circular": True, **joint, **_emitter_fit_for_day(day, tz),
+                    "ua_est_circular": True, **joint, **_emitter_fit_for_day(day, tz), **replay_telemetry(rows, c, ua_pin),
                     "n_coast_night_slots": n_coast_night, "n_k_buckets": n_k_buckets, "ua_pinned_w_per_k": ua_pin, "k_pinned_kw_per_c": k_pin,
                     "n_rows": len(rows),
                     "pred_resid": pred_resid_breakdown(rows, tz),
@@ -962,6 +962,150 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
     except Exception:
         logger.debug("lwt_learning_summary log failed", exc_info=True)
     return row
+
+
+# ── #949: W3 replay drift telemetry (shadow only; shares the LP's RC step) ───────────
+# Half-open [lo, hi) bands on the executed offset (offsets are whole K, so the cut points sit midway).
+REPLAY_BANDS: tuple[tuple[str, float, float], ...] = (
+    ("le_m1", float("-inf"), -0.5),   # <= -1
+    ("0_to_2", -0.5, 2.5),            # 0..+2
+    ("3_to_5", 2.5, 5.5),             # +3..+5
+    ("gt_5", 5.5, float("inf")),      # > +5
+)
+REPLAY_WINDOW_SLOTS = 16              # 8 h
+_TAU_FIT_GRID_H = tuple(float(x) for x in range(20, 151))
+
+
+def _replay_band(off: float) -> str:
+    for name, lo, hi in REPLAY_BANDS:
+        if lo <= off < hi:
+            return name
+    return "gt_5"
+
+
+def _replay_series(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows usable by the replay: measured indoor, executed offset, COP, in time order."""
+    out = []
+    for r in sorted(rows, key=lambda x: str(x.get("slot_time_utc"))):
+        t = _ts(r)
+        if t is None or r.get("indoor_real_c") is None or r.get("device_offset") is None:
+            continue
+        t_out = r.get("outdoor_real_c")
+        if t_out is None:
+            t_out = r.get("outdoor_fc_c")
+        if t_out is None:
+            continue
+        # CURVE COP at the measured outdoor temp. The logged ``cop_space`` is the LP's
+        # lift-derated COP at the PLANNED offset (an echo of LP output); w3_q_th_kwh_for_offset
+        # applies the lift penalty once, at the executed offset.
+        from ..config import cop_at_temperature
+
+        cop = max(1.0, cop_at_temperature(config.DAIKIN_COP_CURVE, float(t_out)))
+        out.append({"t": t, "ti": float(r["indoor_real_c"]), "to": float(t_out), "off": float(r["device_offset"]),
+                    "cop": float(cop), "g": float(r.get("gain_kw") or 0.0)})
+    return out
+
+
+def _replay_runs(ser: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    runs: list[list[dict[str, Any]]] = []
+    for e in ser:
+        if runs and (e["t"] - runs[-1][-1]["t"]) == timedelta(minutes=SLOT_MIN):
+            runs[-1].append(e)
+        else:
+            runs.append([e])
+    return runs
+
+
+def _replay_end(seg: list[dict[str, Any]], ua: float, c: float) -> float:
+    """Replay slots seg[0..-2] from seg[0]'s measured T; return the predicted T at seg[-1]."""
+    from ..physics import w3_q_th_kwh_for_offset, w3_rc_replay
+
+    body = seg[:-1]
+    q = [w3_q_th_kwh_for_offset(e["off"], e["to"], e["cop"]) for e in body]
+    return w3_rc_replay(seg[0]["ti"], [e["to"] for e in body], q, [e["g"] for e in body], ua, c)[-1]
+
+
+def _band_windows(ser: list[dict[str, Any]], band: str) -> list[list[dict[str, Any]]]:
+    """Non-overlapping segments (5..REPLAY_WINDOW_SLOTS+1 points) of consecutive slots whose
+    offsets all lie in ``band``."""
+    wins: list[list[dict[str, Any]]] = []
+    for run in _replay_runs(ser):
+        cur: list[dict[str, Any]] = []
+        for e in run:
+            if _replay_band(e["off"]) == band:
+                cur.append(e)
+                if len(cur) == REPLAY_WINDOW_SLOTS + 1:
+                    wins.append(cur)
+                    cur = []
+            else:
+                if len(cur) >= 5:
+                    wins.append(cur)
+                cur = []
+        if len(cur) >= 5:
+            wins.append(cur)
+    return wins
+
+
+def replay_drift_by_band(rows: list[dict[str, Any]], c_kwh: float, ua_pin: float,
+                         tau_w3_h: float | None) -> dict[str, Any]:
+    """Per offset band: n one-slot pairs, mean one-slot-ahead (measured - replay) K/slot and
+    the mean 8 h integrated (measured - replay) error K, at the pinned UA and at UA from tau_w3."""
+    ser = _replay_series(rows)
+    uas: dict[str, float] = {"ua_pin": float(ua_pin)}
+    if tau_w3_h and tau_w3_h > 0:
+        uas["ua_tau"] = 1000.0 * c_kwh / float(tau_w3_h)
+    res: dict[str, Any] = {}
+    for name, _lo, _hi in REPLAY_BANDS:
+        entry: dict[str, Any] = {}
+        pairs = [(a, b) for run in _replay_runs(ser) for a, b in zip(run, run[1:]) if _replay_band(a["off"]) == name]
+        wins = _band_windows(ser, name)
+        entry["n_slots"] = len(pairs)
+        entry["n_windows_8h"] = len(wins)
+        for tag, ua in uas.items():
+            one = [(b["ti"] - _replay_end([a, b], ua, c_kwh)) for a, b in pairs]
+            integ = [(w[-1]["ti"] - _replay_end(w, ua, c_kwh)) for w in wins]
+            entry[tag] = {
+                "mean_1slot_err_k": round(sum(one) / len(one), 4) if one else None,
+                "mean_8h_err_k": round(sum(integ) / len(integ), 3) if integ else None,
+            }
+        res[name] = entry
+    return res
+
+
+def fit_tau_replay(rows: list[dict[str, Any]], c_kwh: float) -> float | None:
+    """Shadow estimate: the tau in [20, 150] h that minimises the squared end error of the
+    replayed coast-band (offset <= -1) windows. None when there is no coast window.
+
+    Caveat: at -1/-2 the coast band cannot separate UA from an error in the MODELLED heat input
+    (device draw x COP at those offsets); a biased input shifts the fitted tau. Shadow only."""
+    wins = _band_windows(_replay_series(rows), "le_m1")
+    if not wins:
+        return None
+    best: tuple[float, float] | None = None
+    for tau in _TAU_FIT_GRID_H:
+        ua = 1000.0 * c_kwh / tau
+        sse = sum((w[-1]["ti"] - _replay_end(w, ua, c_kwh)) ** 2 for w in wins)
+        if best is None or sse < best[0]:
+            best = (sse, tau)
+    return best[1] if best else None
+
+
+def replay_telemetry(rows: list[dict[str, Any]], c_kwh: float, ua_pin: float) -> dict[str, Any]:
+    """Payload fragment for ``run_for_day`` (never raises)."""
+    try:
+        from ..physics import effective_w3_tau_h
+
+        tau_cfg = effective_w3_tau_h()
+        tau_fit = fit_tau_replay(rows, c_kwh)
+        tau_ref = tau_cfg if tau_cfg > 0 else tau_fit
+        return {"replay_drift_by_band": replay_drift_by_band(rows, c_kwh, ua_pin, tau_ref),
+                "replay_tau_ref_h": tau_ref, "tau_fit_h": tau_fit,
+                # "fit_in_sample": tau_ref was fitted on the same coast windows it is scored on, so
+                # ua_tau.mean_8h_err_k in the coast band is minimised by construction.
+                "replay_tau_ref_source": "config" if tau_cfg > 0 else "fit_in_sample"}
+    except Exception:
+        logger.debug("replay telemetry failed", exc_info=True)
+        return {}
 
 
 # ── #866: report-only emitter / water-loop lag estimate ───────────────────────────────
