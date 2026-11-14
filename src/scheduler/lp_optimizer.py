@@ -192,6 +192,10 @@ class LpPlan:
     """#863 — per-slot lift segment widths (kWh) and marginal COPs; empty lists when off."""
     """#863 — per-slot effective space COP = thermal / electric (cop_space when e_space ~ 0), len N."""
     w3_emergency_floor_c: float | None = None
+    w3_min_offset_c: float | None = None
+    """#951 — the deepest LWT offset the dispatcher can write for this plan
+    (``max(OPTIMIZATION_LWT_OFFSET_MIN, DAIKIN_LWT_LP_OFFSET_MIN)`` at solve time); the
+    plausibility gate must not count ceiling slack in slots already at it."""
     w3_space_floor_kwh: list[float] = field(default_factory=list)
     """#921 — per-slot W3 space-heating floor (kWh electric) the solve was constrained with;
     empty when ``LP_W3_SPACE_FLOOR_ENABLED`` is off or W3 inactive."""
@@ -2202,6 +2206,9 @@ def solve_lp(
             plan.w3_ceiling_c = w3_ceiling
             plan.w3_internal_gain_kw = w3_g_int
             plan.w3_emergency_floor_c = w3_em_floor
+            plan.w3_min_offset_c = min(0.0, max(
+                float(config.OPTIMIZATION_LWT_OFFSET_MIN),
+                float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))  # #951
             if w3_sf_on:
                 plan.w3_space_floor_kwh = [float(x) for x in w3_sf_floor]
             plan.w3_solar_gain_kw_per_pv_kw = w3_g_sol

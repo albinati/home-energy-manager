@@ -665,6 +665,13 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     # is unavoidable after a cold start and says nothing about an unfitted model.
     tau_min = float(getattr(plan, "w3_emitter_tau_min", 0.0) or 0.0)
     lag_skip = (math.ceil(tau_min / 30.0) + 1) if tau_min > 0 else 0
+    # #951: the offset the plan was SOLVED with as its floor (live config only for older
+    # plans). The device gets ``floor(raw + 0.5)``, so a slot whose raw offset rounds to the
+    # minimum (raw < min + 0.5) is written AT the minimum: the pump cannot heat less there.
+    min_off = float(plan.w3_min_offset_c if getattr(plan, "w3_min_offset_c", None) is not None
+                    else min(0.0, max(float(config.OPTIMIZATION_LWT_OFFSET_MIN),
+                                      float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5)))))
+    offs = plan.lwt_offset_c
     n_slack = 0
     for i in range(max(len(slack), len(slack_hi))):
         lo_bad = i >= lag_skip and i < len(slack) and float(slack[i]) > s_tol
@@ -674,6 +681,9 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
         hi_bad = (
             i < len(slack_hi) and float(slack_hi[i]) > strict_tol
             and i < len(heat) and float(heat[i]) > 1e-6
+            # #951: at the minimum offset the weather curve + space floor still draw power,
+            # but the plan cannot heat less — unavoidable overshoot, not a veto.
+            and i < len(offs) and float(offs[i]) >= min_off + 0.5
         )
         if lo_bad or hi_bad:
             n_slack += 1
