@@ -10,7 +10,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from src import db
-
 from src.config import config
 from src.scheduler.lp_dispatch import (
     _lp_offsets,
@@ -39,7 +38,7 @@ def _env(monkeypatch):
     monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")
 
 
-def _plan(offs, hi, min_off=-2.0, traj=None, start=None):
+def _plan(offs, hi, min_off=-2.0, traj=None, start=None, tau=0.0):
     t0 = start or datetime(2026, 11, 14, tzinfo=UTC)
     p = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
                slot_starts_utc=[t0 + timedelta(minutes=30 * i) for i in range(N)],
@@ -57,6 +56,7 @@ def _plan(offs, hi, min_off=-2.0, traj=None, start=None):
     p.w3_night_floor_c = 20.0
     p.w3_ceiling_c = 21.0
     p.w3_min_offset_c = min_off
+    p.w3_emitter_tau_min = tau
     return p
 
 
@@ -108,22 +108,37 @@ def test_plan_recorded_minimum_wins_over_live_config(monkeypatch):
     assert not ok
 
 
-def test_bank_then_coast_is_vetoed():
-    # reviewer probe: +3 for 3 slots then min offset, 21.0 -> 22.2 -> 21.3. With the emitter lag
-    # the indoor keeps rising through slots 3-5 (min offset): those count, 3 + 3 = 6 > 4.
+def test_bank_then_coast_is_vetoed_with_emitter_lag():
+    # reviewer probe, now with an emitter lag (tau=60 -> lag_skip 3; with tau=0 a rise at the
+    # minimum offset is gains, not banked heat, and is exempt by design): +3 for 3 slots then
+    # min offset, indoor keeps rising through slots 3-5 and then falls: 3 + 3 = 6 > 4.
     traj = [21.0 + 0.2 * i for i in range(7)] + [22.2 - 0.18 * k for k in range(1, 6)]
-    plan = _plan([3.0] * 3 + [-2.0] * 9, [0.6] * N, traj=traj)
+    plan = _plan([3.0] * 3 + [-2.0] * 9, [0.6] * N, traj=traj, tau=60.0)
     ok, reason = w3_trajectory_plausible(plan)
     assert not ok and reason == "comfort_slack:6_slots>4"
 
 
 def test_lagged_heat_rising_min_offset_slots_are_vetoed():
-    # heating slots below the ceiling (no slack), then rising min-offset slots above it
+    # heating slots below the ceiling (no slack), then rising min-offset slots above it,
+    # within lag_skip (tau=120 -> 5) of the above-min heating: slots 3-7 count
     hi = [0.0] * 3 + [0.6] * 9
     traj = [20.0, 20.4, 20.8, 21.2] + [21.2 + 0.3 * k for k in range(1, 10)]
-    plan = _plan([3.0] * 3 + [-2.0] * 9, hi, traj=traj)
+    plan = _plan([3.0] * 3 + [-2.0] * 9, hi, traj=traj, tau=120.0)
     ok, reason = w3_trajectory_plausible(plan)
-    assert not ok and reason == "comfort_slack:9_slots>4"
+    assert not ok and reason == "comfort_slack:5_slots>4"
+
+
+def test_rising_at_min_offset_without_lookback_heating_passes_with_lag():
+    traj = [21.0 + 0.1 * i for i in range(N + 1)]
+    plan = _plan([-2.0] * N, [0.6] * N, traj=traj, tau=60.0)
+    assert w3_trajectory_plausible(plan) == (True, "ok")
+
+
+def test_gains_raise_indoor_at_min_offset_without_lag_passes():
+    # prod default LP_W3_EMITTER_TAU_MIN=0: solar/internal gains lift the indoor at -2 in every slot
+    traj = [21.05 + 0.1 * i for i in range(N + 1)]
+    plan = _plan([-2.0] * N, [0.6] * N, traj=traj, tau=0.0)
+    assert w3_trajectory_plausible(plan) == (True, "ok")
 
 
 def test_falling_trajectory_at_min_offset_still_passes():

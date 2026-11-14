@@ -671,11 +671,21 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     min_off = float(plan.w3_min_offset_c if getattr(plan, "w3_min_offset_c", None) is not None
                     else lp_offset_min_int())
     offs = plan.lwt_offset_c
-    def _rising(i: int) -> bool:
-        # s_hi[i] = t_in[i+1] - ceiling, so slot i's change is traj[i+1] - traj[i]
-        return i + 1 < len(traj) and float(traj[i + 1]) > float(traj[i]) + rise_eps
-
     rise_eps = 0.05  # °C; below this the predicted indoor counts as "not rising"
+
+    def _lagged_heat(i: int) -> bool:
+        # #951: with an emitter lag, heat the LP chose ABOVE the minimum offset in the previous
+        # ``lag_skip`` slots lands here, so a still-rising min-offset slot is banked heat. With
+        # no lag t_in[i+1] depends on slot i alone: a rise at the minimum offset is gains plus
+        # the minimum draw, nothing the LP can lower. s_hi[i] = t_in[i+1] - ceiling.
+        if lag_skip <= 0 or i + 1 >= len(traj) or float(traj[i + 1]) <= float(traj[i]) + rise_eps:
+            return False
+        return any(
+            j < len(heat) and float(heat[j]) > 1e-6
+            and j < len(offs) and float(offs[j]) >= min_off + 0.5
+            for j in range(max(0, i - lag_skip), i)
+        )
+
     n_slack = 0
     for i in range(max(len(slack), len(slack_hi))):
         lo_bad = i >= lag_skip and i < len(slack) and float(slack[i]) > s_tol
@@ -687,10 +697,10 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
             and i < len(heat) and float(heat[i]) > 1e-6
             # #951: at the minimum offset the weather curve + space floor still draw power,
             # but the plan cannot heat less — unavoidable overshoot, not a veto — UNLESS the
-            # predicted indoor is still rising there (heat banked earlier, e.g. through an
-            # emitter lag, landing above the ceiling: that is overheating on purpose).
+            # predicted indoor is still rising from heat the LP banked earlier through an
+            # emitter lag (see _lagged_heat): that is overheating on purpose.
             and i < len(offs)
-            and (float(offs[i]) >= min_off + 0.5 or _rising(i))
+            and (float(offs[i]) >= min_off + 0.5 or _lagged_heat(i))
         )
         if lo_bad or hi_bad:
             n_slack += 1
