@@ -75,7 +75,8 @@ def test_writer_enriches_context():
     assert row["band"] == "peak"
     assert row["lwt_offset_c"] == -2.0
     assert row["lwt_source"] == "lp"
-    assert len(db.get_comfort_feedback(30)) == 1
+    # explicit window anchored on NOW: the default window counts back from the real clock
+    assert len(db.get_comfort_feedback(since_utc=_z(NOW - timedelta(days=30)))) == 1
 
 
 def test_writer_rejects_bad_input():
