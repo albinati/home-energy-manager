@@ -15,7 +15,7 @@ from ..config import config
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import SchedulerGroup
 from ..weather import HourlyForecast, get_forecast_for_slot
-from .lp_optimizer import LpPlan
+from .lp_optimizer import LpPlan, lp_offset_min_int
 from .optimizer import (
     TZ,
     HalfHourSlot,
@@ -665,6 +665,27 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     # is unavoidable after a cold start and says nothing about an unfitted model.
     tau_min = float(getattr(plan, "w3_emitter_tau_min", 0.0) or 0.0)
     lag_skip = (math.ceil(tau_min / 30.0) + 1) if tau_min > 0 else 0
+    # #951: the offset the plan was SOLVED with as its floor (live config only for older
+    # plans). The device gets ``floor(raw + 0.5)``, so a slot whose raw offset rounds to the
+    # minimum (raw < min + 0.5) is written AT the minimum: the pump cannot heat less there.
+    min_off = float(plan.w3_min_offset_c if getattr(plan, "w3_min_offset_c", None) is not None
+                    else lp_offset_min_int())
+    offs = plan.lwt_offset_c
+    rise_eps = 0.05  # °C; below this the predicted indoor counts as "not rising"
+
+    def _lagged_heat(i: int) -> bool:
+        # #951: with an emitter lag, heat the LP chose ABOVE the minimum offset in the previous
+        # ``lag_skip`` slots lands here, so a still-rising min-offset slot is banked heat. With
+        # no lag t_in[i+1] depends on slot i alone: a rise at the minimum offset is gains plus
+        # the minimum draw, nothing the LP can lower. s_hi[i] = t_in[i+1] - ceiling.
+        if lag_skip <= 0 or i + 1 >= len(traj) or float(traj[i + 1]) <= float(traj[i]) + rise_eps:
+            return False
+        return any(
+            j < len(heat) and float(heat[j]) > 1e-6
+            and j < len(offs) and float(offs[j]) >= min_off + 0.5
+            for j in range(max(0, i - lag_skip), i)
+        )
+
     n_slack = 0
     for i in range(max(len(slack), len(slack_hi))):
         lo_bad = i >= lag_skip and i < len(slack) and float(slack[i]) > s_tol
@@ -674,6 +695,12 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
         hi_bad = (
             i < len(slack_hi) and float(slack_hi[i]) > strict_tol
             and i < len(heat) and float(heat[i]) > 1e-6
+            # #951: at the minimum offset the weather curve + space floor still draw power,
+            # but the plan cannot heat less — unavoidable overshoot, not a veto — UNLESS the
+            # predicted indoor is still rising from heat the LP banked earlier through an
+            # emitter lag (see _lagged_heat): that is overheating on purpose.
+            and i < len(offs)
+            and (float(offs[i]) >= min_off + 0.5 or _lagged_heat(i))
         )
         if lo_bad or hi_bad:
             n_slack += 1
@@ -849,7 +876,7 @@ def _lp_offsets(
     from ..physics import get_lwt_base_c
     from .lwt_coast import active_hold_until, active_warm_hold_until, comfort_floor_c, slot_in_hold
 
-    lo = int(max(float(config.OPTIMIZATION_LWT_OFFSET_MIN), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
+    lo = lp_offset_min_int()  # #951: shared with the gate
     hi = int(min(float(config.OPTIMIZATION_LWT_OFFSET_MAX), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5))))
     setback = int(config.DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C)
     cmode = (coast_mode or _coast_mode())
