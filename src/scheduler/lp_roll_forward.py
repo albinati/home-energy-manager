@@ -29,6 +29,10 @@ from dataclasses import dataclass
 
 MAX_POWER_AGE_S = 300.0  # battery power older than 5 min is not trusted
 MAX_ROLL_S = 45 * 60.0  # never extrapolate more than 45 min
+# #954: measured battery power below this fraction of the in-force group's fdPwr counts as
+# "not charging yet" inside the start-lag window (prod idle reads exactly 0.0; real charge
+# under a 5 kW group reads ~4.9 kW; 10 % = 0.5 kW leaves room for a partial ramp).
+START_LAG_IDLE_FRACTION = 0.1
 # A rise of at least this many deg C between the two latest live tank samples
 # marks an active reheat (standing loss is ~0.01 C/min; sensor step is 0.5-1 C).
 REHEAT_MIN_RISE_C = 0.4
@@ -164,6 +168,11 @@ class InForce:
     (a ForceCharge stops at fdSoc, a ForceDischarge at its floor)."""
     mode: str  # "ForceCharge" | "ForceDischarge"
     target_soc_pct: float | None
+    # #954 (filled by find_inforce_group): seconds since the group started, seconds
+    # until it ends (both relative to the reading), and its fdPwr in kW.
+    since_start_s: float | None = None
+    until_end_s: float | None = None
+    power_kw: float | None = None
 
 
 def _group_minutes(g) -> tuple[int, int, int]:
@@ -181,6 +190,7 @@ def find_inforce_group(groups, reading_t, tz) -> InForce | None:
     """Force* group covering ``reading_t`` (local clock), or None."""
     loc = reading_t.astimezone(tz)
     m = loc.hour * 60 + loc.minute
+    sod = m * 60 + loc.second  # seconds since local midnight
     for g in groups or []:
         try:
             mode = str(g.get("workMode") or "")
@@ -190,8 +200,18 @@ def find_inforce_group(groups, reading_t, tz) -> InForce | None:
             covered = (gs <= m < ge_excl) if gs < ge_excl else (m >= gs or m < ge_excl)
             if not covered:
                 continue
-            fd = (g.get("extraParam") or {}).get("fdSoc")
-            return InForce(mode, float(fd) if fd is not None else None)
+            extra = g.get("extraParam") or {}
+            fd = extra.get("fdSoc")
+            since = (sod - gs * 60) % 86400
+            until = ge_excl * 60 - sod
+            if until <= 0:
+                until += 86400
+            pwr = float(extra.get("fdPwr") or 0.0) / 1000.0
+            return InForce(
+                mode, float(fd) if fd is not None else None,
+                since_start_s=float(since), until_end_s=float(until),
+                power_kw=pwr if pwr > 0 else None,
+            )
         except (KeyError, TypeError, ValueError):
             continue
     return None
@@ -245,8 +265,17 @@ def roll_soc_with_onset(
     max_power_kw: float,
     inforce: InForce | None = None,
     max_power_age_s: float = MAX_POWER_AGE_S,
+    start_lag_s: float = 0.0,
 ) -> SocRoll:
     """:func:`roll_soc_forward` plus the schedule.
+
+    * ``start_lag_s`` (#954, 0 = off): the Fox H1 needs ~3-6 min to start (and report)
+      charging after a ForceCharge group begins. If the in-force ForceCharge group
+      started <= ``start_lag_s`` before the reading, measured power is ~0 (below
+      ``START_LAG_IDLE_FRACTION`` of its fdPwr) and SoC is below its fdSoc, the group is
+      treated as charging from the reading at its fdPwr (capped by the inverter limit),
+      bounded by fdSoc and by the group end. Past the window a zero reading is trusted.
+      ForceDischarge is deliberately not covered.
 
     * ``inforce`` (M3): the measured-power roll is bounded by the fdSoc of the group in
       force now (ForceCharge: ceiling, never below the current SoC; ForceDischarge: floor).
@@ -280,8 +309,26 @@ def roll_soc_with_onset(
 
     t1 = gap if onset is None else max(0.0, min(onset.offset_s, gap))
     s1 = _clamp(soc_kwh + p * t1 / 3600.0)
+    lag_applied = False
     if inforce is not None:
         s1 = _bound(s1, soc_kwh, p, inforce.target_soc_pct, inforce.mode)
+        lag_pwr = None if inforce.power_kw is None else min(inforce.power_kw, max_power_kw)
+        if (
+            start_lag_s > 0
+            and inforce.mode == "ForceCharge"
+            and lag_pwr is not None
+            and inforce.since_start_s is not None
+            and inforce.until_end_s is not None
+            and 0 <= inforce.since_start_s <= start_lag_s
+            and inforce.target_soc_pct is not None
+            and soc_kwh < capacity_kwh * inforce.target_soc_pct / 100.0
+            and p < START_LAG_IDLE_FRACTION * lag_pwr
+        ):
+            t_lag = max(0.0, min(inforce.until_end_s, t1))
+            s_lag = _bound(soc_kwh + lag_pwr * t_lag / 3600.0, soc_kwh, lag_pwr,
+                           inforce.target_soc_pct, "ForceCharge")
+            s1 = _clamp(s_lag + p * (t1 - t_lag) / 3600.0)
+            lag_applied = True
     reason = "ok"
     s = s1
     if onset is not None and gap > t1:
@@ -292,6 +339,8 @@ def roll_soc_with_onset(
             s2 = min(s2, s1)
         s = _clamp(s2)
         reason = "ok+schedule_onset"
-    if inforce is not None and reason == "ok":
+    if lag_applied:
+        reason = "ok+inforce_start_lag" + ("+schedule_onset" if reason != "ok" else "")
+    elif inforce is not None and reason == "ok":
         reason = "ok+inforce_bound" if s != _clamp(soc_kwh + p * t1 / 3600.0) else "ok"
     return SocRoll(s, s - soc_kwh, True, reason)

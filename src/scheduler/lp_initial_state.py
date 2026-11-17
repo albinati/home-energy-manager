@@ -231,6 +231,7 @@ def _roll_soc(soc_kwh: float, rt: Any, now: datetime, slot0_utc: datetime) -> tu
         reserve_kwh=cap * float(config.MIN_SOC_RESERVE_PERCENT) / 100.0,
         max_power_kw=float(config.MAX_INVERTER_KW),
         inforce=inforce,
+        start_lag_s=float(getattr(config, "LP_SOC_ROLL_START_LAG_S", 0.0) or 0.0),
     )
     info = {
         "applied": res.applied, "reason": res.reason,
@@ -243,6 +244,12 @@ def _roll_soc(soc_kwh: float, rt: Any, now: datetime, slot0_utc: datetime) -> tu
             "target_soc_pct": onset.target_soc_pct,
         },
     }
+    if inforce is not None and res.reason.startswith("ok+inforce_start_lag"):
+        info["inforce_start_lag"] = {  # #954 audit fields
+            "since_start_s": inforce.since_start_s, "until_end_s": inforce.until_end_s,
+            "group_power_kw": inforce.power_kw, "target_soc_pct": inforce.target_soc_pct,
+            "lag_window_s": float(config.LP_SOC_ROLL_START_LAG_S),
+        }
     return res.soc_kwh, info
 
 
