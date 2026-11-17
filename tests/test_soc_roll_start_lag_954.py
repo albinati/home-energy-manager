@@ -62,18 +62,36 @@ def test_outside_lag_window_zero_reading_is_trusted():
 
 
 def test_soc_already_at_or_above_fdsoc_unchanged():
+    # Discharging reading (p < 0) would trigger the lag path if SoC were below fdSoc.
+    # SoC 4.0 >= fdSoc 30 % (3.0): legacy measured roll, 4.0 - 1.2 * 1620/3600 = 3.46.
     g = [_fc(22, 0, 22, 29, fd=30)]
-    assert _roll(g, T, S0, soc=3.0).soc_kwh == 3.0
-    assert _roll(g, T, S0, soc=4.0).soc_kwh == 4.0
+    r = _roll(g, T, S0, soc=4.0, power=-1.2)
+    assert r.soc_kwh == pytest.approx(3.46) and r.reason == "ok"
+    # same reading with SoC below fdSoc (2.0 < 3.0) takes the lag path: 2.0 + 2.25 -> bound 3.0
+    r = _roll(g, T, S0, soc=2.0, power=-1.2)
+    assert r.soc_kwh == pytest.approx(3.0) and r.reason == "ok+inforce_start_lag"
 
 
-def test_real_measured_charge_power_keeps_legacy_behaviour():
-    # 4.9 kW measured for 1620 s = 2.205 kWh (not the group's 5 kW)
-    r = _roll(G, T, S0, soc=1.0, power=4.9)
-    assert r.soc_kwh == pytest.approx(1.0 + 4.9 * 1620 / 3600)
-    assert r.reason != "ok+inforce_start_lag"
-    # 0.4 kW is still below the 10 % idle fraction (0.5 kW) -> lag path; 0.6 kW is not
-    assert _roll(G, T, S0, soc=1.0, power=0.6).soc_kwh == pytest.approx(1.0 + 0.6 * 1620 / 3600)
+@pytest.mark.parametrize("power", [0.0, 0.51, 1.5, 3.0, 4.4, -1.2])
+def test_ramp_below_90pct_rolls_at_group_power(power):
+    # fdPwr 5 kW -> cut-off 4.5 kW. 1620 s at 5 kW = +2.25 kWh whatever p is below it.
+    r = _roll(G, T, S0, soc=1.0, power=power)
+    assert r.soc_kwh == pytest.approx(3.25) and r.reason == "ok+inforce_start_lag"
+
+
+def test_at_or_above_90pct_uses_measured_power():
+    # 4.5 kW and 4.9 kW: measured path, 1.0 + p * 0.45
+    for power, exp in ((4.5, 3.025), (4.9, 3.205)):
+        r = _roll(G, T, S0, soc=1.0, power=power)
+        assert r.soc_kwh == pytest.approx(exp) and r.reason == "ok"
+
+
+def test_just_outside_window_measured_power_is_used():
+    g = [_fc(21, 40, 22, 29, fd=90)]                   # started 1380 s before T (> 600)
+    r = _roll(g, T, S0, soc=1.0, power=1.5)
+    assert r.soc_kwh == pytest.approx(1.0 + 1.5 * 0.45) and r.reason == "ok"
+    g = [_fc(21, 53, 22, 29, fd=90)]                   # exactly 600 s before the reading: inside
+    assert _roll(g, T, S0, soc=1.0, power=1.5).reason == "ok+inforce_start_lag"
 
 
 def test_knob_zero_is_legacy():
@@ -137,6 +155,7 @@ def wire(monkeypatch):
 
 
 def test_wire_prod_2026_11_16_2203(wire):
+    # Prod data: the 21:55:47 upload was 22:00-22:30 fdSoc 27, 22:30-23:59 fdSoc 77.
     wire([_fc(22, 0, 22, 29, fd=27), _fc(22, 30, 23, 59, fd=77)], 11.1)
     now = datetime(2026, 11, 16, 22, 3, 19, tzinfo=UTC)
     soc, info = lp_initial_state._roll_soc(

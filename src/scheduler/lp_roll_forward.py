@@ -29,10 +29,12 @@ from dataclasses import dataclass
 
 MAX_POWER_AGE_S = 300.0  # battery power older than 5 min is not trusted
 MAX_ROLL_S = 45 * 60.0  # never extrapolate more than 45 min
-# #954: measured battery power below this fraction of the in-force group's fdPwr counts as
-# "not charging yet" inside the start-lag window (prod idle reads exactly 0.0; real charge
-# under a 5 kW group reads ~4.9 kW; 10 % = 0.5 kW leaves room for a partial ramp).
-START_LAG_IDLE_FRACTION = 0.1
+# #954: inside the start-lag window, a measured battery power below this fraction of the
+# in-force group's fdPwr (incl. negative = still discharging) means "ramp not done yet":
+# the roll uses the group's power, max(p, fdPwr). Reviewer measurement: any lower cut-off
+# leaves a cliff (p=0.51 kW fell back to a stale-low SoC). At or above it, measured power
+# is used (legacy path). Real steady charge under a 5 kW group reads ~4.9 kW.
+START_LAG_RAMP_FRACTION = 0.9
 # A rise of at least this many deg C between the two latest live tank samples
 # marks an active reheat (standing loss is ~0.01 C/min; sensor step is 0.5-1 C).
 REHEAT_MIN_RISE_C = 0.4
@@ -271,8 +273,8 @@ def roll_soc_with_onset(
 
     * ``start_lag_s`` (#954, 0 = off): the Fox H1 needs ~3-6 min to start (and report)
       charging after a ForceCharge group begins. If the in-force ForceCharge group
-      started <= ``start_lag_s`` before the reading, measured power is ~0 (below
-      ``START_LAG_IDLE_FRACTION`` of its fdPwr) and SoC is below its fdSoc, the group is
+      started <= ``start_lag_s`` before the reading, measured power is below
+      ``START_LAG_RAMP_FRACTION`` of its fdPwr (ramp not finished) and SoC is below its fdSoc, the group is
       treated as charging from the reading at its fdPwr (capped by the inverter limit),
       bounded by fdSoc and by the group end. Past the window a zero reading is trusted.
       ForceDischarge is deliberately not covered.
@@ -322,10 +324,10 @@ def roll_soc_with_onset(
             and 0 <= inforce.since_start_s <= start_lag_s
             and inforce.target_soc_pct is not None
             and soc_kwh < capacity_kwh * inforce.target_soc_pct / 100.0
-            and p < START_LAG_IDLE_FRACTION * lag_pwr
+            and p < START_LAG_RAMP_FRACTION * lag_pwr
         ):
             t_lag = max(0.0, min(inforce.until_end_s, t1))
-            s_lag = _bound(soc_kwh + lag_pwr * t_lag / 3600.0, soc_kwh, lag_pwr,
+            s_lag = _bound(soc_kwh + max(p, lag_pwr) * t_lag / 3600.0, soc_kwh, lag_pwr,
                            inforce.target_soc_pct, "ForceCharge")
             s1 = _clamp(s_lag + p * (t1 - t_lag) / 3600.0)
             lag_applied = True
