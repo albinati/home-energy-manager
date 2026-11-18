@@ -1268,6 +1268,12 @@ class Config:
     LP_FC_MERGE_HOLD_FDSOC_MAX: float = float(
         os.getenv("LP_FC_MERGE_HOLD_FDSOC_MAX", "35.0")
     )
+    # #954 — the Fox H1 takes ~3-6 min to start charging after a ForceCharge group
+    # begins, so a zero battery-power reading inside that window does not mean
+    # "will not charge". The SoC roll-forward then rolls at the group's fdPwr
+    # (bounded by its fdSoc) when the group started at most this many seconds
+    # before the reading. 0 = off (legacy: a zero reading is always trusted).
+    LP_SOC_ROLL_START_LAG_S: float = float(os.getenv("LP_SOC_ROLL_START_LAG_S", "600"))
     # #477 Stage 2 — when true, the scenario LP perturbs base load per-slot by
     # the LEARNED p75 spread (median ± (p75−median)) from residual_load_profile_v2
     # instead of the flat factors above. Sharper protection where the variance is
