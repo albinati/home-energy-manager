@@ -194,9 +194,10 @@ def test_cooking_omitted_without_data_or_on_dynamic(monkeypatch):
 
 
 # ------------------------------------------------------------------ dinner
-def _scorecards(bad_dow: int | None, n_days: int = 28, under: bool = True):
+def _scorecards(bad_dow: int | None, n_days: int = 28, under: bool = True, end: date | None = None):
+    end = end or TODAY
     for k in range(1, n_days + 1):
-        d = TODAY - timedelta(days=k)
+        d = end - timedelta(days=k)
         bad = bad_dow is not None and d.weekday() == bad_dow
         db.upsert_cosy_scorecard({
             "date": d.isoformat(), "score": "ideal", "peak_import_kwh": 0.8 if bad else 0.0,
@@ -206,8 +207,13 @@ def _scorecards(bad_dow: int | None, n_days: int = 28, under: bool = True):
 
 
 def test_dinner_problem_weekday_priced_against_the_day_band():
-    _scorecards(bad_dow=1)
-    it = rec.dinner_item(TODAY, LON)
+    # Anchor on the latest Wednesday: dinner_item keeps days with (end - date) < 28, so the number
+    # of Tuesdays in that window is 4 only when `end` is not itself a Tuesday (3 on a Tuesday).
+    # Anchoring on TODAY made the count depend on the real weekday.
+    end = TODAY - timedelta(days=(TODAY.weekday() - 2) % 7)
+    assert end.weekday() == 2
+    _scorecards(bad_dow=1, end=end)
+    it = rec.dinner_item(end, LON)
     assert it is not None and it["kind"] == "suggestion" and it["who"] == "Jantar"
     assert "a terça é o problema" in it["headline"]
     # dinner after 19:00 lands in the DAY band, not the cheap one
